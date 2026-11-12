@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="60mm" viewBox="0 0 80 60">
+  <!-- Sample artwork for testing the digitiser: a ring with a counter (so
+       holes get exercised), a solid blob, and a thin bar that suits satin. -->
+  <path d="M25 30 m -16 0 a 16 16 0 1 0 32 0 a 16 16 0 1 0 -32 0 Z
+           M25 30 m -7 0 a 7 7 0 1 1 14 0 a 7 7 0 1 1 -14 0 Z" fill="#c0392b" fill-rule="evenodd"/>
+  <path d="M50 14 L72 14 L72 24 L50 24 Z" fill="#1f6feb"/>
+  <path d="M50 32 C58 28, 66 36, 74 32 L74 44 C66 48, 58 40, 50 44 Z" fill="#16a34a"/>
+</svg>

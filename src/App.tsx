@@ -1,0 +1,647 @@
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { centerPlan } from './digitize'
+import { readDst, writeDst } from './dst'
+import { toRegions } from './geometry'
+import {
+  HOOPS,
+  SPACINGS,
+  bounds,
+  emptyDoc,
+  hoopsForSpacing,
+  newObject,
+  type Doc,
+  type EmbObject,
+  type Pt,
+  type Spacing,
+  type StitchType,
+} from './model'
+import {
+  DEFAULT_MACHINE,
+  packageStats,
+  placementTemplateSvg,
+  runSheetHtml,
+  writeCol,
+  writeEdr,
+  type MachineProfile,
+} from './package'
+import { FILE_EXT, ProjectError, deserialize, projectFilename, serialize } from './project'
+import { fitView, render, screenToWorld, type RenderOptions, type View } from './render'
+import { countStitches, longestStitch, planBounds, type StitchPlan } from './stitches'
+import { useStitchPlan } from './useStitchPlan'
+import { parseSvgToPaths } from './vector'
+
+// Thread colours for freshly imported shapes — spaced around the wheel so
+// adjacent objects are told apart at a glance before the user sets real ones.
+const PALETTE = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#1f2d3d']
+
+/** Where in-progress work is parked so a reload does not lose it. */
+const AUTOSAVE_KEY = 'gleembroidery.autosave.v1'
+
+const TYPES: { id: StitchType; label: string; hint: string; icon: ReactElement }[] = [
+  {
+    id: 'run', label: 'Run', hint: 'Single running stitch along the path',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16"><path d="M1 8h20" stroke="currentColor" strokeWidth="1.5" strokeDasharray="3 2" fill="none" /></svg>
+    ),
+  },
+  {
+    id: 'bean', label: 'Bean', hint: 'Triple-pass run — a bold outline',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16"><path d="M1 8h20" stroke="currentColor" strokeWidth="3" fill="none" /></svg>
+    ),
+  },
+  {
+    id: 'satin', label: 'Satin', hint: 'Zigzag column centred on the path',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16"><path d="M1 13L4 3L7 13L10 3L13 13L16 3L19 13L21 6" stroke="currentColor" strokeWidth="1.3" fill="none" /></svg>
+    ),
+  },
+  {
+    id: 'fill', label: 'Fill', hint: 'Tatami fill of the enclosed area',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <rect x="1.5" y="2.5" width="19" height="11" stroke="currentColor" strokeWidth="1" fill="none" />
+        {[4, 6, 8, 10, 12].map((y) => <path key={y} d={`M2 ${y}h18`} stroke="currentColor" strokeWidth="0.8" opacity="0.7" />)}
+      </svg>
+    ),
+  },
+  {
+    id: 'none', label: 'Off', hint: 'Construction only — stitches nothing',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16"><path d="M4 4l14 8M18 4L4 12" stroke="currentColor" strokeWidth="1.3" fill="none" /></svg>
+    ),
+  },
+]
+
+function Num({ label, value, step = 0.1, min, max, onChange }: {
+  label: string; value: number; step?: number; min?: number; max?: number; onChange: (v: number) => void
+}) {
+  return (
+    <div className="row">
+      <label>{label}</label>
+      <input
+        type="number" value={value} step={step} min={min} max={max}
+        onChange={(e) => {
+          const v = parseFloat(e.target.value)
+          if (!Number.isNaN(v)) onChange(v)
+        }}
+      />
+    </div>
+  )
+}
+
+function Text({ label, value, placeholder, onChange }: {
+  label: string; value: string; placeholder?: string; onChange: (v: string) => void
+}) {
+  return (
+    <div className="row">
+      <label>{label}</label>
+      <input type="text" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+    </div>
+  )
+}
+
+export default function App() {
+  const [doc, setDoc] = useState<Doc>(emptyDoc)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [view, setView] = useState<View>({ scale: 3, cx: 0, cy: 0 })
+  const [reference, setReference] = useState<StitchPlan | null>(null)
+  const [sim, setSim] = useState<number | null>(null)
+  const [machine, setMachine] = useState<MachineProfile>(DEFAULT_MACHINE)
+  const [note, setNote] = useState<string | null>(null)
+  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference'>>({
+    showGrid: true, showArt: true, showStitches: true, showPoints: false, showJumps: true,
+  })
+
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const panning = useRef<{ x: number; y: number; cx: number; cy: number } | null>(null)
+
+  // Generation runs in a worker, keyed to the document revision, so a slow
+  // result can never land on top of a newer edit.
+  const { plan, warnings, busy, ms, inline } = useStitchPlan(doc)
+  const counts = useMemo(() => countStitches(plan), [plan])
+  const pb = useMemo(() => planBounds(plan), [plan])
+  const total = counts.stitches + counts.jumps
+  const stats = useMemo(() => packageStats(doc, plan, warnings, machine), [doc, plan, warnings, machine])
+
+  const selected = doc.objects.find((o) => o.id === selectedId) ?? null
+
+  // Hoops whose arms fit this machine's bracket. Non-mountable sizes stay
+  // visible but disabled, so the operator learns the constraint instead of
+  // wondering why a hoop they own is missing from the list.
+  const mountable = useMemo(
+    () => new Set(hoopsForSpacing(doc.spacing).map((h) => h.name)),
+    [doc.spacing],
+  )
+
+  // --- rendering ----------------------------------------------------------
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current
+    const wrap = wrapRef.current
+    if (!canvas || !wrap) return
+    const dpr = window.devicePixelRatio || 1
+    const w = wrap.clientWidth, h = wrap.clientHeight
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr)
+      canvas.height = Math.round(h * dpr)
+    }
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    render(ctx, doc, plan, view, { ...opts, upTo: sim ?? undefined, selectedId, reference })
+  }, [doc, plan, view, opts, sim, selectedId, reference])
+
+  useEffect(() => { draw() }, [draw])
+
+  useEffect(() => {
+    const ro = new ResizeObserver(() => draw())
+    if (wrapRef.current) ro.observe(wrapRef.current)
+    return () => ro.disconnect()
+  }, [draw])
+
+  const fit = useCallback(() => {
+    const wrap = wrapRef.current
+    if (wrap) setView(fitView(doc, wrap.clientWidth, wrap.clientHeight))
+  }, [doc])
+
+  // --- autosave -----------------------------------------------------------
+  // Explicit Save writes a file; this exists only so a refresh or a crash
+  // does not lose work in progress. Restored once, on mount, and said out loud.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(AUTOSAVE_KEY)
+      if (saved) {
+        const restored = deserialize(saved)
+        if (restored.objects.length) {
+          setDoc(restored)
+          setSelectedId(restored.objects[0].id)
+          setNote('Restored unsaved work from your last session')
+        }
+      }
+    } catch (e) {
+      // NEVER destroy an autosave because we could not read it. It is by
+      // definition the only copy of unsaved work, and the commonest reason
+      // for the failure is a file from a NEWER build — exactly the case the
+      // version gate exists to protect. Set it aside and say so.
+      try {
+        const orphan = localStorage.getItem(AUTOSAVE_KEY)
+        if (orphan) {
+          localStorage.setItem(`${AUTOSAVE_KEY}.unreadable.${Date.now()}`, orphan)
+          localStorage.removeItem(AUTOSAVE_KEY)
+        }
+      } catch {
+        // Nothing more we can do; leave it where it is.
+      }
+      setNote(
+        `Could not restore your last session (${(e as Error).message}). ` +
+          'It has been kept aside, not deleted.',
+      )
+    }
+    setTimeout(fit, 0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        if (doc.objects.length) localStorage.setItem(AUTOSAVE_KEY, serialize(doc))
+        else localStorage.removeItem(AUTOSAVE_KEY)
+      } catch {
+        // Out of quota. Clear the slot rather than leave a smaller, OLDER
+        // autosave behind to be restored later as if it were current.
+        try { localStorage.removeItem(AUTOSAVE_KEY) } catch { /* ignore */ }
+        setNote('This design is too large to autosave — use Save to keep it.')
+      }
+    }, 600)
+    return () => clearTimeout(t)
+  }, [doc])
+
+  // --- document edits -----------------------------------------------------
+  const patch = (id: string, fn: (o: EmbObject) => EmbObject) =>
+    setDoc((d) => ({ ...d, objects: d.objects.map((o) => (o.id === id ? fn(o) : o)) }))
+
+  const addPaths = (paths: Pt[][], label: string) => {
+    // Split into regions so a letter keeps its counter as a hole of the SAME
+    // object, while separate shapes become separate objects the user can
+    // colour and treat independently.
+    const regions = toRegions(paths)
+    const groups: Pt[][][] = regions.length ? regions : [paths]
+    const b = bounds(paths)
+    const dx = b ? -(b.minX + b.maxX) / 2 : 0
+    const dy = b ? -(b.minY + b.maxY) / 2 : 0
+    const made = groups.map((g, i) =>
+      newObject({
+        name: groups.length > 1 ? `${label} ${i + 1}` : label,
+        color: PALETTE[i % PALETTE.length],
+        type: 'fill',
+        paths: g.map((ring) => [...ring, ring[0]].map((p) => ({ x: p.x + dx, y: p.y + dy }))),
+      }),
+    )
+    setDoc((d) => ({ ...d, objects: [...d.objects, ...made] }))
+    setSelectedId(made[0]?.id ?? null)
+    setSim(null)
+  }
+
+  const importSvg = async (file: File) => {
+    try {
+      const v = parseSvgToPaths(await file.text(), file.name.replace(/\.svg$/i, ''))
+      addPaths(v.paths, v.name)
+      setNote(v.skipped
+        ? `${v.skipped} element(s) skipped — convert text to outlines first`
+        : `Imported ${v.name}`)
+      setTimeout(fit, 0)
+    } catch (e) {
+      alert(`Could not read that SVG: ${(e as Error).message}`)
+    }
+  }
+
+  const importDstReference = async (file: File) => {
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      const d = readDst(bytes)
+      setReference({
+        blocks: d.blocks.map((b, i) => ({ color: PALETTE[i % PALETTE.length], label: `Colour ${i + 1}`, stitches: b.stitches })),
+      })
+      const w = d.extents.maxX - d.extents.minX, h = d.extents.maxY - d.extents.minY
+      setNote(
+        `${file.name}: ${d.stitchCount} stitches, ${d.colorChanges + 1} colour block(s), ` +
+          `${w.toFixed(1)} × ${h.toFixed(1)} mm — shown as a grey reference`,
+      )
+    } catch (e) {
+      alert(`Could not read that DST: ${(e as Error).message}`)
+    }
+  }
+
+  // --- output -------------------------------------------------------------
+  const download = (name: string, data: string | Uint8Array, type = 'application/octet-stream') => {
+    const a = document.createElement('a')
+    // Uint8Array is a valid BlobPart at runtime; the DOM lib types BlobPart
+    // against ArrayBuffer specifically, which a generic Uint8Array misses.
+    a.href = URL.createObjectURL(new Blob([data as unknown as BlobPart], { type }))
+    a.download = name
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000)
+  }
+
+  const base = () => (doc.name || 'design').replace(/[^\w\-. ]+/g, '_').trim() || 'design'
+
+  /**
+   * Export the production PACKAGE, not just the machine file. A bare .dst
+   * carries no colour at all, so on its own it hands the operator a stack of
+   * unlabelled blocks and asks them to guess.
+   */
+  const exportPackage = () => {
+    if (!total) return
+    const centered = centerPlan(plan)
+    const n = base()
+    download(`${n}.dst`, writeDst(centered, n))
+    download(`${n}.col`, writeCol(centered), 'text/plain')
+    download(`${n}.edr`, writeEdr(centered))
+    download(`${n}-template.svg`, placementTemplateSvg(doc, centered), 'image/svg+xml')
+    const sheet = window.open('', '_blank')
+    if (sheet) {
+      sheet.document.write(runSheetHtml(doc, stats, machine))
+      sheet.document.close()
+    } else {
+      download(`${n}-runsheet.html`, runSheetHtml(doc, stats, machine), 'text/html')
+    }
+    setNote(`Exported ${n}.dst + colour sidecars, run sheet and 1:1 template`)
+  }
+
+  const exportDstOnly = () => {
+    if (!total) return
+    download(`${base()}.dst`, writeDst(centerPlan(plan), base()))
+    setNote('Exported the .dst only — no colour information travels with a DST')
+  }
+
+  const saveProject = () => {
+    download(projectFilename(doc), serialize(doc, true), 'application/json')
+    setNote(`Saved ${projectFilename(doc)}`)
+  }
+
+  const openProject = async (file: File) => {
+    try {
+      const loaded = deserialize(await file.text())
+      setDoc(loaded)
+      setSelectedId(loaded.objects[0]?.id ?? null)
+      setSim(null)
+      setTimeout(fit, 0)
+      setNote(`Opened ${file.name} — ${loaded.objects.length} object(s)`)
+    } catch (e) {
+      alert(e instanceof ProjectError ? e.message : `Could not open that project: ${(e as Error).message}`)
+    }
+  }
+
+  // --- canvas interaction -------------------------------------------------
+  const onWheel = (e: React.WheelEvent) => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    const rect = wrap.getBoundingClientRect()
+    const at = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+    const before = screenToWorld(view, rect.width, rect.height, at)
+    const scale = Math.max(0.3, Math.min(60, view.scale * Math.exp(-e.deltaY * 0.0015)))
+    const after = screenToWorld({ ...view, scale }, rect.width, rect.height, at)
+    // Keep the point under the cursor pinned while zooming.
+    setView({ scale, cx: view.cx + (before.x - after.x), cy: view.cy + (before.y - after.y) })
+  }
+
+  const onDown = (e: React.MouseEvent) => {
+    panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
+  }
+  const onMove = (e: React.MouseEvent) => {
+    const p = panning.current
+    if (!p) return
+    setView((v) => ({ ...v, cx: p.cx - (e.clientX - p.x) / v.scale, cy: p.cy - (e.clientY - p.y) / v.scale }))
+  }
+  const onUp = () => { panning.current = null }
+
+  const moveObject = (index: number, delta: number) =>
+    setDoc((d) => {
+      const objs = [...d.objects]
+      const j = index + delta
+      if (j < 0 || j >= objs.length) return d
+      const tmp = objs[index]
+      objs[index] = objs[j]
+      objs[j] = tmp
+      return { ...d, objects: objs }
+    })
+
+  // --- render -------------------------------------------------------------
+  return (
+    <div className="app">
+      <div className="toolbar">
+        <div className="group">
+          <label>Artwork</label>
+          <label>
+            <button onClick={(e) => (e.currentTarget.nextElementSibling as HTMLInputElement).click()}>Import SVG…</button>
+            <input type="file" accept=".svg,image/svg+xml" hidden
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) importSvg(f); e.target.value = '' }} />
+          </label>
+          <label>
+            <button onClick={(e) => (e.currentTarget.nextElementSibling as HTMLInputElement).click()}>Open DST…</button>
+            <input type="file" accept=".dst,.DST" hidden
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) importDstReference(f); e.target.value = '' }} />
+          </label>
+          {reference && <button onClick={() => setReference(null)}>Clear ref</button>}
+        </div>
+
+        <div className="group">
+          <label>Project</label>
+          <label>
+            <button onClick={(e) => (e.currentTarget.nextElementSibling as HTMLInputElement).click()}>Open…</button>
+            <input type="file" accept={`.${FILE_EXT},application/json`} hidden
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) openProject(f); e.target.value = '' }} />
+          </label>
+          <button onClick={saveProject} disabled={!doc.objects.length}>Save</button>
+        </div>
+
+        <div className="group">
+          <label>Export</label>
+          <button className="primary" onClick={exportPackage} disabled={!total}>Export package</button>
+          <button onClick={exportDstOnly} disabled={!total} title="Machine file only — no colours travel with a DST">
+            .dst only
+          </button>
+        </div>
+
+        <div className="group">
+          <label>Stitch</label>
+          {TYPES.map((t) => (
+            <button
+              key={t.id}
+              className={`tool${selected?.type === t.id ? ' on' : ''}`}
+              title={t.hint}
+              disabled={!selected}
+              onClick={() => selected && patch(selected.id, (o) => ({ ...o, type: t.id }))}
+            >
+              {t.icon}
+              <span>{t.label}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="group">
+          <label>Machine</label>
+          <select
+            value={doc.hoop.name} title={doc.hoop.note ?? ''}
+            onChange={(e) => setDoc((d) => ({ ...d, hoop: HOOPS.find((h) => h.name === e.target.value) ?? d.hoop }))}
+          >
+            {[...new Set(HOOPS.map((h) => h.group))].map((g) => (
+              <optgroup key={g} label={g}>
+                {HOOPS.filter((h) => h.group === g).map((h) => (
+                  <option key={h.name} value={h.name} disabled={!mountable.has(h.name)}>
+                    {h.name} — {h.widthMm.toFixed(0)}×{h.heightMm.toFixed(0)} mm
+                    {mountable.has(h.name) ? '' : ` (needs ${h.minSpacing})`}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <select
+            value={doc.spacing} title="Bracket spacing — limits which hoops mount"
+            onChange={(e) => setDoc((d) => ({ ...d, spacing: e.target.value as Spacing }))}
+          >
+            {SPACINGS.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <input
+            type="number" min={1} max={24} value={machine.needles} style={{ width: 54 }}
+            title="Needles — more colour blocks than this means a mid-run re-thread"
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v)) setMachine((m) => ({ ...m, needles: Math.max(1, v) }))
+            }}
+          />
+          <button onClick={fit}>Fit</button>
+        </div>
+
+        <div className="group">
+          <label>View</label>
+          {([
+            ['showArt', 'Art'], ['showStitches', 'Stitches'], ['showJumps', 'Jumps'],
+            ['showPoints', 'Points'], ['showGrid', 'Grid'],
+          ] as const).map(([k, lbl]) => (
+            <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <input type="checkbox" checked={opts[k]} onChange={(e) => setOpts((o) => ({ ...o, [k]: e.target.checked }))} />
+              {lbl}
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="body">
+        <div className="side">
+          <h3>Sewing sequence</h3>
+          {!doc.objects.length && (
+            <div className="empty">
+              Import an SVG to begin. Each closed shape becomes an object you can assign a stitch type to.
+            </div>
+          )}
+          {doc.objects.map((o, i) => (
+            <div key={o.id} className={`obj${o.id === selectedId ? ' sel' : ''}`} onClick={() => setSelectedId(o.id)}>
+              <span className="seq">{i + 1}</span>
+              <span className="sw" style={{ background: o.color }} />
+              <span className="nm">{o.name}</span>
+              <span className="ty">{o.type}</span>
+              <button className="eye" title="Sew earlier" disabled={i === 0}
+                onClick={(e) => { e.stopPropagation(); moveObject(i, -1) }}>↑</button>
+              <button className="eye" title="Sew later" disabled={i === doc.objects.length - 1}
+                onClick={(e) => { e.stopPropagation(); moveObject(i, 1) }}>↓</button>
+              <button className="eye" title={o.visible ? 'Hide' : 'Show'}
+                onClick={(e) => { e.stopPropagation(); patch(o.id, (x) => ({ ...x, visible: !x.visible })) }}>
+                {o.visible ? '●' : '○'}
+              </button>
+            </div>
+          ))}
+          {doc.objects.length > 0 && (
+            <div style={{ marginTop: 10, display: 'flex', gap: 6 }}>
+              <button onClick={() => { setDoc((d) => ({ ...d, objects: [] })); setSelectedId(null) }}>Clear all</button>
+              {selected && (
+                <button onClick={() => {
+                  setDoc((d) => ({ ...d, objects: d.objects.filter((o) => o.id !== selected.id) }))
+                  setSelectedId(null)
+                }}>Delete</button>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div
+          className="canvas-wrap" ref={wrapRef}
+          onWheel={onWheel} onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
+        >
+          <canvas ref={canvasRef} />
+        </div>
+
+        <div className="side right">
+          <h3>Properties</h3>
+          {!selected && <div className="empty">Select an object to set its stitch type and parameters.</div>}
+          {selected && (
+            <>
+              <Text label="Name" value={selected.name}
+                onChange={(v) => patch(selected.id, (o) => ({ ...o, name: v }))} />
+              <div className="row">
+                <label>Screen colour</label>
+                <input type="color" value={selected.color}
+                  onChange={(e) => patch(selected.id, (o) => ({ ...o, color: e.target.value }))} />
+              </div>
+
+              <fieldset>
+                <legend>Thread</legend>
+                <Text label="Brand" placeholder="Isacord" value={selected.thread.brand ?? ''}
+                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, brand: v || undefined } }))} />
+                <Text label="Code" placeholder="spool no." value={selected.thread.code ?? ''}
+                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, code: v || undefined } }))} />
+                <Text label="Name" placeholder="optional" value={selected.thread.name ?? ''}
+                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, name: v || undefined } }))} />
+              </fieldset>
+
+              {(selected.type === 'run' || selected.type === 'bean') && (
+                <fieldset>
+                  <legend>{selected.type === 'bean' ? 'Bean' : 'Run'}</legend>
+                  <Num label="Stitch length (mm)" value={selected.run.length} min={0.5} max={12}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, run: { ...o.run, length: v } }))} />
+                </fieldset>
+              )}
+
+              {selected.type === 'satin' && (
+                <fieldset>
+                  <legend>Satin</legend>
+                  <Num label="Width (mm)" value={selected.satin.width} min={0.4} max={12}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, width: v } }))} />
+                  <Num label="Stitch spacing (mm)" value={selected.satin.density} step={0.05} min={0.15} max={2}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, density: v } }))} />
+                  <Num label="Pull compensation (mm)" value={selected.satin.pullComp} step={0.05} min={0} max={1}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, pullComp: v } }))} />
+                  <div className="row">
+                    <label>Underlay</label>
+                    <select value={selected.satin.underlay}
+                      onChange={(e) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, underlay: e.target.value as never } }))}>
+                      <option value="none">None</option>
+                      <option value="center">Centre run</option>
+                      <option value="edge">Edge runs</option>
+                      <option value="zigzag">Zigzag</option>
+                    </select>
+                  </div>
+                </fieldset>
+              )}
+
+              {selected.type === 'fill' && (
+                <>
+                  <fieldset>
+                    <legend>Tatami fill</legend>
+                    <Num label="Angle (°)" value={selected.fill.angle} step={5} min={-180} max={180}
+                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, angle: v } }))} />
+                    <Num label="Stitch spacing (mm)" value={selected.fill.spacing} step={0.05} min={0.15} max={2}
+                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, spacing: v } }))} />
+                    <Num label="Stitch length (mm)" value={selected.fill.length} step={0.25} min={1} max={10}
+                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, length: v } }))} />
+                    <Num label="Stagger (0–1)" value={selected.fill.stagger} step={0.05} min={0} max={1}
+                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, stagger: v } }))} />
+                    <Num label="Pull compensation (mm)" value={selected.fill.pullComp} step={0.05} min={0} max={1}
+                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pullComp: v } }))} />
+                    <div className="row">
+                      <label>Underlay</label>
+                      <select value={selected.fill.underlay}
+                        onChange={(e) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, underlay: e.target.value as never } }))}>
+                        <option value="none">None</option>
+                        <option value="edge">Edge run</option>
+                        <option value="zigzag">Zigzag</option>
+                        <option value="double">Edge + zigzag</option>
+                      </select>
+                    </div>
+                  </fieldset>
+                  <fieldset>
+                    <legend>Satin border</legend>
+                    <div className="row">
+                      <label>Add border</label>
+                      <input type="checkbox" checked={selected.fill.border.enabled}
+                        onChange={(e) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, border: { ...o.fill.border, enabled: e.target.checked } } }))} />
+                    </div>
+                    {selected.fill.border.enabled && (
+                      <>
+                        <Num label="Width (mm)" value={selected.fill.border.width} min={0.4} max={10}
+                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, border: { ...o.fill.border, width: v } } }))} />
+                        <Num label="Stitch spacing (mm)" value={selected.fill.border.density} step={0.05} min={0.15} max={2}
+                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, border: { ...o.fill.border, density: v } } }))} />
+                      </>
+                    )}
+                  </fieldset>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="status">
+        {busy && <span className="busy">generating…</span>}
+        <span><b>{counts.stitches.toLocaleString()}</b> stitches</span>
+        <span><b>{counts.jumps}</b> jumps</span>
+        <span><b>{stats.trims}</b> trims</span>
+        <span><b>{counts.colors}</b> colour{counts.colors === 1 ? '' : 's'}</span>
+        {pb && (
+          <span>
+            <b>{pb.widthMm.toFixed(1)} × {pb.heightMm.toFixed(1)}</b> mm
+            {' '}({(pb.widthMm / 25.4).toFixed(2)} × {(pb.heightMm / 25.4).toFixed(2)} in)
+          </span>
+        )}
+        {total > 0 && <span>longest <b>{longestStitch(plan).toFixed(1)}</b> mm</span>}
+        {total > 0 && <span>~<b>{stats.minutes.toFixed(1)}</b> min</span>}
+        {ms > 0 && <span className="dim">{ms.toFixed(0)} ms{inline ? ' inline' : ''}</span>}
+        {note && <span className="note">{note}</span>}
+        {stats.warnings.map((w, i) => <span key={i} className="warn">⚠ {w}</span>)}
+        <span className="sim">
+          <label>Stitch-out</label>
+          <input
+            type="range" min={0} max={total} value={sim ?? total}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              setSim(v >= total ? null : v)
+            }}
+            disabled={!total}
+          />
+          <span>{(sim ?? total).toLocaleString()}/{total.toLocaleString()}</span>
+        </span>
+      </div>
+    </div>
+  )
+}
