@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { close, toRegions } from './geometry'
+import { useHistory } from './history'
 import { bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from './draw'
 import {
   fitPaths, handleCursor, hitHandle, movePaths, objectBox, pickObject, resizeBox,
@@ -182,7 +183,12 @@ function FilePick({ label, accept, onPick }: {
 }
 
 export default function App() {
-  const [doc, setDoc] = useState<Doc>(emptyDoc)
+  // The document lives behind an undo stack. `setDoc` records a step;
+  // history.begin()/end() collapse a drag into one; a `tag` coalesces rapid
+  // edits to the same field. See history.ts.
+  const history = useHistory<Doc>(emptyDoc)
+  const doc = history.state
+  const setDoc = history.set
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [view, setView] = useState<View>({ scale: 3, cx: 0, cy: 0 })
   const [reference, setReference] = useState<StitchPlan | null>(null)
@@ -276,7 +282,7 @@ export default function App() {
       if (saved) {
         const restored = deserialize(saved)
         if (restored.objects.length) {
-          setDoc(restored)
+          history.reset(restored)
           setSelectedId(restored.objects[0].id)
           setNote('Restored unsaved work from your last session')
         }
@@ -320,8 +326,11 @@ export default function App() {
   }, [doc])
 
   // --- document edits -----------------------------------------------------
-  const patch = (id: string, fn: (o: EmbObject) => EmbObject) =>
-    setDoc((d) => ({ ...d, objects: d.objects.map((o) => (o.id === id ? fn(o) : o)) }))
+  // `tag` groups rapid edits to the SAME field into one undo step — typing
+  // "12.5" into a box is one action, not four.
+  const patch = (id: string, fn: (o: EmbObject) => EmbObject, tag?: string) =>
+    setDoc((d) => ({ ...d, objects: d.objects.map((o) => (o.id === id ? fn(o) : o)) }),
+      tag && `${tag}:${id}`)
 
   const addPaths = (paths: Pt[][], label: string) => {
     // Split into regions so a letter keeps its counter as a hole of the SAME
@@ -454,7 +463,7 @@ export default function App() {
   const openProject = async (file: File) => {
     try {
       const loaded = deserialize(await file.text())
-      setDoc(loaded)
+      history.reset(loaded)
       setSelectedId(loaded.objects[0]?.id ?? null)
       setSim(null)
       setTimeout(fit, 0)
@@ -507,6 +516,7 @@ export default function App() {
         const b = objectBox(selected)
         const h = b && hitHandle(b, p, HANDLE_PX / view.scale)
         if (b && h) {
+          history.begin()
           xform.current = { kind: 'resize', handle: h, from: b, start: p, paths: selected.paths, id: selected.id }
           return
         }
@@ -514,6 +524,7 @@ export default function App() {
       const hit = pickObject(doc.objects, p, PICK_PX / view.scale)
       if (hit) {
         setSelectedId(hit.id)
+        history.begin()
         xform.current = { kind: 'move', from: objectBox(hit)!, start: p, paths: hit.paths, id: hit.id }
         return
       }
@@ -576,7 +587,7 @@ export default function App() {
 
   const onUp = (e: React.MouseEvent) => {
     panning.current = null
-    if (xform.current) { xform.current = null; return }
+    if (xform.current) { xform.current = null; history.end(); return }
     const d = dragging.current
     if (!d) return
     dragging.current = null
@@ -611,13 +622,24 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null
-      if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return
+      const typing = !!el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)
+      // Undo/redo are checked BEFORE the typing and modifier guards below:
+      // they are the one shortcut that must work while a field has focus, and
+      // they are the only ones that WANT a modifier.
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && e.key.toLowerCase() === 'z') {
+        e.preventDefault()
+        if (e.shiftKey) history.redo(); else history.undo()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); history.redo(); return }
+      if (typing) return
       if (e.metaKey || e.ctrlKey || e.altKey) return
       if (e.key === 'Escape') {
-        // Put a half-finished move or resize back where it started. Without
-        // an undo stack this is the only way out of a misdrag.
-        const x = xform.current
-        if (x) { patch(x.id, (o) => ({ ...o, paths: x.paths })); xform.current = null }
+        // Abandon a half-finished move or resize. history.cancel() restores
+        // the pre-drag document AND drops the step it recorded, so a refused
+        // drag leaves no trace in the stack at all.
+        if (xform.current) { xform.current = null; history.cancel() }
         cancelDraw()
         return
       }
@@ -628,7 +650,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [tool, finishPolygon, cancelDraw])
+  }, [tool, finishPolygon, cancelDraw, history])
 
   const moveObject = (index: number, delta: number) =>
     setDoc((d) => {
@@ -656,6 +678,14 @@ export default function App() {
           <label>Project</label>
           <FilePick label="Open…" accept={`.${FILE_EXT},application/json`} onPick={openProject} />
           <button onClick={saveProject} disabled={!doc.objects.length}>Save</button>
+        </div>
+
+        <div className="group">
+          <label>Edit</label>
+          <button onClick={history.undo} disabled={!history.canUndo}
+            title="Undo (Cmd/Ctrl+Z)">Undo</button>
+          <button onClick={history.redo} disabled={!history.canRedo}
+            title="Redo (Cmd/Ctrl+Shift+Z)">Redo</button>
         </div>
 
         <div className="group">
@@ -801,28 +831,28 @@ export default function App() {
           {selected && (
             <>
               <Text label="Name" value={selected.name}
-                onChange={(v) => patch(selected.id, (o) => ({ ...o, name: v }))} />
+                onChange={(v) => patch(selected.id, (o) => ({ ...o, name: v }), 'name')} />
               <div className="row">
                 <label>Screen colour</label>
                 <input type="color" value={selected.color}
-                  onChange={(e) => patch(selected.id, (o) => ({ ...o, color: e.target.value }))} />
+                  onChange={(e) => patch(selected.id, (o) => ({ ...o, color: e.target.value }), 'color')} />
               </div>
 
               <fieldset>
                 <legend>Thread</legend>
                 <Text label="Brand" placeholder="Isacord" value={selected.thread.brand ?? ''}
-                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, brand: v || undefined } }))} />
+                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, brand: v || undefined } }), 'thread.brand')} />
                 <Text label="Code" placeholder="spool no." value={selected.thread.code ?? ''}
-                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, code: v || undefined } }))} />
+                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, code: v || undefined } }), 'thread.code')} />
                 <Text label="Name" placeholder="optional" value={selected.thread.name ?? ''}
-                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, name: v || undefined } }))} />
+                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, name: v || undefined } }), 'thread.name')} />
               </fieldset>
 
               {(selected.type === 'run' || selected.type === 'bean') && (
                 <fieldset>
                   <legend>{selected.type === 'bean' ? 'Bean' : 'Run'}</legend>
                   <Num label="Stitch length (mm)" value={selected.run.length} min={0.5} max={12}
-                    onChange={(v) => patch(selected.id, (o) => ({ ...o, run: { ...o.run, length: v } }))} />
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, run: { ...o.run, length: v } }), 'run.length')} />
                 </fieldset>
               )}
 
@@ -830,11 +860,11 @@ export default function App() {
                 <fieldset>
                   <legend>Satin</legend>
                   <Num label="Width (mm)" value={selected.satin.width} min={0.4} max={12}
-                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, width: v } }))} />
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, width: v } }), 'satin.width')} />
                   <Num label="Stitch spacing (mm)" value={selected.satin.density} step={0.05} min={0.15} max={2}
-                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, density: v } }))} />
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, density: v } }), 'satin.density')} />
                   <Num label="Pull compensation (mm)" value={selected.satin.pullComp} step={0.05} min={0} max={1}
-                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, pullComp: v } }))} />
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, pullComp: v } }), 'satin.pullComp')} />
                   <div className="row">
                     <label>Underlay</label>
                     <select value={selected.satin.underlay}
@@ -853,15 +883,15 @@ export default function App() {
                   <fieldset>
                     <legend>Tatami fill</legend>
                     <Num label="Angle (°)" value={selected.fill.angle} step={5} min={-180} max={180}
-                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, angle: v } }))} />
+                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, angle: v } }), 'fill.angle')} />
                     <Num label="Stitch spacing (mm)" value={selected.fill.spacing} step={0.05} min={0.15} max={2}
-                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, spacing: v } }))} />
+                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, spacing: v } }), 'fill.spacing')} />
                     <Num label="Stitch length (mm)" value={selected.fill.length} step={0.25} min={1} max={10}
-                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, length: v } }))} />
+                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, length: v } }), 'fill.length')} />
                     <Num label="Stagger (0–1)" value={selected.fill.stagger} step={0.05} min={0} max={1}
-                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, stagger: v } }))} />
+                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, stagger: v } }), 'fill.stagger')} />
                     <Num label="Pull compensation (mm)" value={selected.fill.pullComp} step={0.05} min={0} max={1}
-                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pullComp: v } }))} />
+                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pullComp: v } }), 'fill.pullComp')} />
                     <div className="row">
                       <label>Underlay</label>
                       <select value={selected.fill.underlay}
@@ -883,9 +913,9 @@ export default function App() {
                     {selected.fill.border.enabled && (
                       <>
                         <Num label="Width (mm)" value={selected.fill.border.width} min={0.4} max={10}
-                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, border: { ...o.fill.border, width: v } } }))} />
+                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, border: { ...o.fill.border, width: v } } }), 'fill.border.width')} />
                         <Num label="Stitch spacing (mm)" value={selected.fill.border.density} step={0.05} min={0.15} max={2}
-                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, border: { ...o.fill.border, density: v } } }))} />
+                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, border: { ...o.fill.border, density: v } } }), 'fill.border.density')} />
                       </>
                     )}
                   </fieldset>

@@ -13,6 +13,7 @@ import { packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { unionSelfChecked } from '../src/boolean'
 import { MIN_DRAW_MM, bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from '../src/draw'
 import { MIN_SIZE_MM, fitPaths, handlePoint, hitHandle, hitObject, movePaths, objectBox, pickObject, resizeBox, type Box } from '../src/transform'
+import { COALESCE_MS, HISTORY_LIMIT, applyEdit, cancelState, initHistory, redoState, undoState } from '../src/history'
 import { offsetPathsChecked } from '../src/offset'
 
 let pass = 0, fail = 0
@@ -824,6 +825,115 @@ console.log('\n# select / move / resize')
   ok(flatOut[0].every((p) => Number.isFinite(p.x) && Number.isFinite(p.y)),
     'a zero-height path survives a resize', JSON.stringify(flatOut[0]))
   ok(flatOut[0][0].y === 20 && flatOut[0][1].x === 20, 'and is placed on the new box')
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# undo / redo')
+{
+  const rec = (n: number, tag?: string, now = 0) =>
+    ({ kind: 'record', tag, now }) as const
+
+  let h = initHistory('a')
+  ok(h.past.length === 0 && h.future.length === 0, 'a fresh stack has nowhere to go')
+  ok(undoState(h).present === 'a', 'undo at the bottom is a no-op')
+  ok(redoState(h).present === 'a', 'redo at the top is a no-op')
+
+  h = applyEdit(h, 'b', rec(1))
+  h = applyEdit(h, 'c', rec(2))
+  ok(h.present === 'c' && h.past.length === 2, 'two edits, two steps back')
+
+  h = undoState(h)
+  ok(h.present === 'b', 'undo steps back one')
+  h = undoState(h)
+  ok(h.present === 'a', 'and again')
+  ok(h.future.length === 2, 'the undone edits are redoable', `${h.future.length}`)
+  h = redoState(h)
+  ok(h.present === 'b', 'redo steps forward')
+
+  // A new edit after undoing abandons the redo branch — the standard rule,
+  // and the one users expect from every other editor.
+  h = applyEdit(h, 'z', rec(3))
+  ok(h.present === 'z' && h.future.length === 0, 'editing after an undo drops the redo branch')
+
+  // --- gesture bracketing: a drag is ONE step
+  {
+    let g = initHistory('start')
+    g = applyEdit(g, 'frame1', { kind: 'record', now: 0 })   // begin() -> first frame records
+    for (let i = 2; i < 200; i++) g = applyEdit(g, `frame${i}`, { kind: 'amend' })
+    ok(g.present === 'frame199', 'the drag ends on the last frame')
+    ok(g.past.length === 1, '200 drag frames are ONE undo step', `${g.past.length}`)
+    ok(undoState(g).present === 'start', 'undoing the drag returns to before it')
+  }
+
+  // --- coalescing by tag: typing in a field is one step
+  {
+    let c = initHistory(0)
+    c = applyEdit(c, 1, rec(0, 'angle:o1', 0))
+    c = applyEdit(c, 12, rec(0, 'angle:o1', 100))
+    c = applyEdit(c, 120, rec(0, 'angle:o1', 200))
+    ok(c.present === 120 && c.past.length === 1, 'same tag in quick succession is one step',
+      `${c.past.length}`)
+    ok(undoState(c).present === 0, 'and undoes to before the typing')
+
+    // A different field must NOT merge into it.
+    let d = initHistory(0)
+    d = applyEdit(d, 1, rec(0, 'angle:o1', 0))
+    d = applyEdit(d, 2, rec(0, 'spacing:o1', 50))
+    ok(d.past.length === 2, 'a different field is its own step', `${d.past.length}`)
+
+    // The same field after a pause is a separate step.
+    let e2 = initHistory(0)
+    e2 = applyEdit(e2, 1, rec(0, 'angle:o1', 0))
+    e2 = applyEdit(e2, 2, rec(0, 'angle:o1', COALESCE_MS + 1))
+    ok(e2.past.length === 2, 'the same field after a pause is a new step', `${e2.past.length}`)
+
+    // Untagged edits never merge, however fast they arrive.
+    let f = initHistory(0)
+    f = applyEdit(f, 1, rec(0, undefined, 0))
+    f = applyEdit(f, 2, rec(0, undefined, 1))
+    ok(f.past.length === 2, 'untagged edits never merge')
+
+    // Undo must clear the tag, or the next edit merges into the step we just
+    // stepped off and the undo appears not to have happened.
+    let g2 = initHistory(0)
+    g2 = applyEdit(g2, 1, rec(0, 'angle:o1', 0))
+    g2 = applyEdit(g2, 2, rec(0, 'angle:o1', 100))
+    g2 = undoState(g2)
+    g2 = applyEdit(g2, 9, rec(0, 'angle:o1', 150))
+    ok(g2.past.length === 1 && undoState(g2).present === 0,
+      'an edit right after undo starts a fresh step')
+  }
+
+  // --- cancelling a gesture leaves no trace at all
+  {
+    let c = initHistory('before')
+    c = applyEdit(c, 'mid', { kind: 'record', now: 0 })
+    c = applyEdit(c, 'later', { kind: 'amend' })
+    c = cancelState(c)
+    ok(c.present === 'before', 'cancel restores the pre-drag document')
+    ok(c.past.length === 0, 'and removes the step it had recorded')
+    ok(c.future.length === 0, 'a cancelled drag is NOT redoable — it was refused')
+  }
+
+  // --- reset drops the stack: undoing into a different project is nonsense
+  {
+    let r = initHistory('a')
+    r = applyEdit(r, 'b', rec(1))
+    r = applyEdit(r, 'opened', { kind: 'reset' })
+    ok(r.present === 'opened' && r.past.length === 0 && r.future.length === 0,
+      'opening a project clears the stack')
+  }
+
+  // --- the cap bounds memory without dropping the newest work
+  {
+    let b2 = initHistory(0)
+    for (let i = 1; i <= HISTORY_LIMIT + 25; i++) b2 = applyEdit(b2, i, rec(i, undefined, i))
+    ok(b2.past.length === HISTORY_LIMIT, 'the stack is capped', `${b2.past.length}`)
+    ok(b2.present === HISTORY_LIMIT + 25, 'the newest edit is still present')
+    // The oldest states fell off the bottom, the recent ones survived.
+    ok(b2.past[0] === 25, 'the oldest steps are the ones dropped', `${b2.past[0]}`)
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
