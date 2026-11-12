@@ -42,6 +42,8 @@ export interface RenderOptions {
   reference?: StitchPlan | null
   /** Shape being dragged out right now, drawn live and owned by nobody yet. */
   draft?: { paths: Pt[][]; closed: boolean } | null
+  /** Selection bounds to draw resize handles on. */
+  selectionBox?: { minX: number; minY: number; maxX: number; maxY: number } | null
 }
 
 const RULER = 22 // px gutter for the rulers
@@ -142,6 +144,35 @@ export function render(
       }
       ctx.setLineDash([])
     }
+  }
+
+  // --- selection handles --------------------------------------------------
+  // Drawn in SCREEN space at a fixed pixel size: a handle sized in mm would be
+  // invisible zoomed out and cover the shape zoomed in.
+  if (opt.selectionBox) {
+    const b = opt.selectionBox
+    const a = toS({ x: b.minX, y: b.minY })
+    const c = toS({ x: b.maxX, y: b.maxY })
+    ctx.save()
+    ctx.strokeStyle = '#1f9cf0'
+    ctx.lineWidth = 1
+    ctx.setLineDash([4, 3])
+    ctx.strokeRect(a.x, a.y, c.x - a.x, c.y - a.y)
+    ctx.setLineDash([])
+    const mx = (a.x + c.x) / 2, my = (a.y + c.y) / 2
+    const R = 3.5
+    ctx.fillStyle = dark ? '#0f1216' : '#ffffff'
+    for (const [hx, hy] of [
+      [a.x, a.y], [mx, a.y], [c.x, a.y],
+      [a.x, my], [c.x, my],
+      [a.x, c.y], [mx, c.y], [c.x, c.y],
+    ]) {
+      ctx.beginPath()
+      ctx.rect(hx - R, hy - R, R * 2, R * 2)
+      ctx.fill()
+      ctx.stroke()
+    }
+    ctx.restore()
   }
 
   // --- the shape being drawn ----------------------------------------------

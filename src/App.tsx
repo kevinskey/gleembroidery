@@ -4,6 +4,10 @@ import { readDst, writeDst } from './dst'
 import { close, toRegions } from './geometry'
 import { bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from './draw'
 import {
+  fitPaths, handleCursor, hitHandle, movePaths, objectBox, pickObject, resizeBox,
+  type Box, type Handle,
+} from './transform'
+import {
   HOOPS,
   SPACINGS,
   bounds,
@@ -35,15 +39,21 @@ import { parseSvgToPaths } from './vector'
 // adjacent objects are told apart at a glance before the user sets real ones.
 const PALETTE = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#1f2d3d']
 
+/** Grab radius for a resize handle and for picking an object, screen px.
+ *  Screen-constant on purpose: a tolerance in mm would be unusably tiny when
+ *  zoomed out and absurdly fat when zoomed in. */
+const HANDLE_PX = 6
+const PICK_PX = 4
+
 /** Where in-progress work is parked so a reload does not lose it. */
 const AUTOSAVE_KEY = 'gleembroidery.autosave.v1'
 
-/** Canvas tools. 'select' is the old behaviour: left-drag pans. */
+/** Canvas tools. 'select' picks/moves/resizes; empty space still pans. */
 type Tool = 'select' | 'rect' | 'ellipse' | 'polygon' | 'freehand'
 
 const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
   {
-    id: 'select', label: 'Pan', hint: 'Pan the view — drag to move around (V)',
+    id: 'select', label: 'Select', hint: 'Click an object to select it, drag to move, drag a handle to resize. Shift keeps the proportions. Drag empty space to pan. (V)',
     icon: (
       <svg width="22" height="16" viewBox="0 0 22 16"><path d="M8 2l6 6-2.5.7L13 12l-1.8.8-1.5-3.3L8 11.5z" fill="currentColor" /></svg>
     ),
@@ -179,7 +189,7 @@ export default function App() {
   const [sim, setSim] = useState<number | null>(null)
   const [machine, setMachine] = useState<MachineProfile>(DEFAULT_MACHINE)
   const [note, setNote] = useState<string | null>(null)
-  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft'>>({
+  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox'>>({
     showGrid: true, showArt: true, showStitches: true, showPoints: false, showJumps: true,
   })
 
@@ -197,6 +207,13 @@ export default function App() {
   const dragging = useRef<{ from: Pt; trail: Pt[] } | null>(null)
   // Polygon vertices committed by clicks so far.
   const polyPts = useRef<Pt[]>([])
+  // A move or resize in flight. Holds the object's ORIGINAL geometry so every
+  // frame recomputes from it — and so Escape can put it back, which is the
+  // only safety net here until there is an undo stack.
+  const xform = useRef<
+    { kind: 'move' | 'resize'; handle?: Handle; from: Box; start: Pt; paths: Pt[][]; id: string } | null
+  >(null)
+  const [hoverCursor, setHoverCursor] = useState<string | null>(null)
 
   // Generation runs in a worker, keyed to the document revision, so a slow
   // result can never land on top of a newer edit.
@@ -229,8 +246,13 @@ export default function App() {
     }
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    render(ctx, doc, plan, view, { ...opts, upTo: sim ?? undefined, selectedId, reference, draft })
-  }, [doc, plan, view, opts, sim, selectedId, reference, draft])
+    render(ctx, doc, plan, view, {
+      ...opts, upTo: sim ?? undefined, selectedId, reference, draft,
+      // Handles only in the select tool — they are not grabbable otherwise,
+      // and drawing them would promise an interaction that is not there.
+      selectionBox: tool === 'select' && selected ? objectBox(selected) : null,
+    })
+  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected])
 
   useEffect(() => { draw() }, [draw])
 
@@ -471,7 +493,33 @@ export default function App() {
   const onDown = (e: React.MouseEvent) => {
     // Middle button always pans, whatever tool is active — otherwise picking a
     // shape tool would strand the user with no way to move around.
-    if (tool === 'select' || e.button === 1) {
+    if (e.button === 1) {
+      panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
+      return
+    }
+    if (tool === 'select') {
+      if (e.button !== 0) return
+      const p = atMm(e)
+      // A handle on the CURRENT selection outranks whatever is under it: the
+      // handle is small and deliberate, and the object beneath it is usually
+      // the selected one anyway.
+      if (selected) {
+        const b = objectBox(selected)
+        const h = b && hitHandle(b, p, HANDLE_PX / view.scale)
+        if (b && h) {
+          xform.current = { kind: 'resize', handle: h, from: b, start: p, paths: selected.paths, id: selected.id }
+          return
+        }
+      }
+      const hit = pickObject(doc.objects, p, PICK_PX / view.scale)
+      if (hit) {
+        setSelectedId(hit.id)
+        xform.current = { kind: 'move', from: objectBox(hit)!, start: p, paths: hit.paths, id: hit.id }
+        return
+      }
+      // Empty space: drop the selection and pan, which keeps the old
+      // drag-anywhere-to-pan habit working.
+      setSelectedId(null)
       panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
       return
     }
@@ -491,6 +539,25 @@ export default function App() {
       setView((v) => ({ ...v, cx: pan.cx - (e.clientX - pan.x) / v.scale, cy: pan.cy - (e.clientY - pan.y) / v.scale }))
       return
     }
+    const x = xform.current
+    if (x) {
+      const p = atMm(e)
+      // Always recomputed from the ORIGINAL geometry, never from the previous
+      // frame. Accumulating frame to frame drifts, and a resize that compounds
+      // its own rounding walks away from the cursor.
+      const next = x.kind === 'move'
+        ? movePaths(x.paths, p.x - x.start.x, p.y - x.start.y)
+        : fitPaths(x.paths, x.from, resizeBox(x.from, x.handle!, p, e.shiftKey))
+      patch(x.id, (o) => ({ ...o, paths: next }))
+      return
+    }
+    // Cursor feedback: a handle, a grabbable object, or nothing.
+    if (tool === 'select' && !panning.current) {
+      const p = atMm(e)
+      const b = selected ? objectBox(selected) : null
+      const h = b ? hitHandle(b, p, HANDLE_PX / view.scale) : null
+      setHoverCursor(h ? handleCursor(h) : pickObject(doc.objects, p, PICK_PX / view.scale) ? 'move' : null)
+    }
     if (tool === 'polygon' && polyPts.current.length) {
       // Rubber-band the next edge to the cursor.
       setDraft({ paths: [[...polyPts.current, atMm(e)]], closed: false })
@@ -509,6 +576,7 @@ export default function App() {
 
   const onUp = (e: React.MouseEvent) => {
     panning.current = null
+    if (xform.current) { xform.current = null; return }
     const d = dragging.current
     if (!d) return
     dragging.current = null
@@ -545,7 +613,14 @@ export default function App() {
       const el = e.target as HTMLElement | null
       if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return
       if (e.metaKey || e.ctrlKey || e.altKey) return
-      if (e.key === 'Escape') { cancelDraw(); return }
+      if (e.key === 'Escape') {
+        // Put a half-finished move or resize back where it started. Without
+        // an undo stack this is the only way out of a misdrag.
+        const x = xform.current
+        if (x) { patch(x.id, (o) => ({ ...o, paths: x.paths })); xform.current = null }
+        cancelDraw()
+        return
+      }
       if (e.key === 'Enter') { if (tool === 'polygon') finishPolygon(); return }
       const pick: Record<string, Tool> = { v: 'select', r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand' }
       const t = pick[e.key.toLowerCase()]
@@ -713,7 +788,11 @@ export default function App() {
           onMouseLeave={onUp} onDoubleClick={() => tool === 'polygon' && finishPolygon()}
           onContextMenu={(e) => { if (tool !== 'select') { e.preventDefault(); cancelDraw() } }}
         >
-          <canvas ref={canvasRef} className={tool === 'select' ? undefined : 'drawing'} />
+          <canvas
+            ref={canvasRef}
+            className={tool === 'select' ? undefined : 'drawing'}
+            style={tool === 'select' && hoverCursor ? { cursor: hoverCursor } : undefined}
+          />
         </div>
 
         <div className="side right">

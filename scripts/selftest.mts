@@ -12,6 +12,7 @@ import { SCHEMA_VERSION, ProjectError, deserialize, serialize } from '../src/pro
 import { packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { unionSelfChecked } from '../src/boolean'
 import { MIN_DRAW_MM, bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from '../src/draw'
+import { MIN_SIZE_MM, fitPaths, handlePoint, hitHandle, hitObject, movePaths, objectBox, pickObject, resizeBox, type Box } from '../src/transform'
 import { offsetPathsChecked } from '../src/offset'
 
 let pass = 0, fail = 0
@@ -725,6 +726,104 @@ console.log('\n# drawing tools')
   // --- polygon
   ok(!polygonUsable([{ x: 0, y: 0 }, { x: 10, y: 0 }]), 'two points are not a polygon')
   ok(polygonUsable([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 5, y: 8 }]), 'three are')
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# select / move / resize')
+{
+  const box = (x0: number, y0: number, x1: number, y1: number): Box =>
+    ({ minX: x0, minY: y0, maxX: x1, maxY: y1 })
+  const sq = newObject({ type: 'fill', paths: [[...rect(0, 0, 20, 10), { x: 0, y: 0 }]] })
+
+  const b = objectBox(sq)!
+  ok(b.minX === 0 && b.minY === 0 && b.maxX === 20 && b.maxY === 10, 'object bounds',
+    `${b.maxX}x${b.maxY}`)
+
+  // --- handles
+  ok(handlePoint(b, 'nw').x === 0 && handlePoint(b, 'nw').y === 0, 'nw is the top-left')
+  ok(handlePoint(b, 'se').x === 20 && handlePoint(b, 'se').y === 10, 'se is the bottom-right')
+  ok(handlePoint(b, 'n').x === 10 && handlePoint(b, 'n').y === 0, 'n is the top middle')
+  ok(hitHandle(b, { x: 20.3, y: 10.2 }, 1) === 'se', 'a near-miss still grabs the corner')
+  ok(hitHandle(b, { x: 10, y: 5 }, 1) === null, 'the middle is not a handle')
+  // A corner overlaps its edge handles when zoomed out; the corner must win.
+  ok(hitHandle(b, { x: 0, y: 0 }, 30) === 'nw', 'corners beat edges when both are in range')
+
+  // --- hit testing
+  ok(hitObject(sq, { x: 10, y: 5 }, 0.5), 'a closed shape is grabbable from inside')
+  ok(hitObject(sq, { x: 0.1, y: 5 }, 0.5), 'and on its outline')
+  ok(!hitObject(sq, { x: 30, y: 5 }, 0.5), 'but not from outside')
+
+  // An open line has no inside — only the line itself is grabbable.
+  const line = newObject({ type: 'run', paths: [[{ x: 0, y: 0 }, { x: 20, y: 0 }]] })
+  ok(hitObject(line, { x: 10, y: 0.2 }, 0.5), 'an open line is grabbable on the line')
+  ok(!hitObject(line, { x: 10, y: 5 }, 0.5), 'an open line has no inside to grab')
+
+  // A hole is a hole: clicking through the counter of an O must miss it.
+  const ring = newObject({
+    type: 'fill',
+    paths: [
+      [...circle(0, 0, 10, 64), { x: 10, y: 0 }],
+      [...circle(0, 0, 5, 64), { x: 5, y: 0 }],
+    ],
+  })
+  ok(hitObject(ring, { x: 7.5, y: 0 }, 0.3), 'the body of a ring is grabbable')
+  ok(!hitObject(ring, { x: 0, y: 0 }, 0.3), 'the hole in a ring is not')
+
+  // Topmost wins — later objects draw over earlier ones.
+  const lower = newObject({ type: 'fill', paths: [[...rect(0, 0, 20, 20), { x: 0, y: 0 }]] })
+  const upper = newObject({ type: 'fill', paths: [[...rect(5, 5, 10, 10), { x: 5, y: 5 }]] })
+  ok(pickObject([lower, upper], { x: 10, y: 10 }, 0.3)?.id === upper.id, 'the topmost object is picked')
+  ok(pickObject([lower, upper], { x: 1, y: 1 }, 0.3)?.id === lower.id, 'elsewhere the lower one is')
+  ok(pickObject([lower, upper], { x: 99, y: 99 }, 0.3) === null, 'empty space picks nothing')
+  const hidden = newObject({ type: 'fill', visible: false, paths: [[...rect(0, 0, 20, 20), { x: 0, y: 0 }]] })
+  ok(!hitObject(hidden, { x: 10, y: 10 }, 0.3), 'a hidden object cannot be grabbed')
+
+  // --- move
+  const moved = movePaths(sq.paths, 5, -3)
+  const mb = { minX: Math.min(...moved[0].map((p) => p.x)), minY: Math.min(...moved[0].map((p) => p.y)) }
+  ok(mb.minX === 5 && mb.minY === -3, 'move translates by the delta', `${mb.minX},${mb.minY}`)
+
+  // --- resize
+  const se = resizeBox(b, 'se', { x: 40, y: 20 })
+  ok(se.minX === 0 && se.minY === 0 && se.maxX === 40 && se.maxY === 20,
+    'dragging se pins nw', `${se.maxX}x${se.maxY}`)
+  const nw = resizeBox(b, 'nw', { x: -10, y: -5 })
+  ok(nw.minX === -10 && nw.minY === -5 && nw.maxX === 20 && nw.maxY === 10, 'dragging nw pins se')
+  const e = resizeBox(b, 'e', { x: 50, y: 999 })
+  ok(e.maxX === 50 && e.minY === 0 && e.maxY === 10, 'an edge handle moves ONE axis', `${e.maxY}`)
+
+  // Shift on a corner keeps the ratio; on an edge it must do nothing extra.
+  const aspect = resizeBox(b, 'se', { x: 40, y: 11 }, true)
+  const ar0 = (b.maxX - b.minX) / (b.maxY - b.minY)
+  const ar1 = (aspect.maxX - aspect.minX) / (aspect.maxY - aspect.minY)
+  ok(Math.abs(ar0 - ar1) < 1e-9, 'shift keeps a corner resize proportional', `${ar1.toFixed(3)}`)
+  const edgeShift = resizeBox(b, 'e', { x: 40, y: 999 }, true)
+  ok(edgeShift.maxY === 10, 'shift on an edge handle does not touch the other axis')
+
+  // Dragging a handle past its anchor clamps instead of turning inside out.
+  const crushed = resizeBox(b, 'e', { x: -100, y: 0 })
+  ok(crushed.maxX > crushed.minX, 'a resize cannot invert the shape')
+  ok(Math.abs(crushed.maxX - crushed.minX - MIN_SIZE_MM) < 1e-9,
+    'it stops at the minimum size', `${(crushed.maxX - crushed.minX).toFixed(2)} mm`)
+
+  // --- fitPaths
+  const fitted = fitPaths(sq.paths, b, box(0, 0, 40, 20))
+  const fb = {
+    minX: Math.min(...fitted[0].map((p) => p.x)), maxX: Math.max(...fitted[0].map((p) => p.x)),
+    maxY: Math.max(...fitted[0].map((p) => p.y)),
+  }
+  ok(fb.minX === 0 && fb.maxX === 40 && fb.maxY === 20, 'geometry lands on the new box',
+    `${fb.maxX}x${fb.maxY}`)
+
+  // A horizontal line has zero height — scaling it is a divide by zero.
+  const flat: Pt[][] = [[{ x: 0, y: 5 }, { x: 10, y: 5 }]]
+  const flatFrom = box(0, 5, 10, 5)
+  const flatTo = box(0, 20, 20, 20)
+  const flatOut = fitPaths(flat, flatFrom, flatTo)
+  ok(flatOut[0].every((p) => Number.isFinite(p.x) && Number.isFinite(p.y)),
+    'a zero-height path survives a resize', JSON.stringify(flatOut[0]))
+  ok(flatOut[0][0].y === 20 && flatOut[0][1].x === 20, 'and is placed on the new box')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
