@@ -10,6 +10,8 @@
 // writer is the single place that flips Y and converts to 0.1 mm machine
 // units; nothing above it should think in machine coordinates.
 
+import type { Shape } from './nodes'
+
 export interface Pt {
   x: number
   y: number
@@ -85,6 +87,16 @@ export interface EmbObject {
    * order. Closed paths repeat their first point as the last.
    */
   paths: Pt[][]
+  /**
+   * The EDITABLE outline, when there is one: nodes with Bézier handles.
+   *
+   * `paths` above is a cache re-flattened from this on every edit, and it is
+   * what the whole stitch pipeline reads — nothing downstream knows shapes
+   * exist. Objects made before node editing (and SVG imports) have no shapes
+   * until something adopts their polyline, which is why this is optional
+   * rather than the single source of truth.
+   */
+  shapes?: Shape[]
   run: RunParams
   satin: SatinParams
   fill: FillParams

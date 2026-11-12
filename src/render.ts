@@ -5,6 +5,7 @@
 // centres the hoop and the design grows out from there.
 
 import type { Doc, Pt } from './model'
+import { handlesOf, type Shape } from './nodes'
 import type { StitchPlan } from './stitches'
 
 export interface View {
@@ -44,6 +45,12 @@ export interface RenderOptions {
   draft?: { paths: Pt[][]; closed: boolean } | null
   /** Selection bounds to draw resize handles on. */
   selectionBox?: { minX: number; minY: number; maxX: number; maxY: number } | null
+  /** Editable outlines to draw nodes and Bézier handles for. */
+  nodeEdit?: { shapes: readonly Shape[]; active?: { s: number; i: number } | null } | null
+  /** Px above the selection to put the rotation grip; omit to hide it. */
+  rotateOffsetPx?: number
+  /** Rubber band being dragged over empty space. */
+  marquee?: { a: Pt; b: Pt } | null
 }
 
 const RULER = 22 // px gutter for the rulers
@@ -146,6 +153,43 @@ export function render(
     }
   }
 
+  // --- node editing ---------------------------------------------------------
+  // Handle arms are drawn BEFORE the nodes so a node always sits on top of its
+  // own arms; the node is the thing being aimed at.
+  if (opt.nodeEdit) {
+    const { shapes, active } = opt.nodeEdit
+    ctx.save()
+    shapes.forEach((sh, si) => {
+      ctx.strokeStyle = '#1f9cf0'
+      ctx.lineWidth = 1
+      for (const h of handlesOf(sh)) {
+        const n = sh.nodes[h.i]
+        const a = toS({ x: n.x, y: n.y })
+        const b = toS(h.at)
+        ctx.globalAlpha = 0.6
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke()
+        ctx.globalAlpha = 1
+        ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, Math.PI * 2)
+        ctx.fillStyle = dark ? '#0f1216' : '#ffffff'
+        ctx.fill(); ctx.stroke()
+      }
+      sh.nodes.forEach((n, i) => {
+        const q = toS({ x: n.x, y: n.y })
+        const on = active && active.s === si && active.i === i
+        ctx.fillStyle = on ? '#1f9cf0' : dark ? '#0f1216' : '#ffffff'
+        ctx.strokeStyle = '#1f9cf0'
+        ctx.lineWidth = on ? 2 : 1
+        // Round = smooth, square = corner. The shape of the marker IS the
+        // node's type, so it needs no legend and survives being colour-blind.
+        ctx.beginPath()
+        if (n.smooth) ctx.arc(q.x, q.y, 4, 0, Math.PI * 2)
+        else ctx.rect(q.x - 3.5, q.y - 3.5, 7, 7)
+        ctx.fill(); ctx.stroke()
+      })
+    })
+    ctx.restore()
+  }
+
   // --- selection handles --------------------------------------------------
   // Drawn in SCREEN space at a fixed pixel size: a handle sized in mm would be
   // invisible zoomed out and cover the shape zoomed in.
@@ -161,6 +205,17 @@ export function render(
     ctx.setLineDash([])
     const mx = (a.x + c.x) / 2, my = (a.y + c.y) / 2
     const R = 3.5
+    // Rotation grip on a stalk above the box, clear of the resize handles so
+    // the two are never ambiguous however far the view is zoomed out.
+    if (opt.rotateOffsetPx) {
+      const gy = a.y - opt.rotateOffsetPx
+      ctx.beginPath(); ctx.moveTo(mx, a.y); ctx.lineTo(mx, gy); ctx.stroke()
+      ctx.beginPath(); ctx.arc(mx, gy, 4.5, 0, Math.PI * 2)
+      ctx.fillStyle = dark ? '#0f1216' : '#ffffff'
+      ctx.fill(); ctx.stroke()
+      // A tick inside the grip so it reads as "turn", not as another handle.
+      ctx.beginPath(); ctx.arc(mx, gy, 2, -0.6, Math.PI * 1.1); ctx.stroke()
+    }
     ctx.fillStyle = dark ? '#0f1216' : '#ffffff'
     for (const [hx, hy] of [
       [a.x, a.y], [mx, a.y], [c.x, a.y],
@@ -172,6 +227,20 @@ export function render(
       ctx.fill()
       ctx.stroke()
     }
+    ctx.restore()
+  }
+
+  // --- marquee --------------------------------------------------------------
+  if (opt.marquee) {
+    const a = toS(opt.marquee.a)
+    const b = toS(opt.marquee.b)
+    ctx.save()
+    ctx.strokeStyle = '#1f9cf0'
+    ctx.fillStyle = 'rgba(31,156,240,0.12)'
+    ctx.lineWidth = 1
+    ctx.setLineDash([4, 3])
+    ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y)
+    ctx.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y)
     ctx.restore()
   }
 

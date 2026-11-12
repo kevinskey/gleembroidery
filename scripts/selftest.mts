@@ -12,8 +12,9 @@ import { SCHEMA_VERSION, ProjectError, deserialize, serialize } from '../src/pro
 import { packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { unionSelfChecked } from '../src/boolean'
 import { MIN_DRAW_MM, bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from '../src/draw'
-import { MIN_SIZE_MM, fitPaths, handlePoint, hitHandle, hitObject, movePaths, objectBox, pickObject, resizeBox, type Box } from '../src/transform'
+import { MIN_SIZE_MM, boxCentre, fitPaths, handlePoint, hitHandle, hitObject, movePaths, objectBox, pickObject, resizeBox, rotatePaths, rotationAngle, unionBox, type Box } from '../src/transform'
 import { COALESCE_MS, HISTORY_LIMIT, applyEdit, cancelState, initHistory, redoState, undoState } from '../src/history'
+import { arcThrough, deleteNode, flattenShape, insertNode, moveHandle, moveNode, nearestSegment, pathToShape, shapesToPaths, toggleSmooth, type Shape } from '../src/nodes'
 import { offsetPathsChecked } from '../src/offset'
 
 let pass = 0, fail = 0
@@ -808,6 +809,52 @@ console.log('\n# select / move / resize')
   ok(Math.abs(crushed.maxX - crushed.minX - MIN_SIZE_MM) < 1e-9,
     'it stops at the minimum size', `${(crushed.maxX - crushed.minX).toFixed(2)} mm`)
 
+  // --- rotate
+  {
+    const c = { x: 0, y: 0 }
+    const sqr: Pt[][] = [[{ x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 0, y: -1 }]]
+    const quarter = rotatePaths(sqr, c, Math.PI / 2)
+    ok(Math.abs(quarter[0][0].x) < 1e-9 && Math.abs(quarter[0][0].y - 1) < 1e-9,
+      'a quarter turn maps +X to +Y (Y DOWN, so clockwise on screen)',
+      `${quarter[0][0].x.toFixed(3)},${quarter[0][0].y.toFixed(3)}`)
+    // Rotation is rigid: every distance from the pivot is preserved.
+    const r0 = sqr[0].map((p) => Math.hypot(p.x, p.y))
+    const r1 = quarter[0].map((p) => Math.hypot(p.x, p.y))
+    ok(r0.every((v, i) => Math.abs(v - r1[i]) < 1e-9), 'rotation preserves every radius')
+    // Four quarter turns is identity — no drift.
+    let acc = sqr
+    for (let i = 0; i < 4; i++) acc = rotatePaths(acc, c, Math.PI / 2)
+    ok(acc[0].every((p, i) => Math.abs(p.x - sqr[0][i].x) < 1e-9 && Math.abs(p.y - sqr[0][i].y) < 1e-9),
+      'four quarter turns return the original exactly')
+    // Off-centre pivot moves the shape around it.
+    const off = rotatePaths([[{ x: 2, y: 0 }]], { x: 1, y: 0 }, Math.PI)
+    ok(Math.abs(off[0][0].x) < 1e-9, 'rotating about an off-centre pivot orbits it',
+      `${off[0][0].x.toFixed(3)}`)
+
+    ok(Math.abs(boxCentre({ minX: 0, minY: 0, maxX: 10, maxY: 20 }).x - 5) < 1e-9, 'box centre x')
+    ok(Math.abs(boxCentre({ minX: 0, minY: 0, maxX: 10, maxY: 20 }).y - 10) < 1e-9, 'box centre y')
+
+    // Angle + snap
+    const ang = rotationAngle(c, { x: 10, y: 0 }, { x: 0, y: 10 })
+    ok(Math.abs(ang - Math.PI / 2) < 1e-9, 'the drag angle is measured from the pivot')
+    const snapped = rotationAngle(c, { x: 10, y: 0 }, { x: 10, y: 1.2 }, 15)
+    ok(Math.abs(snapped) < 1e-9, 'a small drag snaps back to zero', `${snapped.toFixed(4)}`)
+    const snapped2 = rotationAngle(c, { x: 10, y: 0 }, { x: 10, y: 3 }, 15)
+    ok(Math.abs(snapped2 - Math.PI / 12) < 1e-9, 'and a bigger one to 15 degrees',
+      `${((snapped2 * 180) / Math.PI).toFixed(1)} deg`)
+  }
+
+  // --- multi-selection bounds
+  {
+    const a = { minX: 0, minY: 0, maxX: 10, maxY: 10 }
+    const b = { minX: 20, minY: -5, maxX: 30, maxY: 5 }
+    const u = unionBox([a, b])!
+    ok(u.minX === 0 && u.minY === -5 && u.maxX === 30 && u.maxY === 10,
+      'a multi-selection spans every object', JSON.stringify(u))
+    ok(unionBox([null, a])!.maxX === 10, 'a missing box is skipped, not fatal')
+    ok(unionBox([]) === null, 'an empty selection has no box')
+  }
+
   // --- fitPaths
   const fitted = fitPaths(sq.paths, b, box(0, 0, 40, 20))
   const fb = {
@@ -933,6 +980,151 @@ console.log('\n# undo / redo')
     ok(b2.present === HISTORY_LIMIT + 25, 'the newest edit is still present')
     // The oldest states fell off the bottom, the recent ones survived.
     ok(b2.past[0] === 25, 'the oldest steps are the ones dropped', `${b2.past[0]}`)
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# nodes and curves')
+{
+  const straight: Shape = { nodes: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], closed: false }
+  ok(flattenShape(straight).length === 3, 'handle-free nodes stay a polyline — straight costs nothing',
+    `${flattenShape(straight).length}`)
+
+  // A curve flattens to many points, and they must lie ON the curve.
+  const curve: Shape = {
+    nodes: [
+      { x: 0, y: 0, hOut: { x: 0, y: 20 } },
+      { x: 30, y: 0, hIn: { x: 30, y: 20 } },
+    ], closed: false,
+  }
+  const flat = flattenShape(curve)
+  ok(flat.length > 8, 'a curve subdivides', `${flat.length}`)
+  ok(Math.abs(flat[0].x) < 1e-9 && Math.abs(flat[flat.length - 1].x - 30) < 1e-9,
+    'and keeps both endpoints exactly')
+  // Symmetric control net -> symmetric curve, and the apex sits at 3/4 of the
+  // handle height for a cubic (0.75 * 20 = 15).
+  const apex = flat.reduce((m, p) => (p.y > m.y ? p : m), flat[0])
+  ok(Math.abs(apex.x - 15) < 0.5, 'the curve peaks at its midpoint', `${apex.x.toFixed(2)}`)
+  ok(Math.abs(apex.y - 15) < 0.2, 'at the cubic apex height', `${apex.y.toFixed(2)}`)
+
+  // Bigger curves get more segments, and chord error stays under tolerance.
+  const big: Shape = {
+    nodes: [{ x: 0, y: 0, hOut: { x: 0, y: 200 } }, { x: 300, y: 0, hIn: { x: 300, y: 200 } }],
+    closed: false,
+  }
+  ok(flattenShape(big).length > flat.length, 'a bigger curve gets more points',
+    `${flat.length} -> ${flattenShape(big).length}`)
+
+  // Closed shapes do not carry the duplicate; shapesToPaths adds the ring close.
+  const ring: Shape = { nodes: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], closed: true }
+  ok(flattenShape(ring).length === 3, 'a closed shape flattens without a duplicate point')
+  const paths = shapesToPaths([ring])
+  ok(paths[0].length === 4, 'but the sewable ring IS closed', `${paths[0].length}`)
+  ok(paths[0][0].x === paths[0][3].x && paths[0][0].y === paths[0][3].y, 'first point repeated')
+
+  // --- adopting existing geometry
+  const adopted = pathToShape([{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 5 }, { x: 0, y: 0 }])
+  ok(adopted.closed, 'a repeated first point is read as a closed ring')
+  ok(adopted.nodes.length === 3, 'and the duplicate is not kept as a node', `${adopted.nodes.length}`)
+  ok(adopted.nodes.every((n) => !n.hIn && !n.hOut), 'adopted nodes are corners — no invented curves')
+
+  // --- insert is EXACT: the outline must not move
+  {
+    const before = flattenShape(curve, 0.05)
+    const split = insertNode(curve, 0, 0.5)
+    ok(split.nodes.length === 3, 'insert adds one node', `${split.nodes.length}`)
+    const after = flattenShape(split, 0.05)
+    let worst = 0
+    for (const p of after) {
+      let d = Infinity
+      for (let i = 1; i < before.length; i++) d = Math.min(d, segDist(p, before[i - 1], before[i]))
+      worst = Math.max(worst, d)
+    }
+    ok(worst < 0.02, 'splitting a curve does not move it (de Casteljau)', `${worst.toFixed(4)} mm`)
+
+    const line = insertNode(straight, 0, 0.5)
+    ok(Math.abs(line.nodes[1].x - 5) < 1e-9 && Math.abs(line.nodes[1].y) < 1e-9,
+      'splitting a straight segment lands on the midpoint')
+  }
+
+  // --- delete refuses to leave a husk
+  ok(deleteNode(straight, 0).nodes.length === 2, 'an open path can drop to two nodes')
+  ok(deleteNode({ nodes: straight.nodes.slice(0, 2), closed: false }, 0).nodes.length === 2,
+    'but not below two')
+  ok(deleteNode(ring, 0).nodes.length === 3, 'a closed path will not drop below three')
+
+  // --- moving carries handles
+  {
+    const moved = moveNode(curve, 0, { x: 5, y: 5 })
+    ok(moved.nodes[0].x === 5 && moved.nodes[0].y === 5, 'the node moves')
+    ok(moved.nodes[0].hOut!.x === 5 && moved.nodes[0].hOut!.y === 25,
+      'and its handle travels with it', JSON.stringify(moved.nodes[0].hOut))
+  }
+
+  // --- smoothness keeps handles collinear
+  {
+    const sm: Shape = {
+      nodes: [{ x: 0, y: 0 }, { x: 10, y: 0, smooth: true, hIn: { x: 8, y: 0 }, hOut: { x: 12, y: 0 } }, { x: 20, y: 0 }],
+      closed: false,
+    }
+    const pulled = moveHandle(sm, 1, 'hOut', { x: 10, y: 6 })
+    const n = pulled.nodes[1]
+    const cross = (n.hOut!.x - n.x) * (n.hIn!.y - n.y) - (n.hOut!.y - n.y) * (n.hIn!.x - n.x)
+    ok(Math.abs(cross) < 1e-6, 'a smooth node keeps its handles collinear', `${cross.toFixed(6)}`)
+    ok(Math.hypot(n.hIn!.x - n.x, n.hIn!.y - n.y) > 1,
+      'and the opposite handle keeps its own length')
+
+    // A corner moves one handle only.
+    const corner = { ...sm, nodes: sm.nodes.map((q, i) => (i === 1 ? { ...q, smooth: false } : q)) }
+    const c2 = moveHandle(corner, 1, 'hOut', { x: 10, y: 6 })
+    ok(c2.nodes[1].hIn!.y === 0, 'a corner leaves the other handle alone')
+
+    // Becoming a corner must not silently flatten the curve.
+    const back = toggleSmooth(sm, 1)
+    ok(back.nodes[1].smooth === false && !!back.nodes[1].hOut, 'corner conversion keeps the handles')
+    // Becoming smooth grows handles where there were none.
+    const grown = toggleSmooth({ nodes: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }], closed: false }, 1)
+    ok(!!grown.nodes[1].hIn && !!grown.nodes[1].hOut, 'smoothing grows handles along the run')
+  }
+
+  // --- finding the segment under the cursor
+  {
+    const sq: Shape = {
+      nodes: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }], closed: true,
+    }
+    const top = nearestSegment(sq, { x: 5, y: 0.1 }, 1)
+    ok(top?.i === 0 && Math.abs(top.t - 0.5) < 0.05, 'the segment under the cursor is found',
+      `i=${top?.i} t=${top?.t.toFixed(2)}`)
+    const right = nearestSegment(sq, { x: 10.1, y: 2.5 }, 1)
+    ok(right?.i === 1 && Math.abs(right.t - 0.25) < 0.05, 'and how far along it',
+      `i=${right?.i} t=${right?.t.toFixed(2)}`)
+    // The closing segment of a ring is real and must be findable.
+    const closing = nearestSegment(sq, { x: 0.1, y: 5 }, 1)
+    ok(closing?.i === 3, 'including the segment that closes the ring', `i=${closing?.i}`)
+    ok(nearestSegment(sq, { x: 50, y: 50 }, 1) === null, 'far away finds nothing')
+  }
+
+  // --- arcs
+  {
+    const arc = arcThrough({ x: -10, y: 0 }, { x: 0, y: 10 }, { x: 10, y: 0 })
+    const pts = flattenShape(arc, 0.05)
+    ok(pts.length > 8, 'a three-point arc produces a curve', `${pts.length}`)
+    // Every point must sit on the circle through those three points: centre
+    // (0,0), radius 10.
+    let worstR = 0
+    for (const p of pts) worstR = Math.max(worstR, Math.abs(Math.hypot(p.x, p.y) - 10))
+    ok(worstR < 0.05, 'and every point lies on the true circle', `${worstR.toFixed(4)} mm`)
+    // It must pass through the middle point, not take the long way round.
+    let nearest = Infinity
+    for (const p of pts) nearest = Math.min(nearest, Math.hypot(p.x - 0, p.y - 10))
+    ok(nearest < 0.05, 'the arc passes through the given middle point', `${nearest.toFixed(4)} mm`)
+    ok(Math.abs(pts[0].x + 10) < 1e-6 && Math.abs(pts[pts.length - 1].x - 10) < 1e-6,
+      'endpoints are exact')
+
+    // Collinear points have no circle — that is a straight line, not an error.
+    const line = arcThrough({ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 10, y: 0 })
+    ok(line.nodes.length === 2, 'collinear points give a straight segment', `${line.nodes.length}`)
   }
 }
 

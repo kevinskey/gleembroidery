@@ -16,6 +16,7 @@
 // version it understands, and anything newer is REFUSED with a message rather
 // than partially read.
 
+import type { PathNode, Shape } from './nodes'
 import {
   DEFAULT_FILL,
   DEFAULT_RUN,
@@ -84,6 +85,17 @@ function objectOut(o: EmbObject) {
     // Full precision on purpose: rounding here would make a reopened project
     // generate a subtly different plan from the one that was approved.
     paths: o.paths.map((p) => p.map((q) => [q.x, q.y])),
+    // The editable outline rides alongside the flattened cache. Without it a
+    // reopened project could be sewn but never shaped again.
+    shapes: o.shapes?.map((sh) => ({
+      closed: sh.closed,
+      nodes: sh.nodes.map((n) => ({
+        x: n.x, y: n.y,
+        ...(n.hIn ? { hIn: [n.hIn.x, n.hIn.y] } : {}),
+        ...(n.hOut ? { hOut: [n.hOut.x, n.hOut.y] } : {}),
+        ...(n.smooth ? { smooth: true } : {}),
+      })),
+    })),
     run: { ...o.run },
     satin: { ...o.satin },
     fill: { ...o.fill, border: { ...o.fill.border } },
@@ -172,6 +184,30 @@ function hoopIn(v: unknown): Hoop {
   }
 }
 
+/** Read editable outlines. Anything malformed is dropped, not guessed at —
+ *  the object still has its flattened `paths` and stays sewable. */
+function shapesIn(v: unknown): Shape[] | undefined {
+  if (!Array.isArray(v)) return undefined
+  const pt = (q: unknown): Pt | undefined =>
+    Array.isArray(q) && q.length === 2 && typeof q[0] === 'number' && typeof q[1] === 'number'
+      ? { x: q[0], y: q[1] } : undefined
+  const out: Shape[] = []
+  for (const sh of v) {
+    if (!isObj(sh) || !Array.isArray(sh.nodes)) continue
+    const nodes: PathNode[] = []
+    for (const n of sh.nodes) {
+      if (!isObj(n) || typeof n.x !== 'number' || typeof n.y !== 'number') continue
+      nodes.push({
+        x: n.x, y: n.y,
+        hIn: pt(n.hIn), hOut: pt(n.hOut),
+        ...(n.smooth === true ? { smooth: true } : {}),
+      })
+    }
+    if (nodes.length >= 2) out.push({ nodes, closed: sh.closed === true })
+  }
+  return out.length ? out : undefined
+}
+
 function objectIn(v: unknown, index: number): EmbObject | null {
   if (!isObj(v)) return null
   const paths = pathsIn(v.paths)
@@ -194,6 +230,7 @@ function objectIn(v: unknown, index: number): EmbObject | null {
     visible: v.visible !== false,
     type: oneOf(v.type, STITCH_TYPES, 'fill'),
     paths,
+    shapes: shapesIn(v.shapes),
     run: { length: num(run.length, dRun.length) },
     satin: {
       width: num(satin.width, dSatin.width),

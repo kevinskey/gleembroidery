@@ -3,10 +3,14 @@ import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { close, toRegions } from './geometry'
 import { useHistory } from './history'
+import {
+  arcThrough, deleteNode, flattenShape, handlesOf, insertNode, moveHandle, moveNode,
+  nearestSegment, pathToShape, shapesToPaths, toggleSmooth, type PathNode, type Shape,
+} from './nodes'
 import { bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from './draw'
 import {
-  fitPaths, handleCursor, hitHandle, movePaths, objectBox, pickObject, resizeBox,
-  type Box, type Handle,
+  boxCentre, fitPaths, handleCursor, hitHandle, movePaths, objectBox, pickObject,
+  resizeBox, rotatePaths, rotationAngle, unionBox, type Box, type Handle,
 } from './transform'
 import {
   HOOPS,
@@ -45,18 +49,48 @@ const PALETTE = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2
  *  zoomed out and absurdly fat when zoomed in. */
 const HANDLE_PX = 6
 const PICK_PX = 4
+/** How far above the selection the rotation grip sits, screen px. */
+const ROTATE_PX = 26
 
 /** Where in-progress work is parked so a reload does not lose it. */
 const AUTOSAVE_KEY = 'gleembroidery.autosave.v1'
 
 /** Canvas tools. 'select' picks/moves/resizes; empty space still pans. */
-type Tool = 'select' | 'rect' | 'ellipse' | 'polygon' | 'freehand'
+type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc'
 
 const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
   {
     id: 'select', label: 'Select', hint: 'Click an object to select it, drag to move, drag a handle to resize. Shift keeps the proportions. Drag empty space to pan. (V)',
     icon: (
       <svg width="22" height="16" viewBox="0 0 22 16"><path d="M8 2l6 6-2.5.7L13 12l-1.8.8-1.5-3.3L8 11.5z" fill="currentColor" /></svg>
+    ),
+  },
+  {
+    id: 'node', label: 'Nodes', hint: 'Reshape an outline: drag nodes and handles, double-click a segment to add a node, Delete removes one, Alt-click toggles corner/smooth (N)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M3 12c5 0 5-8 10-8s5 8 6 8" stroke="currentColor" strokeWidth="1.3" fill="none" />
+        <rect x="1" y="10" width="4" height="4" fill="currentColor" />
+        <rect x="11" y="2" width="4" height="4" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
+    id: 'pen', label: 'Pen', hint: 'Click for a corner, drag for a curve. Click the first node to close, Enter finishes open, Esc cancels (B)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M2 13l4-9 5 7 3-4 6 6" stroke="currentColor" strokeWidth="1.3" fill="none" />
+        <circle cx="6" cy="4" r="1.8" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
+    id: 'arc', label: 'Arc', hint: 'Click the start, then the end, then the bulge (A)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M3 13a8 8 0 0116 0" stroke="currentColor" strokeWidth="1.4" fill="none" />
+        <circle cx="11" cy="5" r="1.7" fill="currentColor" />
+      </svg>
     ),
   },
   {
@@ -189,13 +223,18 @@ export default function App() {
   const history = useHistory<Doc>(emptyDoc)
   const doc = history.state
   const setDoc = history.set
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // A LIST, because move/resize/rotate all act on a whole selection. The
+  // first entry is the "primary" one the Properties panel edits — every
+  // existing single-selection read still works through `selectedId` below.
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const selectedId = selectedIds[0] ?? null
+  const setSelectedId = useCallback((id: string | null) => setSelectedIds(id ? [id] : []), [])
   const [view, setView] = useState<View>({ scale: 3, cx: 0, cy: 0 })
   const [reference, setReference] = useState<StitchPlan | null>(null)
   const [sim, setSim] = useState<number | null>(null)
   const [machine, setMachine] = useState<MachineProfile>(DEFAULT_MACHINE)
   const [note, setNote] = useState<string | null>(null)
-  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox'>>({
+  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee'>>({
     showGrid: true, showArt: true, showStitches: true, showPoints: false, showJumps: true,
   })
 
@@ -213,13 +252,32 @@ export default function App() {
   const dragging = useRef<{ from: Pt; trail: Pt[] } | null>(null)
   // Polygon vertices committed by clicks so far.
   const polyPts = useRef<Pt[]>([])
+  // Pen: nodes placed so far, plus the node being dragged out right now (a
+  // press places it, a drag pulls its handles, release commits it).
+  const penNodes = useRef<PathNode[]>([])
+  const penDrag = useRef<PathNode | null>(null)
+  // Arc: the clicks banked so far — start, then end; the third point bulges it.
+  const arcPts = useRef<Pt[]>([])
+  // Node editing: which node is active (for Delete), and what is being dragged.
+  const [activeNode, setActiveNode] = useState<{ s: number; i: number } | null>(null)
+  const nodeDrag = useRef<{ s: number; i: number; which: 'node' | 'hIn' | 'hOut' } | null>(null)
   // A move or resize in flight. Holds the object's ORIGINAL geometry so every
   // frame recomputes from it — and so Escape can put it back, which is the
   // only safety net here until there is an undo stack.
   const xform = useRef<
-    { kind: 'move' | 'resize'; handle?: Handle; from: Box; start: Pt; paths: Pt[][]; id: string } | null
+    {
+      kind: 'move' | 'resize' | 'rotate'
+      handle?: Handle
+      from: Box
+      start: Pt
+      /** Original geometry of EVERY selected object, by id. */
+      items: { id: string; paths: Pt[][] }[]
+    } | null
   >(null)
   const [hoverCursor, setHoverCursor] = useState<string | null>(null)
+  // Shift-drag rubber band over empty space, for selecting several at once.
+  const marquee = useRef<Pt | null>(null)
+  const [marqueeBox, setMarquee] = useState<{ a: Pt; b: Pt } | null>(null)
 
   // Generation runs in a worker, keyed to the document revision, so a slow
   // result can never land on top of a newer edit.
@@ -230,6 +288,11 @@ export default function App() {
   const stats = useMemo(() => packageStats(doc, plan, warnings, machine), [doc, plan, warnings, machine])
 
   const selected = doc.objects.find((o) => o.id === selectedId) ?? null
+  const selectedObjs = useMemo(
+    () => doc.objects.filter((o) => selectedIds.includes(o.id)), [doc.objects, selectedIds])
+  /** Box around everything selected — what the handles and pivot hang off. */
+  const selBox = useMemo(
+    () => unionBox(selectedObjs.map(objectBox)), [selectedObjs])
 
   // Hoops whose arms fit this machine's bracket. Non-mountable sizes stay
   // visible but disabled, so the operator learns the constraint instead of
@@ -238,6 +301,20 @@ export default function App() {
     () => new Set(hoopsForSpacing(doc.spacing).map((h) => h.name)),
     [doc.spacing],
   )
+
+  /**
+   * The editable outlines of an object, adopting its polylines the first time
+   * it is node-edited. Shapes drawn before this feature existed, and anything
+   * imported from SVG, only have `paths` — refusing to edit those would make
+   * the tool useless on exactly the artwork people most want to fix.
+   */
+  const shapesOf = useCallback((o: EmbObject): Shape[] =>
+    o.shapes?.length ? o.shapes : o.paths.map((p) => pathToShape(p)), [])
+
+  /** Replace an object's outlines and re-derive the polylines it is sewn from. */
+  const setShapes = useCallback((id: string, shapes: Shape[], tag?: string) => {
+    patch(id, (o) => ({ ...o, shapes, paths: shapesToPaths(shapes) }), tag)
+  }, [])
 
   // --- rendering ----------------------------------------------------------
   const draw = useCallback(() => {
@@ -256,9 +333,12 @@ export default function App() {
       ...opts, upTo: sim ?? undefined, selectedId, reference, draft,
       // Handles only in the select tool — they are not grabbable otherwise,
       // and drawing them would promise an interaction that is not there.
-      selectionBox: tool === 'select' && selected ? objectBox(selected) : null,
+      selectionBox: tool === 'select' ? selBox : null,
+      rotateOffsetPx: tool === 'select' && selBox ? ROTATE_PX : undefined,
+      marquee: marqueeBox,
+      nodeEdit: tool === 'node' && selected ? { shapes: shapesOf(selected), active: activeNode } : null,
     })
-  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected])
+  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox])
 
   useEffect(() => { draw() }, [draw])
 
@@ -383,6 +463,35 @@ export default function App() {
     setSim(null)
   }, [doc.objects.length])
 
+  /**
+   * Add an object from editable nodes. The flattened polyline is derived here
+   * and kept in `paths` so the stitch engine never has to know about curves.
+   */
+  const addShape = useCallback((shape: Shape, label: string) => {
+    const n = doc.objects.length
+    const paths = shapesToPaths([shape])
+    if (!paths[0] || paths[0].length < 2) return
+    const obj = newObject({
+      name: `${label} ${n + 1}`,
+      color: PALETTE[n % PALETTE.length],
+      type: shape.closed ? 'fill' : 'run',
+      paths,
+      shapes: [shape],
+    })
+    setDoc((d) => ({ ...d, objects: [...d.objects, obj] }))
+    setSelectedId(obj.id)
+    setSim(null)
+  }, [doc.objects.length, setDoc])
+
+  /** Finish the pen path currently being drawn. */
+  const finishPen = useCallback((closed: boolean) => {
+    const nodes = penNodes.current
+    penNodes.current = []
+    penDrag.current = null
+    setDraft(null)
+    if (nodes.length >= 2) addShape({ nodes, closed }, closed ? 'Shape' : 'Path')
+  }, [addShape])
+
   const importSvg = async (file: File) => {
     try {
       const v = parseSvgToPaths(await file.text(), file.name.replace(/\.svg$/i, ''))
@@ -506,36 +615,131 @@ export default function App() {
       panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
       return
     }
+    if (tool === 'node') {
+      if (e.button !== 0) return
+      const p = atMm(e)
+      const tol = HANDLE_PX / view.scale
+      if (selected) {
+        const shapes = shapesOf(selected)
+        // Handles are tested first: they sit off the outline and are the
+        // smaller target, so whatever is under them is rarely what was meant.
+        for (let si = 0; si < shapes.length; si++) {
+          for (const h of handlesOf(shapes[si])) {
+            if (Math.hypot(p.x - h.at.x, p.y - h.at.y) <= tol) {
+              history.begin()
+              nodeDrag.current = { s: si, i: h.i, which: h.which }
+              setActiveNode({ s: si, i: h.i })
+              return
+            }
+          }
+        }
+        for (let si = 0; si < shapes.length; si++) {
+          const ns = shapes[si].nodes
+          for (let i = 0; i < ns.length; i++) {
+            if (Math.hypot(p.x - ns[i].x, p.y - ns[i].y) <= tol) {
+              setActiveNode({ s: si, i })
+              // Alt-click flips corner <-> smooth without starting a drag.
+              if (e.altKey) {
+                const next = [...shapes]
+                next[si] = toggleSmooth(shapes[si], i)
+                setShapes(selected.id, next)
+                return
+              }
+              history.begin()
+              nodeDrag.current = { s: si, i, which: 'node' }
+              return
+            }
+          }
+        }
+      }
+      // Nothing of the current outline was hit — pick whatever is under it.
+      const hit = pickObject(doc.objects, p, PICK_PX / view.scale)
+      setSelectedId(hit?.id ?? null)
+      setActiveNode(null)
+      if (!hit) panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
+      return
+    }
     if (tool === 'select') {
       if (e.button !== 0) return
       const p = atMm(e)
-      // A handle on the CURRENT selection outranks whatever is under it: the
-      // handle is small and deliberate, and the object beneath it is usually
-      // the selected one anyway.
-      if (selected) {
-        const b = objectBox(selected)
-        const h = b && hitHandle(b, p, HANDLE_PX / view.scale)
-        if (b && h) {
+      const snapshot = () => selectedObjs.map((o) => ({ id: o.id, paths: o.paths }))
+      if (selBox) {
+        // The rotation grip sits off the top edge, clear of the resize
+        // handles so the two can never be confused at any zoom.
+        const pivot = boxCentre(selBox)
+        const grip = { x: pivot.x, y: selBox.minY - ROTATE_PX / view.scale }
+        if (Math.hypot(p.x - grip.x, p.y - grip.y) <= HANDLE_PX / view.scale) {
           history.begin()
-          xform.current = { kind: 'resize', handle: h, from: b, start: p, paths: selected.paths, id: selected.id }
+          xform.current = { kind: 'rotate', from: selBox, start: p, items: snapshot() }
+          return
+        }
+        const h = hitHandle(selBox, p, HANDLE_PX / view.scale)
+        if (h) {
+          history.begin()
+          xform.current = { kind: 'resize', handle: h, from: selBox, start: p, items: snapshot() }
           return
         }
       }
       const hit = pickObject(doc.objects, p, PICK_PX / view.scale)
       if (hit) {
-        setSelectedId(hit.id)
-        history.begin()
-        xform.current = { kind: 'move', from: objectBox(hit)!, start: p, paths: hit.paths, id: hit.id }
+        // Shift toggles membership; a plain click replaces the selection,
+        // unless the object is already in it — dragging a multi-selection by
+        // one of its members must move all of them, not reset to that one.
+        let ids: string[]
+        if (e.shiftKey) {
+          ids = selectedIds.includes(hit.id)
+            ? selectedIds.filter((x) => x !== hit.id)
+            : [...selectedIds, hit.id]
+        } else {
+          ids = selectedIds.includes(hit.id) ? selectedIds : [hit.id]
+        }
+        setSelectedIds(ids)
+        if (ids.length) {
+          history.begin()
+          const objs = doc.objects.filter((o) => ids.includes(o.id))
+          xform.current = {
+            kind: 'move',
+            from: unionBox(objs.map(objectBox))!,
+            start: p,
+            items: objs.map((o) => ({ id: o.id, paths: o.paths })),
+          }
+        }
         return
       }
-      // Empty space: drop the selection and pan, which keeps the old
-      // drag-anywhere-to-pan habit working.
-      setSelectedId(null)
+      // Empty space. Shift keeps the selection and starts a marquee; a plain
+      // drag still pans, which is the habit this tool was born with.
+      if (e.shiftKey) { marquee.current = p; setMarquee({ a: p, b: p }); return }
+      setSelectedIds([])
       panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
       return
     }
     if (e.button !== 0) return
     const p = atMm(e)
+    if (tool === 'pen') {
+      // Clicking the first node closes the path — the standard way to finish a
+      // region, and the only one that does not need a separate control.
+      if (penNodes.current.length >= 2) {
+        const first = penNodes.current[0]
+        if (Math.hypot(p.x - first.x, p.y - first.y) <= PICK_PX / view.scale) {
+          finishPen(true)
+          return
+        }
+      }
+      // Pressed, not yet released: a release here is a corner, a drag pulls
+      // handles out of it into a curve.
+      penDrag.current = { x: p.x, y: p.y }
+      return
+    }
+    if (tool === 'arc') {
+      arcPts.current = [...arcPts.current, p]
+      if (arcPts.current.length === 3) {
+        const [a, b, bulge] = arcPts.current
+        arcPts.current = []
+        setDraft(null)
+        addShape(arcThrough(a, bulge, b), 'Arc')
+      }
+      return
+    }
     if (tool === 'polygon') {
       polyPts.current = [...polyPts.current, p]
       setDraft({ paths: [polyPts.current], closed: false })
@@ -550,24 +754,92 @@ export default function App() {
       setView((v) => ({ ...v, cx: pan.cx - (e.clientX - pan.x) / v.scale, cy: pan.cy - (e.clientY - pan.y) / v.scale }))
       return
     }
+    if (marquee.current) {
+      setMarquee({ a: marquee.current, b: atMm(e) })
+      return
+    }
     const x = xform.current
     if (x) {
       const p = atMm(e)
       // Always recomputed from the ORIGINAL geometry, never from the previous
       // frame. Accumulating frame to frame drifts, and a resize that compounds
       // its own rounding walks away from the cursor.
-      const next = x.kind === 'move'
-        ? movePaths(x.paths, p.x - x.start.x, p.y - x.start.y)
-        : fitPaths(x.paths, x.from, resizeBox(x.from, x.handle!, p, e.shiftKey))
-      patch(x.id, (o) => ({ ...o, paths: next }))
+      const to = x.kind === 'resize' ? resizeBox(x.from, x.handle!, p, e.shiftKey) : null
+      const rad = x.kind === 'rotate'
+        ? rotationAngle(boxCentre(x.from), x.start, p, e.shiftKey ? 15 : 0) : 0
+      const pivot = boxCentre(x.from)
+      setDoc((d) => ({
+        ...d,
+        objects: d.objects.map((o) => {
+          const it = x.items.find((q) => q.id === o.id)
+          if (!it) return o
+          const paths = x.kind === 'move' ? movePaths(it.paths, p.x - x.start.x, p.y - x.start.y)
+            : x.kind === 'rotate' ? rotatePaths(it.paths, pivot, rad)
+            : fitPaths(it.paths, x.from, to!)
+          // Shapes carry the editable outline; a transform that ignored them
+          // would resurrect the pre-drag curve the next time it was flattened.
+          const shapes = o.shapes?.map((sh) => ({
+            ...sh,
+            nodes: sh.nodes.map((n) => {
+              const m = (q: Pt) => {
+                const one = x.kind === 'move' ? movePaths([[q]], p.x - x.start.x, p.y - x.start.y)
+                  : x.kind === 'rotate' ? rotatePaths([[q]], pivot, rad)
+                  : fitPaths([[q]], x.from, to!)
+                return one[0][0]
+              }
+              const at = m({ x: n.x, y: n.y })
+              return {
+                ...n, x: at.x, y: at.y,
+                hIn: n.hIn && m(n.hIn), hOut: n.hOut && m(n.hOut),
+              }
+            }),
+          }))
+          return { ...o, paths, ...(shapes ? { shapes } : {}) }
+        }),
+      }))
       return
     }
     // Cursor feedback: a handle, a grabbable object, or nothing.
     if (tool === 'select' && !panning.current) {
       const p = atMm(e)
-      const b = selected ? objectBox(selected) : null
+      const b = selBox
       const h = b ? hitHandle(b, p, HANDLE_PX / view.scale) : null
       setHoverCursor(h ? handleCursor(h) : pickObject(doc.objects, p, PICK_PX / view.scale) ? 'move' : null)
+    }
+    const nd = nodeDrag.current
+    if (nd && selected) {
+      const p = atMm(e)
+      const shapes = [...shapesOf(selected)]
+      shapes[nd.s] = nd.which === 'node'
+        ? moveNode(shapes[nd.s], nd.i, p)
+        : moveHandle(shapes[nd.s], nd.i, nd.which, p)
+      setShapes(selected.id, shapes)
+      return
+    }
+    if (tool === 'pen') {
+      const p = atMm(e)
+      const d = penDrag.current
+      if (d) {
+        // Dragging away from the node pulls a symmetric pair of handles, so
+        // the curve leaves and enters the node along one line.
+        d.hOut = { x: p.x, y: p.y }
+        d.hIn = { x: 2 * d.x - p.x, y: 2 * d.y - p.y }
+        d.smooth = true
+      }
+      const preview = [...penNodes.current, ...(d ? [d] : [])]
+      // Show the committed path plus a provisional segment to the cursor.
+      const live = d ? preview : [...preview, { x: p.x, y: p.y } as PathNode]
+      if (live.length >= 2) setDraft({ paths: [flattenShape({ nodes: live, closed: false })], closed: false })
+      return
+    }
+    if (tool === 'arc' && arcPts.current.length) {
+      const p = atMm(e)
+      const pts = arcPts.current
+      setDraft(pts.length === 1
+        // Two points so far is just the chord; nothing to bulge yet.
+        ? { paths: [[pts[0], p]], closed: false }
+        : { paths: [flattenShape(arcThrough(pts[0], p, pts[1]))], closed: false })
+      return
     }
     if (tool === 'polygon' && polyPts.current.length) {
       // Rubber-band the next edge to the cursor.
@@ -587,7 +859,32 @@ export default function App() {
 
   const onUp = (e: React.MouseEvent) => {
     panning.current = null
+    if (marquee.current) {
+      const a = marquee.current
+      const b = atMm(e)
+      marquee.current = null
+      setMarquee(null)
+      const box: Box = {
+        minX: Math.min(a.x, b.x), minY: Math.min(a.y, b.y),
+        maxX: Math.max(a.x, b.x), maxY: Math.max(a.y, b.y),
+      }
+      // Enclosed, not merely touched: a band that grabbed anything it brushed
+      // would make it impossible to select behind a large shape.
+      const hits = doc.objects.filter((o) => {
+        if (!o.visible) return false
+        const ob = objectBox(o)
+        return !!ob && ob.minX >= box.minX && ob.maxX <= box.maxX
+          && ob.minY >= box.minY && ob.maxY <= box.maxY
+      })
+      setSelectedIds((prev) => [...new Set([...prev, ...hits.map((o) => o.id)])])
+      return
+    }
     if (xform.current) { xform.current = null; history.end(); return }
+    if (nodeDrag.current) { nodeDrag.current = null; history.end(); return }
+    if (tool === 'pen') {
+      if (penDrag.current) { penNodes.current = [...penNodes.current, penDrag.current]; penDrag.current = null }
+      return
+    }
     const d = dragging.current
     if (!d) return
     dragging.current = null
@@ -613,6 +910,9 @@ export default function App() {
 
   const cancelDraw = useCallback(() => {
     polyPts.current = []
+    penNodes.current = []
+    penDrag.current = null
+    arcPts.current = []
     dragging.current = null
     setDraft(null)
   }, [])
@@ -643,14 +943,35 @@ export default function App() {
         cancelDraw()
         return
       }
-      if (e.key === 'Enter') { if (tool === 'polygon') finishPolygon(); return }
-      const pick: Record<string, Tool> = { v: 'select', r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand' }
+      if (e.key === 'Enter') {
+        if (tool === 'polygon') finishPolygon()
+        else if (tool === 'pen') finishPen(false)
+        return
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'node' && selected && activeNode) {
+        e.preventDefault()
+        const shapes = [...shapesOf(selected)]
+        const before = shapes[activeNode.s]
+        const after = deleteNode(before, activeNode.i)
+        // deleteNode refuses to leave a husk; if it declined, say nothing and
+        // leave the outline alone rather than pretending something happened.
+        if (after !== before) {
+          shapes[activeNode.s] = after
+          setShapes(selected.id, shapes)
+          setActiveNode(null)
+        }
+        return
+      }
+      const pick: Record<string, Tool> = {
+        v: 'select', n: 'node', b: 'pen', a: 'arc',
+        r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand',
+      }
       const t = pick[e.key.toLowerCase()]
       if (t) { cancelDraw(); setTool(t) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [tool, finishPolygon, cancelDraw, history])
+  }, [tool, finishPolygon, finishPen, cancelDraw, history, selected, activeNode, shapesOf, setShapes])
 
   const moveObject = (index: number, delta: number) =>
     setDoc((d) => {
@@ -815,7 +1136,26 @@ export default function App() {
         <div
           className="canvas-wrap" ref={wrapRef}
           onWheel={onWheel} onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp}
-          onMouseLeave={onUp} onDoubleClick={() => tool === 'polygon' && finishPolygon()}
+          onMouseLeave={onUp} onDoubleClick={(e) => {
+            if (tool === 'polygon') { finishPolygon(); return }
+            if (tool === 'pen') { finishPen(false); return }
+            if (tool !== 'node' || !selected) return
+            // Add a node where the outline was double-clicked. The split is
+            // exact, so the shape does not twitch when a point appears.
+            const p = atMm(e)
+            const shapes = shapesOf(selected)
+            let best: { s: number; i: number; t: number; d: number } | null = null
+            shapes.forEach((sh, si) => {
+              const hit = nearestSegment(sh, p, PICK_PX * 2 / view.scale)
+              if (hit && (!best || hit.dist < best.d)) best = { s: si, i: hit.i, t: hit.t, d: hit.dist }
+            })
+            if (!best) return
+            const b = best as { s: number; i: number; t: number; d: number }
+            const next = [...shapes]
+            next[b.s] = insertNode(shapes[b.s], b.i, b.t)
+            setShapes(selected.id, next)
+            setActiveNode({ s: b.s, i: b.i + 1 })
+          }}
           onContextMenu={(e) => { if (tool !== 'select') { e.preventDefault(); cancelDraw() } }}
         >
           <canvas
@@ -830,6 +1170,21 @@ export default function App() {
           {!selected && <div className="empty">Select an object to set its stitch type and parameters.</div>}
           {selected && (
             <>
+              {/* The stitch type also lives in the toolbar, but that is a row
+                  of small icons far from the panel people actually read. With
+                  only the toolbar, "satin border" was visible in Properties
+                  while SATIN STITCH itself looked like it did not exist. */}
+              <div className="row">
+                <label>Stitch type</label>
+                <select value={selected.type}
+                  onChange={(e) => patch(selected.id, (o) => ({ ...o, type: e.target.value as StitchType }))}>
+                  <option value="run">Run — single line</option>
+                  <option value="bean">Bean — triple-pass line</option>
+                  <option value="satin">Satin — zigzag column</option>
+                  <option value="fill">Fill — tatami area</option>
+                  <option value="none">Off — stitches nothing</option>
+                </select>
+              </div>
               <Text label="Name" value={selected.name}
                 onChange={(v) => patch(selected.id, (o) => ({ ...o, name: v }), 'name')} />
               <div className="row">

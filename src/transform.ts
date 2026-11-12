@@ -153,6 +153,45 @@ export function fitPaths(paths: Pt[][], from: Box, to: Box): Pt[][] {
   })))
 }
 
+/**
+ * Rotate geometry about a centre.
+ *
+ * Rotation does NOT go through the bounding box the way move and resize do.
+ * An axis-aligned box cannot represent a rotated shape — deriving the new
+ * geometry from a rotated box would re-flatten it to axis-aligned and shear
+ * the design. The points are transformed directly instead.
+ */
+export function rotatePaths(paths: Pt[][], c: Pt, rad: number): Pt[][] {
+  const cos = Math.cos(rad), sin = Math.sin(rad)
+  return paths.map((ring) => ring.map((q) => {
+    const dx = q.x - c.x, dy = q.y - c.y
+    return { x: c.x + dx * cos - dy * sin, y: c.y + dx * sin + dy * cos }
+  }))
+}
+
+/** Centre of a box — the pivot a rotation turns about. */
+export function boxCentre(b: Box): Pt {
+  return { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 }
+}
+
+/**
+ * Angle from the pivot to the pointer, with an optional snap.
+ *
+ * Snapping is to ABSOLUTE angles rather than to increments of the drag, so
+ * 15 degrees means 15 degrees from where the shape started — which is what
+ * someone squaring a design up actually wants.
+ */
+export function rotationAngle(c: Pt, from: Pt, to: Pt, snapDeg = 0): number {
+  const a0 = Math.atan2(from.y - c.y, from.x - c.x)
+  const a1 = Math.atan2(to.y - c.y, to.x - c.x)
+  let d = a1 - a0
+  if (snapDeg > 0) {
+    const step = (snapDeg * Math.PI) / 180
+    d = Math.round(d / step) * step
+  }
+  return d
+}
+
 /** The mouse cursor each handle should show. */
 export function handleCursor(h: Handle): string {
   if (h === 'n' || h === 's') return 'ns-resize'
