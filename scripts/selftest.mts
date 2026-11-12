@@ -11,6 +11,7 @@ import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/st
 import { SCHEMA_VERSION, ProjectError, deserialize, serialize } from '../src/project'
 import { packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { unionSelfChecked } from '../src/boolean'
+import { MIN_DRAW_MM, bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from '../src/draw'
 import { offsetPathsChecked } from '../src/offset'
 
 let pass = 0, fail = 0
@@ -24,6 +25,18 @@ const circle = (cx: number, cy: number, r: number, n = 128): Pt[] =>
     const a = (i / n) * Math.PI * 2
     return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) }
   })
+
+const planBoundsOf = (pts: Pt[]) => {
+  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y)
+  return { w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) }
+}
+
+const segDist = (p: Pt, a: Pt, b: Pt): number => {
+  const dx = b.x - a.x, dy = b.y - a.y
+  const L = dx * dx + dy * dy
+  const t = L ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / L)) : 0
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+}
 
 const rect = (x: number, y: number, w: number, h: number): Pt[] => [
   { x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h },
@@ -624,6 +637,94 @@ console.log('\n# B10 — the operator package')
   const html = runSheetHtml(doc, st)
   ok(html.includes('Isacord 1902') && html.includes('UNASSIGNED'), 'the run sheet names both threads')
   ok(html.includes('Estimated run time'), 'the run sheet reports run time')
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# drawing tools')
+{
+  // --- rectangle
+  const r1 = rectPath({ x: 0, y: 0 }, { x: 30, y: 20 })
+  ok(r1.length === 4, 'a rectangle is four corners', `${r1.length}`)
+  const rb = planBoundsOf(r1)
+  ok(rb.w === 30 && rb.h === 20, 'the rectangle spans the drag', `${rb.w}x${rb.h}`)
+
+  // Dragging up-left must still make a rectangle, not negative geometry.
+  const r2 = rectPath({ x: 0, y: 0 }, { x: -30, y: -20 })
+  const rb2 = planBoundsOf(r2)
+  ok(rb2.w === 30 && rb2.h === 20, 'dragging back up-left spans the same box', `${rb2.w}x${rb2.h}`)
+
+  // Shift keeps the LARGER extent and follows the drag direction, so the
+  // corner stays under the cursor instead of jumping away from it.
+  const sq = rectPath({ x: 0, y: 0 }, { x: -40, y: 10 }, true)
+  const sb = planBoundsOf(sq)
+  ok(sb.w === 40 && sb.h === 40, 'shift squares to the larger extent', `${sb.w}x${sb.h}`)
+  ok(Math.min(...sq.map((p) => p.x)) === -40, 'the square grows the way the drag went',
+    `${Math.min(...sq.map((p) => p.x))}`)
+
+  // --- ellipse
+  const e1 = ellipsePath({ x: 0, y: 0 }, { x: 40, y: 20 })
+  const eb = planBoundsOf(e1)
+  // Inscribed, so the flattened bounds sit a chord-error UNDER the exact box
+  // (the sample count rarely lands exactly on the 90 degree extremes). Never
+  // over: a shape that grew past the drag would be the real bug.
+  ok(eb.w <= 40 + 1e-9 && eb.h <= 20 + 1e-9 && eb.w > 40 - 0.01 && eb.h > 20 - 0.01,
+    'an ellipse is inscribed in the drag box', `${eb.w.toFixed(4)}x${eb.h.toFixed(4)}`)
+  // Segment count tracks size, so a big oval is not lumpy and a dot is not wasteful.
+  const small = ellipsePath({ x: 0, y: 0 }, { x: 4, y: 4 })
+  const big = ellipsePath({ x: 0, y: 0 }, { x: 200, y: 200 })
+  ok(big.length > small.length, 'a bigger ellipse gets more points',
+    `${small.length} -> ${big.length}`)
+  // Chord error stays under the fill pitch, which is what "smooth" has to mean.
+  let worstSagitta = 0
+  for (let i = 0; i < big.length; i++) {
+    const a = big[i], b = big[(i + 1) % big.length]
+    const chord = Math.hypot(b.x - a.x, b.y - a.y)
+    worstSagitta = Math.max(worstSagitta, (chord * chord) / (8 * 100))
+  }
+  ok(worstSagitta < 0.4, 'a 200 mm circle stays inside the 0.4 mm fill pitch',
+    `${worstSagitta.toFixed(3)} mm`)
+
+  const circ = ellipsePath({ x: 0, y: 0 }, { x: 50, y: 10 }, true)
+  const cb = planBoundsOf(circ)
+  ok(Math.abs(cb.w - cb.h) < 1e-6, 'shift makes a true circle', `${cb.w.toFixed(1)}x${cb.h.toFixed(1)}`)
+
+  // --- the slipped-click guard
+  ok(!bigEnough({ x: 0, y: 0 }, { x: 0.2, y: 0.2 }), 'a 0.2 mm twitch is not a shape')
+  ok(bigEnough({ x: 0, y: 0 }, { x: MIN_DRAW_MM, y: 0 }), 'a 1 mm drag is')
+
+  // --- freehand
+  // A raw trail: many near-collinear samples, as a mouse actually delivers.
+  const trail: Pt[] = Array.from({ length: 400 }, (_, i) => ({ x: i * 0.1, y: Math.sin(i / 40) * 2 }))
+  const fh = freehandPath(trail)
+  ok(!fh.closed, 'an open scribble stays open')
+  ok(fh.path.length < trail.length / 4, 'the trail is simplified, not stitched point-per-event',
+    `${trail.length} -> ${fh.path.length}`)
+  // Simplification must not move the line.
+  let worst = 0
+  for (const p of trail) {
+    let d = Infinity
+    for (let i = 1; i < fh.path.length; i++) d = Math.min(d, segDist(p, fh.path[i - 1], fh.path[i]))
+    worst = Math.max(worst, d)
+  }
+  ok(worst < 0.35, 'simplification keeps the line within tolerance', `${worst.toFixed(3)} mm`)
+
+  // A loop that returns to its start is reported closed, so it can be filled.
+  const loop = circle(0, 0, 20, 300).concat([{ x: 20, y: 0 }])
+  const fl = freehandPath(loop)
+  ok(fl.closed, 'a trail that returns to its start is closed')
+  ok(fl.path.length >= 3, 'the closed trail is a usable ring', `${fl.path.length}`)
+
+  // A tiny scribble has its ends close together by arithmetic, not intent.
+  const tiny = [{ x: 0, y: 0 }, { x: 1, y: 0.5 }, { x: 0.2, y: 0.1 }]
+  ok(!freehandPath(tiny).closed, 'a 1 mm scribble is not read as a loop')
+
+  ok(freehandPath([{ x: 0, y: 0 }]).path.length === 0, 'a single point makes no path')
+  ok(freehandPath([]).path.length === 0, 'an empty trail makes no path')
+
+  // --- polygon
+  ok(!polygonUsable([{ x: 0, y: 0 }, { x: 10, y: 0 }]), 'two points are not a polygon')
+  ok(polygonUsable([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 5, y: 8 }]), 'three are')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

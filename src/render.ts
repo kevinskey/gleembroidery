@@ -40,6 +40,8 @@ export interface RenderOptions {
   selectedId?: string | null
   /** Read-only plan loaded from a file, drawn behind the document. */
   reference?: StitchPlan | null
+  /** Shape being dragged out right now, drawn live and owned by nobody yet. */
+  draft?: { paths: Pt[][]; closed: boolean } | null
 }
 
 const RULER = 22 // px gutter for the rulers
@@ -140,6 +142,31 @@ export function render(
       }
       ctx.setLineDash([])
     }
+  }
+
+  // --- the shape being drawn ----------------------------------------------
+  // Always drawn, even with ART off: hiding the thing under the cursor would
+  // make the tool feel broken. Accent-coloured so it reads as not-yet-real.
+  if (opt.draft) {
+    ctx.save()
+    ctx.strokeStyle = '#1f9cf0'
+    ctx.lineWidth = 1.5
+    ctx.setLineDash([5, 3])
+    for (const path of opt.draft.paths) {
+      if (path.length < 2) continue
+      ctx.beginPath()
+      const p0 = toS(path[0])
+      ctx.moveTo(p0.x, p0.y)
+      for (let i = 1; i < path.length; i++) { const p = toS(path[i]); ctx.lineTo(p.x, p.y) }
+      if (opt.draft.closed) ctx.closePath()
+      ctx.stroke()
+      // Mark the committed vertices so a polygon shows what it has so far.
+      ctx.setLineDash([])
+      ctx.fillStyle = '#1f9cf0'
+      for (const q of path) { const p = toS(q); ctx.fillRect(p.x - 2, p.y - 2, 4, 4) }
+      ctx.setLineDash([5, 3])
+    }
+    ctx.restore()
   }
 
   // --- stitches -----------------------------------------------------------

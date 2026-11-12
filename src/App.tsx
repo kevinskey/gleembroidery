@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
-import { toRegions } from './geometry'
+import { close, toRegions } from './geometry'
+import { bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from './draw'
 import {
   HOOPS,
   SPACINGS,
@@ -36,6 +37,42 @@ const PALETTE = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2
 
 /** Where in-progress work is parked so a reload does not lose it. */
 const AUTOSAVE_KEY = 'gleembroidery.autosave.v1'
+
+/** Canvas tools. 'select' is the old behaviour: left-drag pans. */
+type Tool = 'select' | 'rect' | 'ellipse' | 'polygon' | 'freehand'
+
+const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
+  {
+    id: 'select', label: 'Pan', hint: 'Pan the view — drag to move around (V)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16"><path d="M8 2l6 6-2.5.7L13 12l-1.8.8-1.5-3.3L8 11.5z" fill="currentColor" /></svg>
+    ),
+  },
+  {
+    id: 'rect', label: 'Rect', hint: 'Drag a rectangle — hold Shift for a square (R)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16"><rect x="3.5" y="3.5" width="15" height="9" stroke="currentColor" strokeWidth="1.5" fill="none" /></svg>
+    ),
+  },
+  {
+    id: 'ellipse', label: 'Ellipse', hint: 'Drag an ellipse — hold Shift for a circle (E)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16"><ellipse cx="11" cy="8" rx="7.5" ry="4.5" stroke="currentColor" strokeWidth="1.5" fill="none" /></svg>
+    ),
+  },
+  {
+    id: 'polygon', label: 'Polygon', hint: 'Click each corner; double-click or Enter to finish, Esc to cancel (P)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16"><path d="M11 2.5l7.5 5.5-3 6h-9l-3-6z" stroke="currentColor" strokeWidth="1.5" fill="none" /></svg>
+    ),
+  },
+  {
+    id: 'freehand', label: 'Draw', hint: 'Drag to draw freely; end near the start to close a shape (D)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16"><path d="M2 12c4-9 7 5 10-1s5 1 8-3" stroke="currentColor" strokeWidth="1.5" fill="none" /></svg>
+    ),
+  },
+]
 
 const TYPES: { id: StitchType; label: string; hint: string; icon: ReactElement }[] = [
   {
@@ -142,13 +179,24 @@ export default function App() {
   const [sim, setSim] = useState<number | null>(null)
   const [machine, setMachine] = useState<MachineProfile>(DEFAULT_MACHINE)
   const [note, setNote] = useState<string | null>(null)
-  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference'>>({
+  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft'>>({
     showGrid: true, showArt: true, showStitches: true, showPoints: false, showJumps: true,
   })
+
+  const [tool, setTool] = useState<Tool>('select')
+  // Geometry being dragged out right now, in mm. Drawn as a dashed preview and
+  // held OUTSIDE the document so an abandoned drag leaves nothing behind.
+  const [draft, setDraft] = useState<{ paths: Pt[][]; closed: boolean } | null>(null)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const panning = useRef<{ x: number; y: number; cx: number; cy: number } | null>(null)
+  // Drag in progress for the shape tools: where it started, and the live trail
+  // for freehand. A ref, not state — this updates on every mousemove and must
+  // not re-render the toolbar.
+  const dragging = useRef<{ from: Pt; trail: Pt[] } | null>(null)
+  // Polygon vertices committed by clicks so far.
+  const polyPts = useRef<Pt[]>([])
 
   // Generation runs in a worker, keyed to the document revision, so a slow
   // result can never land on top of a newer edit.
@@ -181,8 +229,8 @@ export default function App() {
     }
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    render(ctx, doc, plan, view, { ...opts, upTo: sim ?? undefined, selectedId, reference })
-  }, [doc, plan, view, opts, sim, selectedId, reference])
+    render(ctx, doc, plan, view, { ...opts, upTo: sim ?? undefined, selectedId, reference, draft })
+  }, [doc, plan, view, opts, sim, selectedId, reference, draft])
 
   useEffect(() => { draw() }, [draw])
 
@@ -274,6 +322,35 @@ export default function App() {
     setSelectedId(made[0]?.id ?? null)
     setSim(null)
   }
+
+  /**
+   * Add a shape the user just drew.
+   *
+   * Deliberately NOT addPaths: that recentres the import on the hoop, which is
+   * right for a file arriving in unknown coordinates and badly wrong for a
+   * shape drawn at a chosen spot — the shape would jump to the middle the
+   * instant the mouse came up. Drawn geometry is already in document mm, so it
+   * is kept exactly where it was put.
+   */
+  // Depends on the object COUNT, and every memoised caller depends on this in
+  // turn. That chain is load-bearing: when finishPolygon memoised with an
+  // empty dep list it kept the first addDrawn forever, and named a shape
+  // "Polygon 1" on a document that already held two objects. The count is
+  // read here rather than inside the setDoc updater because an updater must
+  // stay a pure function — React may run it twice.
+  const addDrawn = useCallback((paths: Pt[][], closed: boolean, label: string) => {
+    const n = doc.objects.length
+    const obj = newObject({
+      name: `${label} ${n + 1}`,
+      color: PALETTE[n % PALETTE.length],
+      // An open path cannot be filled; a closed one usually wants to be.
+      type: closed ? 'fill' : 'run',
+      paths: paths.map((p) => (closed ? close(p) : p)),
+    })
+    setDoc((d) => ({ ...d, objects: [...d.objects, obj] }))
+    setSelectedId(obj.id)
+    setSim(null)
+  }, [doc.objects.length])
 
   const importSvg = async (file: File) => {
     try {
@@ -378,15 +455,105 @@ export default function App() {
     setView({ scale, cx: view.cx + (before.x - after.x), cy: view.cy + (before.y - after.y) })
   }
 
+  /** Pointer position in document mm. */
+  const atMm = (e: React.MouseEvent): Pt => {
+    const rect = wrapRef.current!.getBoundingClientRect()
+    return screenToWorld(view, rect.width, rect.height, { x: e.clientX - rect.left, y: e.clientY - rect.top })
+  }
+
+  // Build the live preview for whichever tool is dragging.
+  const shapeFor = (from: Pt, to: Pt, shift: boolean): { paths: Pt[][]; closed: boolean } | null => {
+    if (tool === 'rect') return { paths: [rectPath(from, to, shift)], closed: true }
+    if (tool === 'ellipse') return { paths: [ellipsePath(from, to, shift)], closed: true }
+    return null
+  }
+
   const onDown = (e: React.MouseEvent) => {
-    panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
+    // Middle button always pans, whatever tool is active — otherwise picking a
+    // shape tool would strand the user with no way to move around.
+    if (tool === 'select' || e.button === 1) {
+      panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
+      return
+    }
+    if (e.button !== 0) return
+    const p = atMm(e)
+    if (tool === 'polygon') {
+      polyPts.current = [...polyPts.current, p]
+      setDraft({ paths: [polyPts.current], closed: false })
+      return
+    }
+    dragging.current = { from: p, trail: [p] }
   }
+
   const onMove = (e: React.MouseEvent) => {
-    const p = panning.current
-    if (!p) return
-    setView((v) => ({ ...v, cx: p.cx - (e.clientX - p.x) / v.scale, cy: p.cy - (e.clientY - p.y) / v.scale }))
+    const pan = panning.current
+    if (pan) {
+      setView((v) => ({ ...v, cx: pan.cx - (e.clientX - pan.x) / v.scale, cy: pan.cy - (e.clientY - pan.y) / v.scale }))
+      return
+    }
+    if (tool === 'polygon' && polyPts.current.length) {
+      // Rubber-band the next edge to the cursor.
+      setDraft({ paths: [[...polyPts.current, atMm(e)]], closed: false })
+      return
+    }
+    const d = dragging.current
+    if (!d) return
+    const p = atMm(e)
+    if (tool === 'freehand') {
+      d.trail.push(p)
+      setDraft({ paths: [d.trail.slice()], closed: false })
+      return
+    }
+    setDraft(shapeFor(d.from, p, e.shiftKey))
   }
-  const onUp = () => { panning.current = null }
+
+  const onUp = (e: React.MouseEvent) => {
+    panning.current = null
+    const d = dragging.current
+    if (!d) return
+    dragging.current = null
+    setDraft(null)
+    const p = atMm(e)
+    if (tool === 'freehand') {
+      const fh = freehandPath(d.trail)
+      // An open trail is a line: run stitch. A closed one is a region: fill.
+      if (fh.path.length) addDrawn([fh.path], fh.closed, fh.closed ? 'Shape' : 'Line')
+      return
+    }
+    if (!bigEnough(d.from, p)) return // a slipped click, not a shape
+    const s = shapeFor(d.from, p, e.shiftKey)
+    if (s) addDrawn(s.paths, true, tool === 'rect' ? 'Rectangle' : 'Ellipse')
+  }
+
+  const finishPolygon = useCallback(() => {
+    const pts = polyPts.current
+    polyPts.current = []
+    setDraft(null)
+    if (polygonUsable(pts)) addDrawn([pts], true, 'Polygon')
+  }, [addDrawn])
+
+  const cancelDraw = useCallback(() => {
+    polyPts.current = []
+    dragging.current = null
+    setDraft(null)
+  }, [])
+
+  // Tool shortcuts, plus Enter/Esc for the polygon. Ignored while a text field
+  // has focus, or typing a name would switch tools under the user.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (e.key === 'Escape') { cancelDraw(); return }
+      if (e.key === 'Enter') { if (tool === 'polygon') finishPolygon(); return }
+      const pick: Record<string, Tool> = { v: 'select', r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand' }
+      const t = pick[e.key.toLowerCase()]
+      if (t) { cancelDraw(); setTool(t) }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [tool, finishPolygon, cancelDraw])
 
   const moveObject = (index: number, delta: number) =>
     setDoc((d) => {
@@ -422,6 +589,21 @@ export default function App() {
           <button onClick={exportDstOnly} disabled={!total} title="Machine file only — no colours travel with a DST">
             .dst only
           </button>
+        </div>
+
+        <div className="group">
+          <label>Draw</label>
+          {TOOLS.map((t) => (
+            <button
+              key={t.id}
+              className={`tool${tool === t.id ? ' on' : ''}`}
+              title={t.hint}
+              onClick={() => { cancelDraw(); setTool(t.id) }}
+            >
+              {t.icon}
+              <span>{t.label}</span>
+            </button>
+          ))}
         </div>
 
         <div className="group">
@@ -527,9 +709,11 @@ export default function App() {
 
         <div
           className="canvas-wrap" ref={wrapRef}
-          onWheel={onWheel} onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
+          onWheel={onWheel} onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp}
+          onMouseLeave={onUp} onDoubleClick={() => tool === 'polygon' && finishPolygon()}
+          onContextMenu={(e) => { if (tool !== 'select') { e.preventDefault(); cancelDraw() } }}
         >
-          <canvas ref={canvasRef} />
+          <canvas ref={canvasRef} className={tool === 'select' ? undefined : 'drawing'} />
         </div>
 
         <div className="side right">
