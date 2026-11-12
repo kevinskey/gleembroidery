@@ -101,6 +101,39 @@ function Text({ label, value, placeholder, onChange }: {
   )
 }
 
+// A file-picker button.
+//
+// This is a <label> that LOOKS like a button, not a <button> that calls
+// input.click(). That distinction is the whole point: the old version was
+// `<label><button onClick={input.click()}/><input type="file" hidden/></label>`,
+// and `hidden` means display:none — WebKit refuses to open the picker for a
+// programmatic click on a file input that is display:none, so on Safari the
+// Import SVG button did nothing at all, silently. Chrome allowed it, which is
+// why it looked fine in testing.
+//
+// Native label-to-input activation needs no script and works everywhere, so
+// the input is visually hidden by clipping (still rendered, still focusable)
+// rather than removed from the box tree.
+function FilePick({ label, accept, onPick }: {
+  label: string; accept: string; onPick: (f: File) => void;
+}) {
+  return (
+    <label className="filepick" tabIndex={0}
+      onKeyDown={(e) => {
+        // A label is not natively keyboard-activatable; forward Enter/Space to
+        // the input so the control is still reachable without a mouse.
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          e.currentTarget.querySelector('input')?.click()
+        }
+      }}>
+      {label}
+      <input type="file" accept={accept} className="visually-hidden"
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) onPick(f); e.target.value = '' }} />
+    </label>
+  )
+}
+
 export default function App() {
   const [doc, setDoc] = useState<Doc>(emptyDoc)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -372,26 +405,14 @@ export default function App() {
       <div className="toolbar">
         <div className="group">
           <label>Artwork</label>
-          <label>
-            <button onClick={(e) => (e.currentTarget.nextElementSibling as HTMLInputElement).click()}>Import SVG…</button>
-            <input type="file" accept=".svg,image/svg+xml" hidden
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) importSvg(f); e.target.value = '' }} />
-          </label>
-          <label>
-            <button onClick={(e) => (e.currentTarget.nextElementSibling as HTMLInputElement).click()}>Open DST…</button>
-            <input type="file" accept=".dst,.DST" hidden
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) importDstReference(f); e.target.value = '' }} />
-          </label>
+          <FilePick label="Import SVG…" accept=".svg,image/svg+xml" onPick={importSvg} />
+          <FilePick label="Open DST…" accept=".dst,.DST" onPick={importDstReference} />
           {reference && <button onClick={() => setReference(null)}>Clear ref</button>}
         </div>
 
         <div className="group">
           <label>Project</label>
-          <label>
-            <button onClick={(e) => (e.currentTarget.nextElementSibling as HTMLInputElement).click()}>Open…</button>
-            <input type="file" accept={`.${FILE_EXT},application/json`} hidden
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) openProject(f); e.target.value = '' }} />
-          </label>
+          <FilePick label="Open…" accept={`.${FILE_EXT},application/json`} onPick={openProject} />
           <button onClick={saveProject} disabled={!doc.objects.length}>Save</button>
         </div>
 

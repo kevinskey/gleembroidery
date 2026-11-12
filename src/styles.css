@@ -64,7 +64,7 @@ body {
 
 .group:last-child { border-right: 0; }
 
-.group > label {
+.group > label:not(.filepick) {
   font-size: 11px;
   font-weight: 600;
   color: var(--muted);
@@ -80,6 +80,39 @@ button, select, input[type='text'], input[type='number'] {
   border: 1px solid var(--line);
   border-radius: 5px;
   padding: 4px 8px;
+}
+
+/* A label styled as a button, for the file pickers. It must stay a label —
+   see FilePick in App.tsx for why a <button> + input.click() silently fails
+   in Safari. Inherits the control styling above by repeating it here rather
+   than by adding .filepick to that selector list, so a label never picks up
+   button-only rules like :disabled. */
+.group > label.filepick, .filepick {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 8px;
+  cursor: pointer;
+  /* The toolbar's bare <label>s are uppercase section captions; these are not. */
+  text-transform: none;
+  letter-spacing: normal;
+  margin-right: 0;
+}
+.group > label.filepick:hover, .group > label.filepick:focus-visible { border-color: var(--accent); }
+
+/* Hidden to the eye, still a laid-out, focusable control — unlike
+   display:none, which is what stopped the picker from opening. */
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 button { cursor: pointer; }
