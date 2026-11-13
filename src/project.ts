@@ -102,6 +102,46 @@ function hoopOut(h: Hoop) {
  */
 export const SIGNATURE_GEOMETRY_KEYS = ['paths', 'shapes', 'guides'] as const
 
+/**
+ * Everything a saved object carries EXCEPT its geometry.
+ *
+ * Split out from objectOut for the signature's sake. objectOut maps every
+ * point into a fresh [x, y] array — on a 20k-point document that allocation
+ * is most of the cost, and the signature was paying it and then throwing the
+ * result away.
+ *
+ * The two are kept in step by a test rather than by discipline: it asserts
+ * that objectOut's keys are exactly these plus SIGNATURE_GEOMETRY_KEYS, so a
+ * field added to one and not the other fails rather than going unhashed.
+ */
+export function settingsOut(o: EmbObject) {
+  return {
+    id: o.id,
+    name: o.name,
+    color: o.color,
+    thread: { ...o.thread },
+    visible: o.visible,
+    ...(o.group ? { group: o.group } : {}),
+    type: o.type,
+    ...(o.entry ? { entry: [o.entry.x, o.entry.y] } : {}),
+    ...(o.exit ? { exit: [o.exit.x, o.exit.y] } : {}),
+    applique: { ...o.applique },
+    puff: { ...o.puff },
+    knockdown: { ...o.knockdown },
+    ...(o.twoRail ? { twoRail: true } : {}),
+    ...(o.text ? {
+      text: {
+        ...o.text,
+        ...(o.text.path?.length ? { path: o.text.path.map((q) => [q.x, q.y]) } : {}),
+      },
+    } : {}),
+    run: { ...o.run },
+    motif: { ...o.motif },
+    satin: { ...o.satin, split: { ...o.satin.split } },
+    fill: { ...o.fill, border: { ...o.fill.border } },
+  }
+}
+
 export function objectOut(o: EmbObject) {
   return {
     id: o.id,
@@ -653,12 +693,7 @@ export function docSignature(doc: Doc): string {
   for (const o of doc.objects) {
     // Settings: hashed wholesale from the save format, so a new one cannot be
     // left out. Cheap — there are a few dozen numbers per object.
-    const saved: Record<string, unknown> = objectOut(o)
-    const settings: Record<string, unknown> = {}
-    for (const k of Object.keys(saved)) {
-      if (!(SIGNATURE_GEOMETRY_KEYS as readonly string[]).includes(k)) settings[k] = saved[k]
-    }
-    mixStr(JSON.stringify(settings))
+    mixStr(JSON.stringify(settingsOut(o)))
     // Geometry: folded numerically. Every coordinate goes in, so an edit that
     // preserves point counts still changes the signature.
     for (const path of o.paths) {

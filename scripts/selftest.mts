@@ -11,7 +11,7 @@ import { dist, isClosed, resample, ringArea, toRegions } from '../src/geometry'
 import { DEFAULT_APPLIQUE, DEFAULT_FILL, FILL_STYLES, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, objectVisible, orderedUnderlay, type Pt } from '../src/model'
 import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths , angleAt, assignGuides, resolveGuides } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
-import { SCHEMA_VERSION, SIGNATURE_GEOMETRY_KEYS, ProjectError, deserialize, docSignature, objectOut, serialize } from '../src/project'
+import { SCHEMA_VERSION, SIGNATURE_GEOMETRY_KEYS, ProjectError, deserialize, docSignature, objectOut, serialize, settingsOut } from '../src/project'
 import { clonePlan, deleteStitches, freeze, freezeState, moveStitches, penetrationCount, pickStitch, pickStitchesIn } from '../src/stitchedit'
 import { appliqueCutSvg, packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { NOMINAL_PER_MM2, SEVERE_RATIO, WARN_RATIO, analyseDensity, densityColour } from '../src/density'
@@ -2428,22 +2428,41 @@ console.log('\n# the plan regenerates when the document changes')
     // Probed on an object that HAS every optional field: `guides` and the
     // rest are written only when present, so an empty object would report
     // them as missing from the format.
+    // EVERY optional field set. They are written conditionally, so a probe
+    // without them would compare two functions that both omit the same keys
+    // and prove nothing about the ones that matter.
     const probe = base()
     probe.objects[0].guides = [{ a: { x: 0, y: 0 }, b: { x: 1, y: 1 } }]
+    probe.objects[0].entry = { x: 1, y: 1 }
+    probe.objects[0].exit = { x: 2, y: 2 }
+    probe.objects[0].twoRail = true
+    probe.objects[0].group = 'g1'
+    probe.objects[0].text = { ...DEFAULT_TEXT(), path: [{ x: 0, y: 0 }, { x: 5, y: 0 }] }
     const saved = objectOut(probe.objects[0]) as Record<string, unknown>
+    const settings = settingsOut(probe.objects[0]) as Record<string, unknown>
     const declared = SIGNATURE_GEOMETRY_KEYS as readonly string[]
-    const unknownDeclared = declared.filter((k) => !(k in saved))
-    ok(unknownDeclared.length === 0,
-      'every declared geometry key is really in the save format', unknownDeclared.join(', '))
-    // Anything array-of-points shaped that is NOT declared is a suspect.
-    const looksLikeGeometry = Object.keys(saved).filter((k) =>
-      !declared.includes(k) && Array.isArray(saved[k])
-      && (saved[k] as unknown[]).some((v) => Array.isArray(v) || (v && typeof v === 'object')))
-    ok(looksLikeGeometry.length === 0,
-      'and no undeclared field looks like geometry', looksLikeGeometry.join(', '))
+    // THE GUARD THAT KEEPS THE SPLIT HONEST. The settings half is hashed
+    // wholesale and the geometry half is folded numerically; a field added
+    // to the save format and to neither would be hashed by nothing, which is
+    // the original bug wearing a new hat.
+    const covered = [...Object.keys(settings), ...declared].sort().join(',')
+    ok(covered === Object.keys(saved).sort().join(','),
+      'settings + declared geometry is exactly what gets saved',
+      `saved: ${Object.keys(saved).sort().join(',')}\n      covered: ${covered}`)
+    ok(declared.every((k) => k in saved),
+      'and every declared geometry key really is in the save format')
   }
 
   // Speed: this runs on every render, including every frame of a drag.
+  //
+  // Measured RELATIVE to the thing it replaced, not against a number of
+  // milliseconds. An absolute budget is a property of whatever machine
+  // happens to run the suite — this one failed on the deploy host, which is
+  // slower than a laptop and is not the machine anyone drags on — while the
+  // property that actually matters is machine-independent: hashing the
+  // geometry numerically must stay far cheaper than stringifying it, which
+  // is what the first version of docSignature did and what cost ~10 ms a
+  // frame.
   {
     const big = emptyDoc()
     for (let k = 0; k < 20; k++) {
@@ -2452,17 +2471,22 @@ console.log('\n# the plan regenerates when the document changes')
         paths: [Array.from({ length: 1000 }, (_, i) => ({ x: Math.sin(i) * 20, y: Math.cos(i) * 20 }))],
       }))
     }
-    docSignature(big)
-    const t0 = performance.now()
-    for (let i = 0; i < 10; i++) docSignature(big)
-    const ms = (performance.now() - t0) / 10
-    ok(ms < 5, 'and 20k points hash fast enough not to drop a drag frame',
-      `${ms.toFixed(2)} ms`)
+    const stringifyAll = () => JSON.stringify(big.objects.map((o) => objectOut(o))).length
+    // Warm both paths before timing either.
+    docSignature(big); stringifyAll()
+    const time = (f: () => unknown, n: number) => {
+      const t0 = performance.now()
+      for (let i = 0; i < n; i++) f()
+      return (performance.now() - t0) / n
+    }
+    const ours = time(() => docSignature(big), 10)
+    const naive = time(stringifyAll, 10)
+    ok(ours < naive / 2.5,
+      'the signature is far cheaper than stringifying the geometry would be',
+      `${ours.toFixed(2)} ms vs ${naive.toFixed(2)} ms`)
   }
 }
 
-
-// ---------------------------------------------------------------------------
 console.log('\n# satin splitting')
 {
   const line: Pt[] = [{ x: 0, y: 0 }, { x: 50, y: 0 }]
