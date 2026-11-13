@@ -39,7 +39,11 @@ body {
 
 .app {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  /* minmax(0, 1fr) for the same reason as .body below: a bare 1fr track
+     refuses to shrink under its content's minimum, so a tall sewing
+     sequence pushed the whole application past the bottom of the window
+     and took the status bar with it. */
+  grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100%;
 }
 
@@ -239,6 +243,13 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .body {
   display: grid;
   grid-template-columns: 240px 1fr 260px;
+  /* minmax(0, 1fr), not 1fr. A grid track refuses to shrink below its
+     content's minimum by default, so with two dozen objects in the sewing
+     sequence the row grew to the list's full height, the sidebar overflowed
+     its own box instead of scrolling, and the overflow painted straight over
+     the status bar. The min-height below is not enough on its own — it caps
+     the GRID, not the track inside it. */
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
 }
 
