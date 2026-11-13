@@ -31,6 +31,10 @@ import {
   colourName, needleKey, reorder, runBlocks, threadChanges, unassignedBlocks,
 } from '../src/runview'
 import { classifyProblems, nextStep, summarise } from '../src/problems'
+import {
+  BROTHER_THREADS, colourDistance, nearestMachineThread, nearestSpools, newSpool,
+  parseRack, serializeRack, spoolLabel,
+} from '../src/threads'
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines, textOnPath } from '../src/text'
@@ -4107,6 +4111,75 @@ console.log('\n# problems')
     ok(nextStep([]) === null, 'and a clean design has no next step')
     ok(nextStep(classifyProblems(['Restored unsaved work from your last session'], [])) === null,
       'a note is not a problem to fix')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# the thread rack')
+{
+  const rack = [
+    newSpool('Madeira Classic 40', '1025', '#e8601c', 'Dark Orange'),
+    newSpool('Madeira Classic 40', '1002', '#f0f0f5', 'White'),
+    newSpool('Isacord 40', '5422', '#1f4a8c', 'Navy'),
+  ]
+
+  // --- a spool reads the way it does on a run sheet
+  {
+    ok(spoolLabel(rack[0]) === 'Madeira Classic 40 1025 Dark Orange',
+      'a spool reads as brand, code, name', spoolLabel(rack[0]))
+    ok(spoolLabel({ code: '1025' }) === '1025', 'and a bare code still reads')
+    ok(spoolLabel({}) === '', 'and nothing reads as nothing')
+  }
+
+  // --- nearest first, which is the only ordering that helps
+  {
+    const near = nearestSpools(rack, '#ff6a1f')
+    ok(near[0].code === '1025', 'an orange finds the orange cone', near[0].code)
+    ok(nearestSpools(rack, '#ffffff')[0].code === '1002', 'and a white finds the white')
+    ok(nearestSpools(rack, '#102a5a')[0].code === '5422', 'and a navy the navy')
+    ok(nearestSpools(rack, '#ff0000', 2).length === 2, 'the list can be capped')
+    ok(nearestSpools([], '#ff0000').length === 0, 'an empty rack offers nothing')
+  }
+
+  // --- the built-in chart is the one that can be stated exactly
+  {
+    const m = nearestMachineThread('#ff0000')!
+    ok(m.brand === 'Brother', 'the built-in chart is the format palette', m.brand)
+    ok(m.thread.name === 'Red', 'and red finds Red', m.thread.name)
+    ok(nearestMachineThread('#ffffff')!.thread.name === 'White', 'white finds White')
+    ok(nearestMachineThread('#000000')!.thread.name === 'Black', 'black finds Black')
+    ok(BROTHER_THREADS.length === 64, 'all 64 are there', `${BROTHER_THREADS.length}`)
+    ok(BROTHER_THREADS.every((t) => /^#[0-9a-f]{6}$/i.test(t.color)),
+      'and every one has a readable colour')
+    ok(new Set(BROTHER_THREADS.map((t) => t.code)).size === 64, 'with no duplicate codes')
+  }
+
+  // --- storage, and a spool with no code is not a spool
+  {
+    const back = parseRack(serializeRack(rack))
+    ok(back.length === 3, 'a rack survives a save', `${back.length}`)
+    ok(spoolLabel(back[0]) === spoolLabel(rack[0]), 'intact')
+    ok(parseRack(null).length === 0 && parseRack('nonsense').length === 0,
+      'and a missing or corrupt rack is empty, not an exception')
+    // A cone with no catalogue number cannot be found on a rack.
+    const holed = parseRack('[{"id":"a","brand":"X","color":"#ff0000"},'
+      + '{"id":"b","code":"7","color":"#00ff00"}]')
+    ok(holed.length === 1 && holed[0].code === '7',
+      'a spool with no code is dropped', `${holed.length}`)
+    // A broken colour falls back rather than poisoning the swatch.
+    const odd = parseRack('[{"id":"a","code":"1","color":"blue"}]')
+    ok(/^#[0-9a-f]{6}$/i.test(odd[0].color), 'and an unreadable colour falls back',
+      odd[0].color)
+  }
+
+  // --- the weighting is the point: plain RGB calls blue and brown neighbours
+  {
+    const blue = '#3040a0', brown = '#a06030', trueBlue = '#2838b0'
+    ok(colourDistance(blue, trueBlue) < colourDistance(blue, brown),
+      'a blue is nearer another blue than it is to a brown')
+    ok(colourDistance('#ff0000', 'nonsense') === Infinity,
+      'an unreadable colour is infinitely far from anything')
   }
 }
 

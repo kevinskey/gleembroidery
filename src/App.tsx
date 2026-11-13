@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { Menu, MenuItem, MenuLabel, MenuSep, closeAllMenus } from './Menu'
+import { Thumb } from './Thumb'
+import {
+  RACK_KEY, nearestMachineThread, nearestSpools, newSpool, parseRack, serializeRack,
+  spoolLabel, type Spool,
+} from './threads'
 import { colourName, reorder, runBlocks, threadChanges } from './runview'
 import { classifyProblems, nextStep, summarise, type Problem } from './problems'
 import { centerPlan } from './digitize'
@@ -50,6 +55,7 @@ import {
   HOOPS,
   SPACINGS,
   bounds,
+  objectVisible,
   emptyDoc,
   hoopsForSpacing,
   newObject,
@@ -217,6 +223,22 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
   },
 ]
 
+/**
+ * What each stitch type is CALLED in the tree.
+ *
+ * Short, lower case, and the word a digitizer uses out loud — the tree is
+ * read as a list of nouns ("column, column, fill"), not as an enum dump.
+ */
+const TYPE_WORD: Record<StitchType, string> = {
+  run: 'run',
+  bean: 'bean',
+  satin: 'column',
+  fill: 'fill',
+  applique: 'appliqué',
+  knockdown: 'knockdown',
+  none: 'off',
+}
+
 const TYPES: { id: StitchType; label: string; hint: string; icon: ReactElement }[] = [
   {
     id: 'run', label: 'Run', hint: 'Single running stitch along the path',
@@ -268,6 +290,31 @@ function Num({ label, value, step = 0.1, min, max, onChange }: {
       />
     </div>
   )
+}
+
+/**
+ * A size as a shop says it: inches with a fraction, millimetres beside it.
+ *
+ * Doc's hoops are sold in inches and his customers ask for "a three inch
+ * left chest", but the machine and this program work in millimetres. Both,
+ * always, so nobody has to convert in their head — and the fraction rather
+ * than a decimal, because 3 1/16" is what a tape measure says.
+ */
+function inchPair(wMm: number, hMm: number): string {
+  return `${inches(wMm)} × ${inches(hMm)} (${wMm.toFixed(1)} × ${hMm.toFixed(1)} mm)`
+}
+
+/** Millimetres as inches to the nearest sixteenth. */
+function inches(mm: number): string {
+  const total = mm / 25.4
+  const whole = Math.floor(total)
+  const sixteenths = Math.round((total - whole) * 16)
+  if (sixteenths === 0) return `${whole}"`
+  if (sixteenths === 16) return `${whole + 1}"`
+  // Reduce the fraction: 8/16 reads as 1/2, not as 8/16.
+  let n = sixteenths, d = 16
+  while (n % 2 === 0 && d % 2 === 0) { n /= 2; d /= 2 }
+  return `${whole ? `${whole} ` : ''}${n}/${d}"`
 }
 
 function Text({ label, value, placeholder, onChange, tag }: {
@@ -857,7 +904,17 @@ export default function App() {
    * hidden, and its index changes when anything is reordered.
    */
   const blockKey = (b: { objects: { object: EmbObject }[] }) => b.objects[0].object.id
-  const [foldedBlocks, setFoldedBlocks] = useState<string[]>([])
+  /** Which inspector tab is showing. */
+  const [inspector, setInspector] = useState<'colour' | 'object' | 'design'>('object')
+  /**
+   * The whole design's extent, so every thumbnail shares one frame.
+   *
+   * From the ARTWORK rather than the stitches: the tree has to be usable
+   * while generation is still running, and an object with no stitches yet
+   * still has an outline to show.
+   */
+  const designBounds = useMemo(
+    () => bounds(doc.objects.flatMap((o) => o.paths)), [doc.objects])
 
   // Drag-to-reorder. Two buttons per row that each moved an object one place
   // meant twenty-five presses to bring the bottom object to the top.
@@ -912,21 +969,45 @@ export default function App() {
     }
   }, [rowDrag, gapUnder])
 
-  /** Select an object and put the cursor in its thread fields. */
-  const focusThread = (id: string) => {
-    setSelectedId(id)
-    // After the panel has re-rendered for the new selection.
-    setTimeout(() => {
-      const el = document.querySelector<HTMLInputElement>('.side.right input[data-thread="brand"]')
-      el?.focus()
-      el?.scrollIntoView({ block: 'center' })
-    }, 0)
+  // --- the thread rack ------------------------------------------------------
+  //
+  // There is no built-in Madeira or Isacord chart, and that is deliberate: a
+  // thread code is only useful if it is RIGHT, and a catalogue reconstructed
+  // half-accurately is worse than none because it looks authoritative. What
+  // is built in is the Brother palette, which comes from the file format
+  // itself and can be stated exactly. Everything else is a rack this shop
+  // fills from its own cones — typed once, correct by construction.
+
+  const [rack, setRack] = useState<Spool[]>(() => {
+    try { return parseRack(window.localStorage.getItem(RACK_KEY)) } catch { return [] }
+  })
+  const saveRack = (next: Spool[]) => {
+    setRack(next)
+    try { window.localStorage.setItem(RACK_KEY, serializeRack(next)) } catch { /* private mode */ }
+  }
+  /** Which block's thread is being chosen, by its first object's id. */
+  const [picking, setPicking] = useState<string | null>(null)
+  const [newBrand, setNewBrand] = useState('Madeira Classic 40')
+  const [newCode, setNewCode] = useState('')
+  const [newName, setNewName] = useState('')
+
+  /** Put a thread on every object in the same block. */
+  const assignThread = (anchorId: string, thread: { brand?: string; code?: string; name?: string }) => {
+    const block = blocks.find((b) => b.objects.some((q) => q.object.id === anchorId))
+    const ids = block ? block.objects.map((q) => q.object.id) : [anchorId]
+    setDoc((d) => ({
+      ...d,
+      objects: d.objects.map((o) => (ids.includes(o.id) ? { ...o, thread: { ...thread } } : o)),
+    }))
+    setPicking(null)
+    setNote(`${spoolLabel(thread)} on ${ids.length} object${ids.length === 1 ? '' : 's'}`)
   }
 
   /** Select the object a problem is about, and bring it into view. */
   const showProblemObject = (p: Problem) => {
     if (!p.objectId) return
     setSelectedIds([p.objectId])
+    setInspector('object')
     const o = doc.objects.find((q) => q.id === p.objectId)
     const b = o && objectBox(o)
     const wrap = wrapRef.current
@@ -2653,134 +2734,6 @@ export default function App() {
       </div>
 
       <div className="body">
-        <div className={`side${rowDrag !== null ? ' dragging' : ''}`}>
-          {/* THE RUN, not the document.
-              A machine does not see objects, it sees colour blocks: a run of
-              stitching on one needle, then a stop, then the next. Objects
-              sharing a thread AND adjacent in the sequence are one block and
-              cost one threading; the same objects separated by something
-              else are two. That relationship is invisible in a flat list and
-              obvious here, and it is what turns "26 objects" into "you will
-              re-thread 26 times on a 12-needle machine". */}
-          <div className="side-head">
-            <h3>Sewing sequence</h3>
-            {!!blocks.length && (
-              <span className={`runcount${threads > machine.needles ? ' over' : ''}`}
-                title={threads > machine.needles
-                  ? `${threads} threadings on a ${machine.needles}-needle machine — the operator re-threads mid-run`
-                  : `${threads} threading${threads === 1 ? '' : 's'}`}>
-                {threads} thread{threads === 1 ? '' : 's'}
-              </span>
-            )}
-          </div>
-          {!doc.objects.length && (
-            <div className="empty">
-              Draw with the tools above, import an SVG, or load a reference image and trace
-              it with the Wand. Each closed shape becomes an object you can assign a stitch
-              type to.
-            </div>
-          )}
-
-          {blocks.map((b) => {
-            const first = b.objects[0]
-            const g = first.object.group
-              ? doc.groups.find((q) => q.id === first.object.group) : null
-            const folded = foldedBlocks.includes(blockKey(b))
-            return (
-              <div key={blockKey(b)} className={`blk${b.number === 0 ? ' off' : ''}`}>
-                <div
-                  className="blk-head"
-                  onClick={() => setSelectedIds(b.objects.map((q) => q.object.id))}
-                >
-                  <button className="eye" title={folded ? 'Show the objects' : 'Fold the objects away'}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      const k = blockKey(b)
-                      setFoldedBlocks((f) => (f.includes(k) ? f.filter((x) => x !== k) : [...f, k]))
-                    }}>{folded ? '▸' : '▾'}</button>
-                  <span className="blk-no" title={b.number ? 'Needle order' : 'Not sewn'}>
-                    {b.number || '–'}
-                  </span>
-                  <span className="sw" style={{ background: b.color }} />
-                  <span className="blk-name">
-                    {b.thread
-                      ? [b.thread.brand, b.thread.code].filter(Boolean).join(' ') || b.thread.name
-                      : colourName(b.color)}
-                  </span>
-                  {!b.thread && b.number > 0 && (
-                    <button className="blk-thread" title="No thread chosen — the run sheet will say UNASSIGNED"
-                      onClick={(e) => { e.stopPropagation(); focusThread(b.objects[0].object.id) }}>
-                      thread?
-                    </button>
-                  )}
-                  {b.isStop && <span className="blk-stop" title="The machine stops here for the operator">stop</span>}
-                  {b.stitches !== null && (
-                    <span className="blk-st">{b.stitches.toLocaleString()}</span>
-                  )}
-                </div>
-                {!folded && b.objects.map(({ object: o, index: i }) => (
-                  <div
-                    key={o.id}
-                    data-row={i}
-                    className={`obj${selectedIds.includes(o.id) ? ' sel' : ''}`
-                      + `${dragOver === i ? ' drop' : ''}${rowDrag === i ? ' dragging' : ''}`}
-                    onClick={(e) => {
-                      if (e.shiftKey) {
-                        const anchor = doc.objects.findIndex((q) => q.id === selectedId)
-                        const from = anchor < 0 ? i : anchor
-                        const [lo, hi] = from < i ? [from, i] : [i, from]
-                        setSelectedIds(doc.objects.slice(lo, hi + 1).map((q) => q.id))
-                      } else if (e.metaKey || e.ctrlKey) {
-                        setSelectedIds(selectedIds.includes(o.id)
-                          ? selectedIds.filter((x) => x !== o.id)
-                          : [...selectedIds, o.id])
-                      } else {
-                        setSelectedId(o.id)
-                      }
-                    }}
-                  >
-                    {/* Drag to reorder. Two buttons per row that each move an
-                        object one place was twenty-five presses to get the
-                        bottom object to the top. */}
-                    <span className="grip" title="Drag to change when this sews"
-                      onPointerDown={(e) => {
-                        e.preventDefault()
-                        e.stopPropagation()
-                        setRowDrag(i)
-                        setDragOver(i)
-                      }}>⠿</span>
-                    <span className="sw small" style={{ background: o.color }} />
-                    <span className="nm" title={o.name}>{o.name}</span>
-                    {g && <span className="ty" title={`In the group “${g.name}”`}>{g.name}</span>}
-                    <span className="ty">{o.type}</span>
-                    <button className="eye" title={o.visible ? 'Hide' : 'Show'}
-                      onClick={(e) => { e.stopPropagation(); patch(o.id, (x) => ({ ...x, visible: !x.visible })) }}>
-                      {o.visible ? '●' : '○'}
-                    </button>
-
-                  </div>
-                ))}
-              </div>
-            )
-          })}
-          {doc.objects.length > 0 && (
-            <>
-              <div className={`endpad${dragOver === doc.objects.length ? ' drop' : ''}`}>
-                {rowDrag !== null ? 'drop here to sew last' : ''}
-              </div>
-              <div style={{ marginTop: 10, display: 'flex', gap: 6 }}>
-                <button onClick={() => { setDoc((d) => ({ ...d, objects: [] })); setSelectedId(null) }}>Clear all</button>
-                {selected && (
-                  <button onClick={() => {
-                    setDoc((d) => ({ ...d, objects: d.objects.filter((o) => !selectedIds.includes(o.id)) }))
-                    setSelectedId(null)
-                  }}>Delete</button>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-
         <div
           className="canvas-wrap" ref={wrapRef}
           onWheel={onWheel} onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp}
@@ -2821,14 +2774,189 @@ export default function App() {
           />
         </div>
 
+        {/* ONE right column, as in every digitizing package: the design
+            tree on top — what is in this file, in order, with a picture of
+            each — and a tabbed inspector under it. The canvas gets
+            everything else, because the canvas is the work. */}
         <div className="side right">
-          <h3>Properties</h3>
-          {!selected && (
+          <div className="tree">
+            <div className="tree-head">
+              <span className="tree-no">1</span>
+              <Thumb paths={doc.objects.flatMap((o) => o.paths)} bounds={designBounds}
+                color="#9aa4b2" size={20} outline />
+              <b>{doc.name}</b>
+              <span className="dim">{doc.objects.length}</span>
+            </div>
+            {!doc.objects.length && (
+              <div className="empty">
+                Draw with the tools above, import an SVG, or load a reference image and
+                trace it with the Wand.
+              </div>
+            )}
+            {doc.objects.map((o, i) => {
+              const g = o.group ? doc.groups.find((q) => q.id === o.group) : null
+              const hidden = !objectVisible(o, doc.groups)
+              return (
+                <div
+                  key={o.id}
+                  data-row={i}
+                  className={`trow${selectedIds.includes(o.id) ? ' sel' : ''}`
+                    + `${dragOver === i ? ' drop' : ''}${rowDrag === i ? ' dragging' : ''}`}
+                  onClick={(e) => {
+                    if (e.shiftKey) {
+                      const anchor = doc.objects.findIndex((q) => q.id === selectedId)
+                      const from = anchor < 0 ? i : anchor
+                      const [lo, hi] = from < i ? [from, i] : [i, from]
+                      setSelectedIds(doc.objects.slice(lo, hi + 1).map((q) => q.id))
+                    } else if (e.metaKey || e.ctrlKey) {
+                      setSelectedIds(selectedIds.includes(o.id)
+                        ? selectedIds.filter((x) => x !== o.id)
+                        : [...selectedIds, o.id])
+                    } else {
+                      setSelectedId(o.id)
+                    }
+                  }}
+                >
+                  {/* Drag to change when this sews. Two arrow buttons per row
+                      meant twenty-five presses to bring the last object to
+                      the front. */}
+                  <span className="tree-no grip" title="Drag to change when this sews"
+                    onPointerDown={(e) => {
+                      e.preventDefault(); e.stopPropagation()
+                      setRowDrag(i); setDragOver(i)
+                    }}>1:{i + 1}</span>
+                  <Thumb paths={o.paths} bounds={designBounds} color={o.color}
+                    dim={hidden} outline={o.type === 'run' || o.type === 'bean'} />
+                  <span className="trow-name" title={`${o.name}${g ? ` — in “${g.name}”` : ''}`}>
+                    {o.name}
+                  </span>
+                  <span className="trow-type">{TYPE_WORD[o.type]}</span>
+                  <button className="eye" title={o.visible ? 'Hide' : 'Show'}
+                    onClick={(e) => { e.stopPropagation(); patch(o.id, (x) => ({ ...x, visible: !x.visible })) }}>
+                    {o.visible ? '●' : '○'}
+                  </button>
+                </div>
+              )
+            })}
+            {doc.objects.length > 0 && (
+              <div className={`endpad${dragOver === doc.objects.length ? ' drop' : ''}`}>
+                {rowDrag !== null ? 'sew last' : ''}
+              </div>
+            )}
+          </div>
+
+          <div className="tabs">
+            {(['colour', 'object', 'design'] as const).map((t) => (
+              <button key={t} className={inspector === t ? 'on' : undefined}
+                onClick={() => setInspector(t)}>
+                {t === 'colour' ? 'Colour' : t === 'object' ? 'Object' : 'Design'}
+              </button>
+            ))}
+          </div>
+
+          <div className="inspector">
+          {inspector === 'colour' && (
             <>
-              <div className="empty">Select an object to set its stitch type and parameters.</div>
-              {/* Document settings live here rather than in the toolbar: they
-                  belong to the whole design, and this is the panel that is
-                  otherwise empty when nothing is selected. */}
+              {/* The run, by thread. Each row is one threading: the operator
+                  puts this cone on, sews that much, and stops. */}
+              <div className="row wide">
+                <span className="dim">
+                  {threads} threading{threads === 1 ? '' : 's'} on a {machine.needles}-needle
+                  machine{threads > machine.needles ? ' — re-threading mid-run' : ''}.
+                  Click a row to select what it sews.
+                </span>
+              </div>
+              {blocks.filter((b) => b.number > 0).map((b) => (
+                <div key={blockKey(b)}>
+                <div className="crow"
+                  onClick={() => setSelectedIds(b.objects.map((q) => q.object.id))}>
+                  <span className="cno">{b.number}</span>
+                  <span className="cswatch" style={{ background: b.color }} />
+                  <div className="cbody">
+                    <span className="cname"
+                      title={b.thread
+                        ? spoolLabel(b.thread)
+                        : 'No thread chosen — the run sheet will say UNASSIGNED'}>
+                      {b.thread ? spoolLabel(b.thread) : `${colourName(b.color)} — no thread chosen`}
+                    </span>
+                    <span className="dim">{(b.stitches ?? 0).toLocaleString()} stitches</span>
+                  </div>
+                  <button title="Choose the thread for this block"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const id = b.objects[0].object.id
+                      setPicking(picking === id ? null : id)
+                      setNewName(colourName(b.color))
+                    }}>
+                    {b.thread ? 'change' : 'choose'}
+                  </button>
+                </div>
+                {picking === b.objects[0].object.id && (
+                  <div className="picker">
+                    {/* The rack first: these are cones this shop owns, which
+                        is the only list where picking the nearest colour is
+                        also picking something that can be threaded today. */}
+                    {!!rack.length && (
+                      <>
+                        <div className="menu-label">Your rack — nearest first</div>
+                        {nearestSpools(rack, b.color).map((sp) => (
+                          <button key={sp.id} className="pick"
+                            onClick={() => assignThread(b.objects[0].object.id, sp)}>
+                            <span className="cswatch small" style={{ background: sp.color }} />
+                            <span>{spoolLabel(sp)}</span>
+                          </button>
+                        ))}
+                      </>
+                    )}
+                    <div className="menu-label">
+                      Brother palette{rack.length ? '' : ' — the only chart that ships, because it comes from the file format itself'}
+                    </div>
+                    {(() => {
+                      const m = nearestMachineThread(b.color)
+                      return m ? (
+                        <button className="pick"
+                          onClick={() => assignThread(b.objects[0].object.id, {
+                            brand: m.brand, code: m.thread.code, name: m.thread.name,
+                          })}>
+                          <span className="cswatch small" style={{ background: m.thread.color }} />
+                          <span>{m.brand} {m.thread.code} {m.thread.name}</span>
+                        </button>
+                      ) : null
+                    })()}
+                    <div className="menu-label">Add a cone from your rack</div>
+                    <div className="row wide">
+                      <input type="text" value={newBrand} placeholder="Madeira Classic 40"
+                        onChange={(e) => setNewBrand(e.target.value)} />
+                    </div>
+                    <div className="row wide">
+                      <input type="text" value={newCode} placeholder="code, e.g. 1025"
+                        onChange={(e) => setNewCode(e.target.value)} />
+                    </div>
+                    <div className="row wide">
+                      <input type="text" value={newName} placeholder="name, e.g. Dark Orange"
+                        onChange={(e) => setNewName(e.target.value)} />
+                    </div>
+                    <button className="pick primary" disabled={!newCode.trim()}
+                      title="Saves it to your rack as well, so it is one click next time"
+                      onClick={() => {
+                        const sp = newSpool(newBrand, newCode, b.color, newName)
+                        saveRack([...rack, sp])
+                        setNewCode('')
+                        assignThread(b.objects[0].object.id, sp)
+                      }}>
+                      Use it, and keep it on my rack
+                    </button>
+                  </div>
+                )}
+                </div>
+              ))}
+              {!blocks.some((b) => b.number > 0) && (
+                <div className="empty">Nothing is being sewn yet.</div>
+              )}
+            </>
+          )}
+          {inspector === 'design' && (
+            <>
               <fieldset>
                 <legend>Tie-in and tie-off</legend>
                 <div className="row wide">
@@ -2874,9 +3002,25 @@ export default function App() {
                   </div>
                 )}
               </fieldset>
+              <fieldset>
+                <legend>Hoop and machine</legend>
+                <div className="row"><label>Hoop</label><span>{doc.hoop.name}</span></div>
+                <div className="row">
+                  <label>Sewing field</label>
+                  <span>{doc.hoop.widthMm.toFixed(0)} × {doc.hoop.heightMm.toFixed(0)} mm</span>
+                </div>
+                <div className="row"><label>Bracket</label><span>{doc.spacing}</span></div>
+                <div className="row"><label>Needles</label><span>{machine.needles}</span></div>
+                <div className="row wide">
+                  <span className="dim">Change these in the Machine menu.</span>
+                </div>
+              </fieldset>
             </>
           )}
-          {selected && (
+          {inspector === 'object' && !selected && (
+            <div className="empty">Select an object to set its stitch type and parameters.</div>
+          )}
+          {inspector === 'object' && selected && (
             <>
               {/* Presets first: reaching for a known-good recipe is quicker
                   than setting a dozen numbers, and it is what most jobs
@@ -3444,6 +3588,7 @@ export default function App() {
               )}
             </>
           )}
+          </div>
         </div>
       </div>
 
@@ -3488,7 +3633,11 @@ export default function App() {
                     {p.fixes.includes('thread') && (
                       <button onClick={() => {
                         const b = blocks.find((q) => q.number > 0 && !q.thread)
-                        if (b) focusThread(b.objects[0].object.id)
+                        if (b) {
+                          setInspector('colour')
+                          setPicking(b.objects[0].object.id)
+                          setNewName(colourName(b.color))
+                        }
                         setShowProblems(false)
                       }}>Set the threads</button>
                     )}
@@ -3502,18 +3651,29 @@ export default function App() {
 
       <div className="status">
         {busy && <span className="busy">generating…</span>}
-        <span><b>{counts.stitches.toLocaleString()}</b> stitches</span>
-        <span><b>{counts.jumps}</b> jumps</span>
-        <span><b>{stats.trims}</b> trims</span>
-        <span><b>{counts.colors}</b> colour{counts.colors === 1 ? '' : 's'}</span>
-        {pb && (
+        {/* The facts an operator reads off the bottom of the screen, in the
+            order they ask for them: will it fit, how big is the thing I
+            have selected, how long will it run, and how many times do I
+            re-thread. */}
+        <span><b>Hoop</b> {doc.hoop.name} — {inchPair(doc.hoop.widthMm, doc.hoop.heightMm)}</span>
+        {selBox && (
           <span>
-            <b>{pb.widthMm.toFixed(1)} × {pb.heightMm.toFixed(1)}</b> mm
-            {' '}({(pb.widthMm / 25.4).toFixed(2)} × {(pb.heightMm / 25.4).toFixed(2)} in)
+            <b>Selected</b> {inchPair(selBox.maxX - selBox.minX, selBox.maxY - selBox.minY)}
           </span>
         )}
-        {total > 0 && <span>longest <b>{longestStitch(plan).toFixed(1)}</b> mm</span>}
+        {pb && (
+          <span>
+            <b>Design</b> {inchPair(pb.widthMm, pb.heightMm)}
+          </span>
+        )}
+        <span><b>Stitches</b> {counts.stitches.toLocaleString()}</span>
+        <span title="Needles on the machine / colour blocks in this design">
+          <b>Ndls/Cols</b> {machine.needles}/{threads}
+        </span>
         {total > 0 && <span>~<b>{stats.minutes.toFixed(1)}</b> min</span>}
+        <span className="dim">
+          {counts.jumps} jumps · {stats.trims} trims · longest {longestStitch(plan).toFixed(1)} mm
+        </span>
         {ms > 0 && <span className="dim">{ms.toFixed(0)} ms{inline ? ' inline' : ''}</span>}
         {note && <span className="note">{note}</span>}
         {/* The freeze banner. A stale plan is a DECISION the user has to
@@ -3540,20 +3700,12 @@ export default function App() {
             }}>discard edits &amp; regenerate</button>
             {' · '}
             <button className="link" onClick={() => {
-              // Re-stamp the signature: the user has said these edits are
-              // what they want, so the design change is accepted as NOT
-              // applied rather than nagged about forever.
               setDoc((d) => (d.frozen
                 ? { ...d, frozen: { ...d.frozen, signature: sourceSig } } : d))
               setNote('Keeping your stitch edits — the design change was not applied')
             }}>keep my edits</button>
           </span>
         )}
-        {/* ONE line, not a wall.
-            Six sentences stacked at the bottom of the window is not a list
-            of problems, it is a wall, and a wall is what people stop
-            reading. The same messages live in a panel, worst first, each
-            carrying what to do about it. */}
         {!!summary.actionable && (
           <button
             className={`probs${summary.errors ? ' bad' : ''}${showProblems ? ' on' : ''}`}
