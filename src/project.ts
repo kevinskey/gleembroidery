@@ -85,6 +85,7 @@ function objectOut(o: EmbObject) {
     // Full precision on purpose: rounding here would make a reopened project
     // generate a subtly different plan from the one that was approved.
     paths: o.paths.map((p) => p.map((q) => [q.x, q.y])),
+    ...(o.twoRail ? { twoRail: true } : {}),
     // The editable outline rides alongside the flattened cache. Without it a
     // reopened project could be sewn but never shaped again.
     shapes: o.shapes?.map((sh) => ({
@@ -231,6 +232,7 @@ function objectIn(v: unknown, index: number): EmbObject | null {
     type: oneOf(v.type, STITCH_TYPES, 'fill'),
     paths,
     shapes: shapesIn(v.shapes),
+    ...(v.twoRail === true ? { twoRail: true } : {}),
     run: { length: num(run.length, dRun.length) },
     satin: {
       width: num(satin.width, dSatin.width),

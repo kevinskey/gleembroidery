@@ -6,7 +6,7 @@ import { centerPlan, digitize, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digit
 import { tatamiFill } from '../src/fill'
 import { dist, resample, toRegions } from '../src/geometry'
 import { DEFAULT_FILL, DEFAULT_SATIN, HOOPS, emptyDoc, newObject, type Pt } from '../src/model'
-import { MIN_RAIL_MM, findCorners, satinCheck, satinColumn } from '../src/satin'
+import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
 import { SCHEMA_VERSION, ProjectError, deserialize, serialize } from '../src/project'
 import { packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
@@ -1125,6 +1125,124 @@ console.log('\n# nodes and curves')
     // Collinear points have no circle — that is a straight line, not an error.
     const line = arcThrough({ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 10, y: 0 })
     ok(line.nodes.length === 2, 'collinear points give a straight segment', `${line.nodes.length}`)
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# two-rail satin column')
+{
+  const P = { ...DEFAULT_SATIN(), width: 3, density: 0.4, pullComp: 0, underlay: 'none' as const }
+  const lineA: Pt[] = [{ x: 0, y: 0 }, { x: 40, y: 0 }]
+  const lineB: Pt[] = [{ x: 0, y: 3 }, { x: 40, y: 3 }]
+
+  const col = satinTwoRail(lineA, lineB, P)
+  ok(col.length > 100, 'a parallel pair produces a column', `${col.length}`)
+  // Stitches must ALTERNATE between the rails, or it is not a satin.
+  let alternates = true
+  for (let i = 0; i < col.length; i++) {
+    const onA = Math.abs(col[i].y - 0) < 1e-6
+    const onB = Math.abs(col[i].y - 3) < 1e-6
+    if (!onA && !onB) { alternates = false; break }
+    if (i > 0) {
+      const prevA = Math.abs(col[i - 1].y - 0) < 1e-6
+      if (onA === prevA) { alternates = false; break }
+    }
+  }
+  ok(alternates, 'every penetration lands on a rail, alternating between them')
+  ok(Math.abs(col[0].x) < 1e-6 && Math.abs(col[col.length - 1].x - 40) < 0.01,
+    'the column spans the full rails', `${col[col.length - 1].x.toFixed(2)}`)
+  // Density is held along the rails.
+  // Same convention as the spine engine: `density` is the advance per
+  // PENETRATION, so two penetrations on one rail sit 2x density apart.
+  const pitches: number[] = []
+  for (let i = 2; i < col.length - 1; i++) pitches.push(Math.abs(col[i].x - col[i - 2].x) / 2)
+  const avg = pitches.reduce((a, b) => a + b, 0) / pitches.length
+  ok(Math.abs(avg - P.density) < 0.06, 'penetration pitch matches the density setting',
+    `${avg.toFixed(3)} mm`)
+
+  // --- the bow tie: rail B drawn backwards
+  {
+    const reversed = [...lineB].reverse()
+    ok(railsNeedFlip(lineA, reversed), 'a rail drawn backwards is detected')
+    ok(!railsNeedFlip(lineA, lineB), 'and a rail drawn the same way is left alone')
+    const fixed = satinTwoRail(lineA, reversed, P)
+    // If the twist were not corrected the bars would cross, so x would sweep
+    // from both ends towards the middle instead of marching along.
+    let monotone = true
+    for (let i = 2; i < fixed.length; i++) if (fixed[i].x < fixed[i - 2].x - 1e-6) monotone = false
+    ok(monotone, 'a backwards rail is flipped, not sewn as a bow tie')
+  }
+
+  // --- a taper keeps pairing proportionally
+  {
+    const tipA: Pt[] = [{ x: 0, y: 0 }, { x: 40, y: 0 }]
+    const tipB: Pt[] = [{ x: 0, y: 6 }, { x: 40, y: 1.2 }]
+    const taper = satinTwoRail(tipA, tipB, P)
+    ok(taper.length > 50, 'a tapered column generates', `${taper.length}`)
+    const widths = twoRailWidths(tipA, tipB)
+    ok(Math.abs(widths[0] - 6) < 0.05 && Math.abs(widths[widths.length - 1] - 1.2) < 0.05,
+      'width is measured where the rails actually are',
+      `${widths[0].toFixed(2)} -> ${widths[widths.length - 1].toFixed(2)}`)
+    // Every penetration sits on one of the two rails (y=0, or the sloping B).
+    let strays = 0
+    for (const st of taper) {
+      const onA = Math.abs(st.y) < 0.02
+      const onB = Math.abs(st.y - (6 - (4.8 * st.x) / 40)) < 0.05
+      if (!onA && !onB) strays++
+    }
+    ok(strays === 0, 'a taper puts every stitch on a rail', `${strays} strays`)
+  }
+
+  // --- the inner rail is never allowed to collapse into one hole
+  {
+    // A sharply curved pair: the inner rail is far shorter than the outer.
+    const outer = circle(0, 0, 20, 200).slice(0, 60)
+    const inner = circle(0, 0, 17, 200).slice(0, 60)
+    const curved = satinTwoRail(outer, inner, { ...P, width: 3 })
+    let minSame = Infinity
+    for (let i = 2; i < curved.length; i++) {
+      minSame = Math.min(minSame, dist(curved[i - 2], curved[i]))
+    }
+    ok(minSame >= MIN_RAIL_MM - 1e-6,
+      'the inner rail keeps a sewable gap on a tight bend', `${minSame.toFixed(3)} mm`)
+  }
+
+  // --- pull compensation widens the pair
+  {
+    const comp = satinTwoRail(lineA, lineB, { ...P, pullComp: 0.4 })
+    const ys = comp.map((s) => s.y)
+    ok(Math.min(...ys) < -0.1 && Math.max(...ys) > 3.1,
+      'pull compensation pushes both rails outward',
+      `${Math.min(...ys).toFixed(2)}..${Math.max(...ys).toFixed(2)}`)
+  }
+
+  // --- refusals
+  {
+    const far: Pt[] = [{ x: 0, y: 30 }, { x: 40, y: 30 }]
+    ok(twoRailCheck(lineA, far, P).errors.some((e) => /widest/.test(e)),
+      'rails too far apart are refused')
+    const near: Pt[] = [{ x: 0, y: 0.3 }, { x: 40, y: 0.3 }]
+    ok(twoRailCheck(lineA, near, P).errors.some((e) => /floor/.test(e)),
+      'rails pinched below the satin floor are refused')
+    // Crossing rails: B starts below A and ends above it.
+    const crossing: Pt[] = [{ x: 0, y: 3 }, { x: 40, y: -3 }]
+    const crossed = twoRailCheck([{ x: 0, y: 0 }, { x: 40, y: 0 }], crossing, P)
+    ok(crossed.errors.some((e) => /cross/.test(e)), 'crossing rails are refused',
+      crossed.errors[0] ?? 'none')
+    ok(twoRailCheck(lineA, lineB, P).errors.length === 0, 'a good pair passes clean')
+    ok(twoRailCheck(lineA, [{ x: 0, y: 3 }], P).errors.length > 0, 'a one-point rail is refused')
+  }
+
+  // --- underlay never pokes out past the column
+  {
+    const u = satinTwoRailUnderlay(lineA, lineB, { ...P, underlay: 'center' })
+    ok(u.length > 2, 'centre underlay is produced', `${u.length}`)
+    ok(u.every((s) => s.y > -0.01 && s.y < 3.01), 'and stays between the rails')
+    ok(Math.min(...u.map((s) => s.x)) > 0 && Math.max(...u.map((s) => s.x)) < 40,
+      'and inside their ends')
+    ok(satinTwoRailUnderlay(lineA, lineB, { ...P, underlay: 'none' }).length === 0,
+      'underlay none means none')
   }
 }
 

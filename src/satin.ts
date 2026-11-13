@@ -319,6 +319,248 @@ export function satinUnderlay(path: Pt[], p: SatinParams): Stitch[] {
 }
 
 /** Widest satin that will not snag in wear, mm. Past this, use a fill. */
+// ---------------------------------------------------------------------------
+// Two-rail columns
+// ---------------------------------------------------------------------------
+//
+// The column above is a SPINE plus a width: the two rails are derived, so the
+// column is the same width everywhere and the digitizer has no say in where
+// the edges actually run. A real satin — a serif, a leaf, the thick-to-thin of
+// a script letter — is drawn as its two EDGES, and its width is whatever the
+// gap between them happens to be at each point.
+//
+// Giving the rails directly removes every derived quantity the spine version
+// has to infer. There is no curvature correction here and no mitre, because
+// there is nothing to infer: the edges are stated, and the only question left
+// is how to PAIR them.
+//
+// Pairing is by proportional arc length. Stitch k lands at the same fraction
+// along each rail, which is what makes a taper come out as a taper rather than
+// as a column that runs out of one rail before the other.
+
+/** Resample a rail to a fine, even walk plus its cumulative lengths. */
+function railWalk(rail: Pt[], step: number): { pts: Pt[]; cum: number[]; len: number } {
+  const pts = resample(dedupe(rail), step)
+  const cum = cumulative(pts)
+  return { pts, cum, len: cum[cum.length - 1] ?? 0 }
+}
+
+/** Point at a given fraction along a pre-walked rail. */
+function atFraction(w: { pts: Pt[]; cum: number[]; len: number }, u: number): Pt {
+  if (w.pts.length === 0) return { x: 0, y: 0 }
+  if (w.len <= 1e-9) return w.pts[0]
+  const target = Math.max(0, Math.min(1, u)) * w.len
+  // The walk is even, so a linear guess lands within a sample or two.
+  let i = Math.min(w.cum.length - 1, Math.max(1, Math.round((target / w.len) * (w.cum.length - 1))))
+  while (i > 1 && w.cum[i - 1] > target) i--
+  while (i < w.cum.length - 1 && w.cum[i] < target) i++
+  const a = w.pts[i - 1], b = w.pts[i]
+  const span = w.cum[i] - w.cum[i - 1]
+  const t = span > 1e-12 ? (target - w.cum[i - 1]) / span : 0
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+}
+
+/**
+ * Should rail B be reversed before pairing?
+ *
+ * A digitizer draws the second rail whichever way feels natural, and half the
+ * time that is back towards the start. Pairing those as given twists the
+ * column into a bow tie whose stitches cross in the middle — the single most
+ * common way a two-rail satin goes wrong. Comparing the two possible pairings
+ * end-to-end costs nothing and removes the trap entirely.
+ */
+export function railsNeedFlip(a: Pt[], b: Pt[]): boolean {
+  if (a.length < 2 || b.length < 2) return false
+  const a0 = a[0], a1 = a[a.length - 1]
+  const b0 = b[0], b1 = b[b.length - 1]
+  const asIs = dist(a0, b0) + dist(a1, b1)
+  const flipped = dist(a0, b1) + dist(a1, b0)
+  return flipped < asIs
+}
+
+/** Widen a pairing by pullComp, pushing each rail away from the other. */
+function compensate(pa: Pt, pb: Pt, outward: number): [Pt, Pt] {
+  if (outward <= 0) return [pa, pb]
+  const dx = pb.x - pa.x, dy = pb.y - pa.y
+  const len = Math.hypot(dx, dy)
+  if (len < 1e-9) return [pa, pb]
+  const ux = dx / len, uy = dy / len
+  return [
+    { x: pa.x - ux * outward, y: pa.y - uy * outward },
+    { x: pb.x + ux * outward, y: pb.y + uy * outward },
+  ]
+}
+
+/**
+ * Zigzag between two drawn rails.
+ *
+ * Density is held on whichever rail is locally LONGER — the outer edge of a
+ * bend — because that is the edge the eye reads and the one that goes gappy
+ * first. The inner rail is then crowded by the same ratio, so it is clamped at
+ * MIN_RAIL_MM exactly as the spine version is: past that point the holes merge
+ * into one perforation, which shreds thread and breaks needles. When the clamp
+ * binds, the outer edge goes slightly sparser rather than the inner edge
+ * being destroyed — the same trade, made for the same reason.
+ */
+export function satinTwoRail(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[] {
+  const a = dedupe(railA)
+  const bRaw = dedupe(railB)
+  if (a.length < 2 || bRaw.length < 2) return []
+  const b = railsNeedFlip(a, bRaw) ? [...bRaw].reverse() : bRaw
+
+  const density = Math.max(0.1, p.density)
+  const fine = Math.min(0.15, density / 3)
+  const wa = railWalk(a, fine)
+  const wb = railWalk(b, fine)
+  if (wa.len <= 1e-9 && wb.len <= 1e-9) return []
+  const outward = Math.max(0, p.pullComp) / 2
+
+  const out: Stitch[] = []
+  /** Which rail each emitted stitch landed on; needed to close out cleanly. */
+  const sides: number[] = []
+  let u = 0
+  let side = 0
+  let guard = 0
+  // Walk the pair by fraction. Each step is sized from the LOCAL speed of both
+  // rails, not from their total lengths — a column can be wide at one end and
+  // pinched at the other, and a single global step would be wrong at both.
+  while (u < 1 && guard++ < 200000) {
+    const pa = atFraction(wa, u)
+    const pb = atFraction(wb, u)
+    const [ca, cb] = compensate(pa, pb, outward)
+    out.push(side === 0 ? { x: ca.x, y: ca.y } : { x: cb.x, y: cb.y })
+    sides.push(side)
+    side ^= 1
+
+    // Probe a small step ahead to measure how fast each rail is moving here.
+    const probe = Math.min(1 - u, Math.max(1e-6, density / Math.max(wa.len, wb.len, 1e-9)))
+    if (probe <= 1e-9) break
+    const sa = dist(pa, atFraction(wa, u + probe))
+    const sb = dist(pb, atFraction(wb, u + probe))
+    const fast = Math.max(sa, sb)
+    const slow = Math.min(sa, sb)
+    let du = fast > 1e-9 ? probe * (density / fast) : probe
+    // Clamp so the inner rail keeps a sewable gap between penetrations.
+    if (slow > 1e-9) {
+      const innerStep = slow * (du / probe)
+      if (innerStep < MIN_RAIL_MM) du = probe * (MIN_RAIL_MM / slow)
+    }
+    u += Math.max(du, 1e-7)
+  }
+
+  // Land the far end squarely on both rails rather than wherever the rhythm
+  // ran out, so the column finishes with a clean bar instead of a notch.
+  //
+  // The closing bar is FORCED, so wherever the walk happened to stop it can
+  // land a hair from the previous penetration on that same rail. Those get
+  // dropped first: a stitch 0.1 mm from its neighbour is not a stitch, it is
+  // a second strike in the same hole, and the whole point of MIN_RAIL_MM is
+  // that such a pair shreds thread and breaks needles.
+  const ends = compensate(atFraction(wa, 1), atFraction(wb, 1), outward)
+  while (out.length && dist(out[out.length - 1], ends[sides[sides.length - 1]]) < MIN_RAIL_MM) {
+    out.pop()
+    sides.pop()
+  }
+  const lastSide = sides.length ? sides[sides.length - 1] : 1
+  const first = lastSide === 0 ? 1 : 0
+  if (!out.length || dist(out[out.length - 1], ends[first]) > 1e-9) out.push(ends[first])
+  const second = first === 0 ? 1 : 0
+  if (dist(out[out.length - 1], ends[second]) > 1e-9) out.push(ends[second])
+  return out
+}
+
+/** Underlay for a two-rail column: a centre run down the middle of the pair. */
+export function satinTwoRailUnderlay(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[] {
+  if (p.underlay === 'none') return []
+  const a = dedupe(railA)
+  const bRaw = dedupe(railB)
+  if (a.length < 2 || bRaw.length < 2) return []
+  const b = railsNeedFlip(a, bRaw) ? [...bRaw].reverse() : bRaw
+  const fine = Math.min(0.15, Math.max(0.1, p.density) / 3)
+  const wa = railWalk(a, fine)
+  const wb = railWalk(b, fine)
+
+  // The spine of a two-rail column is not drawn, it is implied — the midline
+  // of the pairing. Inset from the ends so the underlay never pokes out past
+  // the column it is meant to sit under.
+  const spine: Pt[] = []
+  const steps = 48
+  for (let i = 0; i <= steps; i++) {
+    const u = 0.02 + (i / steps) * 0.96
+    const pa = atFraction(wa, u), pb = atFraction(wb, u)
+    spine.push({ x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 })
+  }
+  if (p.underlay === 'center') return runStitch(spine, { length: 2.5 })
+  // Edge and zigzag underlays both want a narrower pass inside the rails; a
+  // run down the middle is the honest approximation and is never wider than
+  // the column, which is the property that matters.
+  return runStitch(spine, { length: 2.0 })
+}
+
+/** Width of a two-rail column at a few places along it, for checking. */
+export function twoRailWidths(railA: Pt[], railB: Pt[], samples = 32): number[] {
+  const a = dedupe(railA)
+  const bRaw = dedupe(railB)
+  if (a.length < 2 || bRaw.length < 2) return []
+  const b = railsNeedFlip(a, bRaw) ? [...bRaw].reverse() : bRaw
+  const wa = railWalk(a, 0.2)
+  const wb = railWalk(b, 0.2)
+  const out: number[] = []
+  for (let i = 0; i <= samples; i++) {
+    const u = i / samples
+    out.push(dist(atFraction(wa, u), atFraction(wb, u)))
+  }
+  return out
+}
+
+/**
+ * Check a two-rail column before generating it.
+ *
+ * The spine version's curvature test does not apply — there is no inferred
+ * rail to fold. What CAN be wrong here is the pair: rails too far apart to
+ * sew, pinched to nothing, or crossing each other.
+ */
+export function twoRailCheck(railA: Pt[], railB: Pt[], p: SatinParams): SatinCheck {
+  const errors: string[] = []
+  const warnings: string[] = []
+  const widths = twoRailWidths(railA, railB)
+  if (widths.length === 0) {
+    errors.push('a two-rail column needs two rails of at least two points each')
+    return { errors, warnings }
+  }
+  const comp = Math.max(0, p.pullComp)
+  const widest = Math.max(...widths) + comp
+  const narrowest = Math.min(...widths) + comp
+  if (widest > MAX_SATIN_MM)
+    errors.push(`the rails are ${widest.toFixed(1)} mm apart at their widest, over the ${MAX_SATIN_MM} mm limit — use a fill, or split the column`)
+  if (narrowest < MIN_SATIN_MM)
+    errors.push(`the rails close to ${narrowest.toFixed(2)} mm, below the ${MIN_SATIN_MM} mm floor — use a bean run, or pull the rails apart`)
+
+  // Crossed rails: the column pinches to nothing and reopens on the other
+  // side, so the stitches fold back through themselves.
+  const a = dedupe(railA)
+  const bRaw = dedupe(railB)
+  const b = railsNeedFlip(a, bRaw) ? [...bRaw].reverse() : bRaw
+  const wa = railWalk(a, 0.2), wb = railWalk(b, 0.2)
+  let prev: { x: number; y: number } | null = null
+  for (let i = 0; i <= 32; i++) {
+    const u = i / 32
+    const pa = atFraction(wa, u), pb = atFraction(wb, u)
+    const v = { x: pb.x - pa.x, y: pb.y - pa.y }
+    if (prev) {
+      // The bar flipping to point the other way means the rails have swapped
+      // sides, which only happens where they cross.
+      const dot = prev.x * v.x + prev.y * v.y
+      if (dot < 0) {
+        errors.push('the rails cross — the column folds back through itself; redraw them so they run alongside each other')
+        break
+      }
+    }
+    prev = v
+  }
+  return { errors, warnings }
+}
+
 export const MAX_SATIN_MM = 10
 /** Narrowest satin worth sewing, mm. Below this, use a bean run. */
 export const MIN_SATIN_MM = 1.0

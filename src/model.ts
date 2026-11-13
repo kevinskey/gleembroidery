@@ -97,6 +97,16 @@ export interface EmbObject {
    * rather than the single source of truth.
    */
   shapes?: Shape[]
+  /**
+   * This object's two paths are the EDGES of one satin column, not two
+   * separate columns.
+   *
+   * A flag rather than an inference from `paths.length === 2`: two paths is
+   * also what an ordinary satin object looks like when it holds two unrelated
+   * strokes, and silently welding those into one column the first time
+   * someone added a second path would be an unpleasant surprise.
+   */
+  twoRail?: boolean
   run: RunParams
   satin: SatinParams
   fill: FillParams

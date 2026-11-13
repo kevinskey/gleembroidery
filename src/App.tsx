@@ -56,7 +56,7 @@ const ROTATE_PX = 26
 const AUTOSAVE_KEY = 'gleembroidery.autosave.v1'
 
 /** Canvas tools. 'select' picks/moves/resizes; empty space still pans. */
-type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc'
+type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column'
 
 const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
   {
@@ -90,6 +90,16 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
       <svg width="22" height="16" viewBox="0 0 22 16">
         <path d="M3 13a8 8 0 0116 0" stroke="currentColor" strokeWidth="1.4" fill="none" />
         <circle cx="11" cy="5" r="1.7" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
+    id: 'column', label: 'Column', hint: 'Two-rail satin: draw one edge and press Enter, then draw the other. Click for a corner, drag for a curve (C)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M2 4c6-3 12 3 18 0" stroke="currentColor" strokeWidth="1.3" fill="none" />
+        <path d="M2 12c6-3 12 3 18 0" stroke="currentColor" strokeWidth="1.3" fill="none" />
+        <path d="M4 3.4v9.2M9 4.6v9.2M14 5.6v9.2M19 3.9v9.2" stroke="currentColor" strokeWidth="0.7" opacity="0.8" />
       </svg>
     ),
   },
@@ -258,6 +268,8 @@ export default function App() {
   const penDrag = useRef<PathNode | null>(null)
   // Arc: the clicks banked so far — start, then end; the third point bulges it.
   const arcPts = useRef<Pt[]>([])
+  // Two-rail satin: the first edge, banked while the second is drawn.
+  const railA = useRef<Shape | null>(null)
   // Node editing: which node is active (for Delete), and what is being dragged.
   const [activeNode, setActiveNode] = useState<{ s: number; i: number } | null>(null)
   const nodeDrag = useRef<{ s: number; i: number; which: 'node' | 'hIn' | 'hOut' } | null>(null)
@@ -492,6 +504,43 @@ export default function App() {
     if (nodes.length >= 2) addShape({ nodes, closed }, closed ? 'Shape' : 'Path')
   }, [addShape])
 
+  /**
+   * Finish one rail of a two-rail satin column.
+   *
+   * The first Enter banks the edge; the second pairs them into a column. The
+   * rails are kept as `shapes` as well as flattened paths, so the column stays
+   * node-editable afterwards — reshaping an edge is most of what digitizing a
+   * serif actually is.
+   */
+  const finishRail = useCallback(() => {
+    const nodes = penNodes.current
+    penNodes.current = []
+    penDrag.current = null
+    setDraft(null)
+    if (nodes.length < 2) return
+    const shape: Shape = { nodes, closed: false }
+    if (!railA.current) {
+      railA.current = shape
+      setNote('First edge saved — now draw the other edge and press Enter')
+      return
+    }
+    const pair = [railA.current, shape]
+    railA.current = null
+    const n = doc.objects.length
+    const obj = newObject({
+      name: `Column ${n + 1}`,
+      color: PALETTE[n % PALETTE.length],
+      type: 'satin',
+      twoRail: true,
+      paths: shapesToPaths(pair),
+      shapes: pair,
+    })
+    setDoc((d) => ({ ...d, objects: [...d.objects, obj] }))
+    setSelectedId(obj.id)
+    setSim(null)
+    setNote(null)
+  }, [doc.objects.length, setDoc, setSelectedId])
+
   const importSvg = async (file: File) => {
     try {
       const v = parseSvgToPaths(await file.text(), file.name.replace(/\.svg$/i, ''))
@@ -715,10 +764,11 @@ export default function App() {
     }
     if (e.button !== 0) return
     const p = atMm(e)
-    if (tool === 'pen') {
+    if (tool === 'pen' || tool === 'column') {
       // Clicking the first node closes the path — the standard way to finish a
       // region, and the only one that does not need a separate control.
-      if (penNodes.current.length >= 2) {
+      // A rail is an open edge; only the pen closes a path on its first node.
+      if (tool === 'pen' && penNodes.current.length >= 2) {
         const first = penNodes.current[0]
         if (Math.hypot(p.x - first.x, p.y - first.y) <= PICK_PX / view.scale) {
           finishPen(true)
@@ -816,7 +866,7 @@ export default function App() {
       setShapes(selected.id, shapes)
       return
     }
-    if (tool === 'pen') {
+    if (tool === 'pen' || tool === 'column') {
       const p = atMm(e)
       const d = penDrag.current
       if (d) {
@@ -829,7 +879,12 @@ export default function App() {
       const preview = [...penNodes.current, ...(d ? [d] : [])]
       // Show the committed path plus a provisional segment to the cursor.
       const live = d ? preview : [...preview, { x: p.x, y: p.y } as PathNode]
-      if (live.length >= 2) setDraft({ paths: [flattenShape({ nodes: live, closed: false })], closed: false })
+      // Keep the banked rail on screen while the second is drawn — matching an
+      // edge you cannot see is guesswork.
+      const banked = railA.current ? [flattenShape(railA.current)] : []
+      const paths = live.length >= 2
+        ? [...banked, flattenShape({ nodes: live, closed: false })] : banked
+      setDraft(paths.length ? { paths, closed: false } : null)
       return
     }
     if (tool === 'arc' && arcPts.current.length) {
@@ -881,7 +936,7 @@ export default function App() {
     }
     if (xform.current) { xform.current = null; history.end(); return }
     if (nodeDrag.current) { nodeDrag.current = null; history.end(); return }
-    if (tool === 'pen') {
+    if (tool === 'pen' || tool === 'column') {
       if (penDrag.current) { penNodes.current = [...penNodes.current, penDrag.current]; penDrag.current = null }
       return
     }
@@ -913,6 +968,9 @@ export default function App() {
     penNodes.current = []
     penDrag.current = null
     arcPts.current = []
+    // Abandon a half-drawn column rather than pairing the next edge with a
+    // rail the user has forgotten they started.
+    if (railA.current) { railA.current = null; setNote(null) }
     dragging.current = null
     setDraft(null)
   }, [])
@@ -946,6 +1004,7 @@ export default function App() {
       if (e.key === 'Enter') {
         if (tool === 'polygon') finishPolygon()
         else if (tool === 'pen') finishPen(false)
+        else if (tool === 'column') finishRail()
         return
       }
       if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'node' && selected && activeNode) {
@@ -963,7 +1022,7 @@ export default function App() {
         return
       }
       const pick: Record<string, Tool> = {
-        v: 'select', n: 'node', b: 'pen', a: 'arc',
+        v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column',
         r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand',
       }
       const t = pick[e.key.toLowerCase()]
@@ -971,7 +1030,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [tool, finishPolygon, finishPen, cancelDraw, history, selected, activeNode, shapesOf, setShapes])
+  }, [tool, finishPolygon, finishPen, finishRail, cancelDraw, history, selected, activeNode, shapesOf, setShapes])
 
   const moveObject = (index: number, delta: number) =>
     setDoc((d) => {
@@ -1139,6 +1198,7 @@ export default function App() {
           onMouseLeave={onUp} onDoubleClick={(e) => {
             if (tool === 'polygon') { finishPolygon(); return }
             if (tool === 'pen') { finishPen(false); return }
+            if (tool === 'column') { finishRail(); return }
             if (tool !== 'node' || !selected) return
             // Add a node where the outline was double-clicked. The split is
             // exact, so the shape does not twitch when a point appears.

@@ -15,7 +15,7 @@ import type { ColorBlock, Stitch, StitchPlan } from './stitches'
 import { dist, resample, scanlineSpans, toRegions } from './geometry'
 import { unionSelfChecked } from './boolean'
 import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
-import { beanStitch, runStitch, satinCheck, satinColumn, satinUnderlay } from './satin'
+import { beanStitch, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
 export const MAX_STITCH_MM = 10
@@ -242,6 +242,22 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
       break
 
     case 'satin':
+      // TWO paths is a two-rail column: the digitizer drew both edges, so the
+      // width is the gap between them rather than a single number. One path
+      // keeps the spine+width behaviour. Anything else is several independent
+      // columns, which is what the loop below already does.
+      if (obj.paths.length === 2 && obj.twoRail) {
+        const [ra, rb] = obj.paths
+        const check = twoRailCheck(ra, rb, obj.satin)
+        for (const w of check.warnings) warnings.push(`${obj.name}: ${w}`)
+        if (check.errors.length) {
+          for (const e of check.errors) warnings.push(`${obj.name}: NOT STITCHED — ${e}`)
+          break
+        }
+        push(satinTwoRailUnderlay(ra, rb, obj.satin))
+        push(satinTwoRail(ra, rb, obj.satin))
+        break
+      }
       for (const path of obj.paths) {
         const check = satinCheck(path, obj.satin)
         for (const w of check.warnings) warnings.push(`${obj.name}: ${w}`)
