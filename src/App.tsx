@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { Menu, MenuItem, MenuLabel, MenuSep, closeAllMenus } from './Menu'
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM } from './satin'
@@ -2206,261 +2207,300 @@ export default function App() {
   // --- render -------------------------------------------------------------
   return (
     <div className="app">
+      {/* TWO rows, not seven.
+          Row 1 is a menu bar: everything you press once and then forget for
+          an hour. Row 2 is the tool palette: the things you press constantly,
+          which must stay visible and in the same place every time. */}
       <div className="toolbar">
-        <div className="group">
-          <label>Artwork</label>
-          <FilePick label="Import SVG…" accept=".svg,image/svg+xml" onPick={importSvg} />
-          <FilePick label="Open DST…" accept=".dst,.DST" onPick={importDstReference} />
-          <FilePick label="Image…" accept="image/png,image/jpeg,image/gif,image/webp" onPick={importImage} />
-          {backdrop && <button onClick={() => { setBackdrop(null); setNote(null) }}>Clear image</button>}
-          {reference && <button onClick={() => setReference(null)}>Clear ref</button>}
-        </div>
+        <div className="menubar">
+          <Menu label="File" width={230}>
+            <MenuLabel>Artwork</MenuLabel>
+            <FilePick label="Import SVG…" accept=".svg,image/svg+xml" onPick={importSvg} />
+            <FilePick label="Open DST as reference…" accept=".dst,.DST" onPick={importDstReference} />
+            <FilePick label="Backdrop image…" accept="image/png,image/jpeg,image/gif,image/webp" onPick={importImage} />
+            {backdrop && (
+              <MenuItem onClick={() => { setBackdrop(null); setNote(null) }}>Clear backdrop image</MenuItem>
+            )}
+            {reference && <MenuItem onClick={() => setReference(null)}>Clear DST reference</MenuItem>}
+            <MenuSep />
+            <MenuLabel>Project</MenuLabel>
+            <FilePick label="Open project…" accept={`.${FILE_EXT},application/json`} onPick={openProject} />
+            <MenuItem disabled={!doc.objects.length} onClick={saveProject}
+              hint="Keeps everything editable — this is the file to come back to">
+              Save project
+            </MenuItem>
+          </Menu>
 
-        <div className="group">
-          <label>Project</label>
-          <FilePick label="Open…" accept={`.${FILE_EXT},application/json`} onPick={openProject} />
-          <button onClick={saveProject} disabled={!doc.objects.length}>Save</button>
-        </div>
+          <Menu label="Export" width={260}>
+            <MenuItem disabled={!total} onClick={exportPackage}
+              hint="DST, colour sidecars, run sheet and a 1:1 template">
+              Export package
+            </MenuItem>
+            <MenuItem disabled={!total} onClick={exportEverything}
+              hint="Every format and sidecar, all from ONE stitch plan">
+              All formats
+            </MenuItem>
+            <MenuSep />
+            <MenuLabel>One machine file</MenuLabel>
+            <MenuItem disabled={!total} onClick={exportDstOnly}
+              hint="Tajima. No colours travel with a DST">.dst</MenuItem>
+            <MenuItem disabled={!total} onClick={() => exportFormat('exp')}
+              hint="Melco. Verified against pyembroidery; carries no colours">.exp</MenuItem>
+            <MenuItem disabled={!total} onClick={() => exportFormat('jef')}
+              hint="Janome. Colours snap to Janome’s built-in 78">.jef</MenuItem>
+          </Menu>
 
-        <div className="group">
-          <label>Edit</label>
-          <button onClick={history.undo} disabled={!history.canUndo}
-            title="Undo (Cmd/Ctrl+Z)">Undo</button>
-          <button onClick={history.redo} disabled={!history.canRedo}
-            title="Redo (Cmd/Ctrl+Shift+Z)">Redo</button>
-        </div>
+          <div className="group tight">
+            <button onClick={history.undo} disabled={!history.canUndo}
+              title="Undo (Cmd/Ctrl+Z)">Undo</button>
+            <button onClick={history.redo} disabled={!history.canRedo}
+              title="Redo (Cmd/Ctrl+Shift+Z)">Redo</button>
+          </div>
 
-        <div className="group">
-          <label>Export</label>
-          <button className="primary" onClick={exportPackage} disabled={!total}>Export package</button>
-          <button onClick={exportDstOnly} disabled={!total} title="Machine file only — no colours travel with a DST">
-            .dst only
-          </button>
-          <button onClick={() => exportFormat('exp')} disabled={!total}
-            title="Melco EXP. Verified against pyembroidery needle for needle; carries no colours.">
-            .exp
-          </button>
-          <button onClick={() => exportFormat('jef')} disabled={!total}
-            title="Janome JEF. Verified against pyembroidery; colours are snapped to Janome's built-in 78-thread table.">
-            .jef
-          </button>
-          <button onClick={exportEverything} disabled={!total}
-            title="Every format and sidecar at once, all from ONE stitch plan — so two files of the same design cannot disagree">
-            All formats
-          </button>
-        </div>
+          {/* Everything here changes the OUTLINE, never the stitch settings,
+              and everything produces objects that can still be node-edited. */}
+          <Menu label="Shape" width={290}>
+            <MenuLabel>Combine</MenuLabel>
+            {BOOL_OPS.map((op) => (
+              <MenuItem key={op} disabled={selectedObjs.length < 2}
+                onClick={() => runBoolean(op)}
+                hint={
+                  op === 'union' ? 'One outline from all of them'
+                    : op === 'difference' ? 'Cut the objects in FRONT out of the back one'
+                    : op === 'intersection' ? 'Keep only what they all cover'
+                    : 'Keep everything except where they overlap'
+                }>
+                {BOOL_LABEL[op]}
+              </MenuItem>
+            ))}
+            <MenuItem disabled={doc.objects.length < 2} onClick={runRemoveOverlap}
+              hint="Nothing sewn twice — double density is where needles break">
+              Remove overlap
+            </MenuItem>
+            <MenuSep />
+            <MenuLabel>Outline</MenuLabel>
+            <MenuItem disabled={!selectedObjs.length} onClick={() => runOffset(1)}
+              hint="Closed shapes only">Grow 1 mm</MenuItem>
+            <MenuItem disabled={!selectedObjs.length} onClick={() => runOffset(-1)}
+              hint="Closed shapes only">Shrink 1 mm</MenuItem>
+            <MenuItem disabled={!selectedObjs.length} onClick={runSimplify}
+              hint="Drops points that add nothing; keeps curves on outlines that have them">
+              Simplify
+            </MenuItem>
+            <MenuItem disabled={!selectedObjs.length} onClick={runJoin}
+              hint="Weld outlines whose ends meet; a closed loop becomes a ring">
+              Join ends
+            </MenuItem>
+            <MenuItem disabled={!selected || !activeNode} onClick={runSplit}
+              hint={activeNode ? 'Cut at the selected node' : 'Pick a node with the Nodes tool first'}>
+              Split at node
+            </MenuItem>
+          </Menu>
 
-        <div className="group">
-          <label>Draw</label>
-          {TOOLS.map((t) => (
-            <button
-              key={t.id}
-              className={`tool${tool === t.id ? ' on' : ''}`}
-              title={t.hint}
-              onClick={() => { cancelDraw(); setTool(t.id) }}
-            >
-              {t.icon}
-              <span>{t.label}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="group">
-          <label>Stitch</label>
-          {TYPES.map((t) => (
-            <button
-              key={t.id}
-              className={`tool${selected?.type === t.id ? ' on' : ''}`}
-              title={t.hint}
-              disabled={!selected}
-              onClick={() => selected && patch(selected.id, (o) => ({ ...o, type: t.id }))}
-            >
-              {t.icon}
-              <span>{t.label}</span>
-            </button>
-          ))}
-        </div>
-
-        {/* Shape editing: everything here changes the OUTLINE, never the
-            stitch settings, and everything produces objects that can still
-            be node-edited afterwards. */}
-        {/* Native alphabets: letterforms somebody digitized, reused. A
-            system font is a set of drawings for ink on paper; this is the
-            other thing. */}
-        <div className="group">
-          <label>Alphabet</label>
-          {alphabets.length > 0 && (
-            <select value={activeAlphabet ?? alphabets[0].id}
-              onChange={(e) => setActiveAlphabet(e.target.value)}>
-              {alphabets.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name} — {alphabetCoverage(a).join('') || 'empty'}
-                </option>
+          <Menu label="Arrange" width={260}>
+            <MenuLabel>Align</MenuLabel>
+            <div className="keep-open menu-grid">
+              {([['left', 'Left'], ['centreX', 'Centre'], ['right', 'Right'],
+                ['top', 'Top'], ['middle', 'Middle'], ['bottom', 'Bottom']] as const).map(([edge, lbl]) => (
+                <button key={edge} disabled={selectedObjs.length < 2}
+                  onClick={() => runAlign(edge as AlignEdge)}>{lbl}</button>
               ))}
-            </select>
-          )}
-          {!alphabets.length && (
-            <input
-              type="text" value={newAlphabetName} style={{ width: 110 }}
-              title="Name for the alphabet the first captured letter will start"
-              onChange={(e) => setNewAlphabetName(e.target.value)} />
-          )}
-          <input
-            type="text" value={glyphChar} maxLength={1} placeholder="A" style={{ width: 32 }}
-            title="The character the selected outline IS"
-            onChange={(e) => setGlyphChar(e.target.value)} />
-          <button
-            disabled={!selectedObjs.length || glyphChar.trim().length !== 1}
-            title="Add the selected outline as that character. Capture CAPITALS: a letter is normalised by its own height, so a descender would come out short."
-            onClick={() => captureGlyph(glyphChar)}>Capture</button>
-          {alphabets.length > 0 && (
-            <>
-              <input
-                type="text" value={alphabetWord} style={{ width: 90 }}
-                title="The word to set"
-                onChange={(e) => setAlphabetWord(e.target.value)} />
-              <input
-                type="number" value={alphabetSize} min={1} max={200} style={{ width: 52 }}
-                title="Letter height, mm"
-                onChange={(e) => setAlphabetSize(Number(e.target.value))} />
-              <button
-                onClick={() => {
+            </div>
+            <MenuItem disabled={selectedObjs.length < 3} onClick={() => runDistribute(true)}
+              hint="Evens the GAPS, not the centres">Space evenly across</MenuItem>
+            <MenuItem disabled={selectedObjs.length < 3} onClick={() => runDistribute(false)}
+              hint="Evens the GAPS, not the centres">Space evenly down</MenuItem>
+            <MenuSep />
+            <MenuItem disabled={!selectedObjs.length} onClick={() => runMirror(true)}
+              hint="About the selection’s own centre, so twice puts it back">Flip left ↔ right</MenuItem>
+            <MenuItem disabled={!selectedObjs.length} onClick={() => runMirror(false)}>
+              Flip top ↔ bottom
+            </MenuItem>
+            <MenuItem disabled={!selectedObjs.length} onClick={runDuplicate}
+              hint="Cmd/Ctrl+D">Duplicate</MenuItem>
+            <MenuSep />
+            <MenuItem disabled={selectedObjs.length < 2} onClick={groupSelection}
+              hint="A name, a visibility and a lock — NOT a change to the sewing order">
+              Group
+            </MenuItem>
+            <MenuItem disabled={!selectedObjs.some((o) => o.group)} onClick={ungroupSelection}>
+              Ungroup
+            </MenuItem>
+          </Menu>
+
+          {/* Letterforms somebody digitized, reused. A system font is a set
+              of drawings for ink on paper; this is the other thing. */}
+          <Menu label="Alphabet" width={250}>
+            <MenuLabel>Capture a letter</MenuLabel>
+            {alphabets.length > 0 ? (
+              <div className="row wide keep-open">
+                <label>Into</label>
+                <select value={activeAlphabet ?? alphabets[0].id}
+                  onChange={(e) => setActiveAlphabet(e.target.value)}>
+                  {alphabets.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name} — {alphabetCoverage(a).join('') || 'empty'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div className="row wide keep-open">
+                <label>New alphabet</label>
+                <input type="text" value={newAlphabetName}
+                  onChange={(e) => setNewAlphabetName(e.target.value)} />
+              </div>
+            )}
+            <div className="row wide keep-open">
+              <label>This outline is the character</label>
+              <input type="text" value={glyphChar} maxLength={1} placeholder="A"
+                onChange={(e) => setGlyphChar(e.target.value)} />
+            </div>
+            <MenuItem
+              disabled={!selectedObjs.length || glyphChar.trim().length !== 1}
+              onClick={() => captureGlyph(glyphChar)}
+              hint="Capture CAPITALS — a letter is normalised by its own height">
+              Capture selection
+            </MenuItem>
+            {alphabets.length > 0 && (
+              <>
+                <MenuSep />
+                <MenuLabel>Set a word</MenuLabel>
+                <div className="row wide keep-open">
+                  <label>Words</label>
+                  <input type="text" value={alphabetWord}
+                    onChange={(e) => setAlphabetWord(e.target.value)} />
+                </div>
+                <div className="row wide keep-open">
+                  <label>Letter height (mm)</label>
+                  <input type="number" value={alphabetSize} min={1} max={200}
+                    onChange={(e) => setAlphabetSize(Number(e.target.value))} />
+                </div>
+                <MenuItem onClick={() => {
                   const a = alphabets.find((q) => q.id === activeAlphabet) ?? alphabets[0]
                   setFromAlphabet(a, alphabetWord, alphabetSize)
-                }}>Set word</button>
-            </>
-          )}
-          {!alphabets.length && (
-            <span className="dim">digitize a letter, select it, type the character, Capture</span>
-          )}
-        </div>
+                }}>Set word</MenuItem>
+              </>
+            )}
+          </Menu>
 
-        <div className="group">
-          <label>Shape</label>
-          {BOOL_OPS.map((op) => (
-            <button key={op} disabled={selectedObjs.length < 2}
-              title={
-                op === 'union' ? 'Combine the selected outlines into one'
-                  : op === 'difference' ? 'Cut the objects in front out of the back one'
-                  : op === 'intersection' ? 'Keep only what they all cover'
-                  : 'Keep everything except where they overlap'
-              }
-              onClick={() => runBoolean(op)}>{BOOL_LABEL[op]}</button>
-          ))}
-          <button
-            disabled={doc.objects.length < 2}
-            title="Knock each object back so nothing is sewn twice where they overlap — double density is where needles break"
-            onClick={runRemoveOverlap}>No overlap</button>
-          <button disabled={!selectedObjs.length} title="Grow the outline by 1 mm"
-            onClick={() => runOffset(1)}>Grow</button>
-          <button disabled={!selectedObjs.length} title="Shrink the outline by 1 mm"
-            onClick={() => runOffset(-1)}>Shrink</button>
-          <button disabled={!selectedObjs.length}
-            title="Remove points that add nothing — keeps curves on outlines that have them"
-            onClick={runSimplify}>Simplify</button>
-          <button disabled={!selectedObjs.length}
-            title="Weld outlines whose ends meet; ends that close a loop become a ring"
-            onClick={runJoin}>Join</button>
-          <button disabled={!selected || !activeNode}
-            title="Cut the outline at the node selected with the Nodes tool"
-            onClick={runSplit}>Split</button>
-        </div>
-
-        <div className="group">
-          <label>Arrange</label>
-          {([['left', 'L'], ['centreX', 'C'], ['right', 'R'],
-            ['top', 'T'], ['middle', 'M'], ['bottom', 'B']] as const).map(([edge, short]) => (
-            <button key={edge} disabled={selectedObjs.length < 2}
-              title={`Align ${edge === 'centreX' ? 'horizontal centres' : edge === 'middle' ? 'vertical middles' : edge}`}
-              onClick={() => runAlign(edge as AlignEdge)}>{short}</button>
-          ))}
-          <button disabled={selectedObjs.length < 3} title="Even out the gaps left to right"
-            onClick={() => runDistribute(true)}>Space H</button>
-          <button disabled={selectedObjs.length < 3} title="Even out the gaps top to bottom"
-            onClick={() => runDistribute(false)}>Space V</button>
-          <button disabled={!selectedObjs.length} title="Flip left to right about the selection's centre"
-            onClick={() => runMirror(true)}>Flip H</button>
-          <button disabled={!selectedObjs.length} title="Flip top to bottom about the selection's centre"
-            onClick={() => runMirror(false)}>Flip V</button>
-          <button disabled={!selectedObjs.length} title="Duplicate (Cmd/Ctrl+D)"
-            onClick={runDuplicate}>Duplicate</button>
-          <button disabled={selectedObjs.length < 2}
-            title="Name this set of objects. Grouping does NOT change the sewing order."
-            onClick={groupSelection}>Group</button>
-          <button disabled={!selectedObjs.some((o) => o.group)}
-            title="Take the selection out of its group"
-            onClick={ungroupSelection}>Ungroup</button>
-        </div>
-
-        {tool === 'wand' && (
-          <div className="group">
-            <label>Wand</label>
-            <label className="check" title="How far a colour may differ and still be included">
-              Tolerance
-              <input
-                type="range" min={2} max={80} step={1}
-                value={Math.round(wandTolerance * 100)}
-                onChange={(e) => setWandTolerance(Number(e.target.value) / 100)} />
-              <span className="dim">{Math.round(wandTolerance * 100)}%</span>
-            </label>
-          </div>
-        )}
-
-        <div className="group">
-          <label title="Hold Space and drag to pan from any tool; the scroll wheel zooms">View</label>
-          <button onClick={fit} title="Fit the design to the window">Fit</button>
-          <span className="dim">Space+drag to pan</span>
-        </div>
-
-        <div className="group">
-          <label>Machine</label>
-          <select
-            value={doc.hoop.name} title={doc.hoop.note ?? ''}
-            onChange={(e) => setDoc((d) => ({ ...d, hoop: HOOPS.find((h) => h.name === e.target.value) ?? d.hoop }))}
-          >
-            {[...new Set(HOOPS.map((h) => h.group))].map((g) => (
-              <optgroup key={g} label={g}>
-                {HOOPS.filter((h) => h.group === g).map((h) => (
-                  <option key={h.name} value={h.name} disabled={!mountable.has(h.name)}>
-                    {h.name} — {h.widthMm.toFixed(0)}×{h.heightMm.toFixed(0)} mm
-                    {mountable.has(h.name) ? '' : ` (needs ${h.minSpacing})`}
-                  </option>
-                ))}
-              </optgroup>
+          <Menu label="View" width={210}>
+            <MenuItem onClick={fit} hint="Or press the Fit button">Fit to window</MenuItem>
+            <MenuSep />
+            <MenuLabel>Show</MenuLabel>
+            {([
+              ['showArt', 'Artwork'], ['showStitches', 'Stitches'], ['showJumps', 'Jumps'],
+              ['showPoints', 'Needle points'], ['showGrid', 'Grid'],
+            ] as const).map(([k, lbl]) => (
+              <label key={k} className="check keep-open">
+                <input type="checkbox" checked={opts[k]}
+                  onChange={(e) => setOpts((o) => ({ ...o, [k]: e.target.checked }))} />
+                {lbl}
+              </label>
             ))}
-          </select>
-          <select
-            value={doc.spacing} title="Bracket spacing — limits which hoops mount"
-            onChange={(e) => setDoc((d) => ({ ...d, spacing: e.target.value as Spacing }))}
-          >
-            {SPACINGS.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-          <input
-            type="number" min={1} max={24} value={machine.needles} style={{ width: 54 }}
-            title="Needles — more colour blocks than this means a mid-run re-thread"
-            onChange={(e) => {
-              const v = parseInt(e.target.value, 10)
-              if (Number.isFinite(v)) setMachine((m) => ({ ...m, needles: Math.max(1, v) }))
-            }}
-          />
-          <button onClick={fit}>Fit</button>
+            <label className="check keep-open"
+              title="Shade areas with more thread than the fabric can take">
+              <input type="checkbox" checked={showDensity}
+                onChange={(e) => setShowDensity(e.target.checked)} />
+              Density
+            </label>
+            {tool === 'wand' && (
+              <>
+                <MenuSep />
+                <MenuLabel>Wand tolerance</MenuLabel>
+                <label className="check keep-open"
+                  title="How far a colour may differ and still be included">
+                  <input type="range" min={2} max={80} step={1}
+                    value={Math.round(wandTolerance * 100)}
+                    onChange={(e) => setWandTolerance(Number(e.target.value) / 100)} />
+                  <span className="dim">{Math.round(wandTolerance * 100)}%</span>
+                </label>
+              </>
+            )}
+          </Menu>
+
+          <Menu label="Machine" title={doc.hoop.note ?? ''} width={300}>
+            <div className="row wide keep-open">
+              <label>Hoop</label>
+              <select
+                value={doc.hoop.name} title={doc.hoop.note ?? ''}
+                onChange={(e) => setDoc((d) => ({ ...d, hoop: HOOPS.find((h) => h.name === e.target.value) ?? d.hoop }))}
+              >
+                {[...new Set(HOOPS.map((h) => h.group))].map((g) => (
+                  <optgroup key={g} label={g}>
+                    {HOOPS.filter((h) => h.group === g).map((h) => (
+                      <option key={h.name} value={h.name} disabled={!mountable.has(h.name)}>
+                        {h.name} — {h.widthMm.toFixed(0)}×{h.heightMm.toFixed(0)} mm
+                        {mountable.has(h.name) ? '' : ` (needs ${h.minSpacing})`}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+            <div className="row wide keep-open">
+              <label>Bracket spacing</label>
+              <select
+                value={doc.spacing} title="Limits which hoops physically mount"
+                onChange={(e) => setDoc((d) => ({ ...d, spacing: e.target.value as Spacing }))}
+              >
+                {SPACINGS.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div className="row wide keep-open">
+              <label>Needles</label>
+              <input
+                type="number" min={1} max={24} value={machine.needles}
+                title="More colour blocks than this means a mid-run re-thread"
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10)
+                  if (Number.isFinite(v)) setMachine((m) => ({ ...m, needles: Math.max(1, v) }))
+                }}
+              />
+            </div>
+            {doc.hoop.note && (
+              <div className="row wide"><span className="dim">{doc.hoop.note}</span></div>
+            )}
+          </Menu>
+
+          <div className="group tight">
+            <button onClick={fit} title="Fit the design to the window">Fit</button>
+            <span className="dim">{doc.hoop.name}</span>
+          </div>
         </div>
 
-        <div className="group">
-          <label>View</label>
-          {([
-            ['showArt', 'Art'], ['showStitches', 'Stitches'], ['showJumps', 'Jumps'],
-            ['showPoints', 'Points'], ['showGrid', 'Grid'],
-          ] as const).map(([k, lbl]) => (
-            <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <input type="checkbox" checked={opts[k]} onChange={(e) => setOpts((o) => ({ ...o, [k]: e.target.checked }))} />
-              {lbl}
-            </label>
-          ))}
-          <label className="check" title="Shade areas with more thread than the fabric can take">
-            <input type="checkbox" checked={showDensity} onChange={(e) => setShowDensity(e.target.checked)} />
-            Density
-          </label>
+        {/* The palette. Pressed constantly, so it stays out and stays put. */}
+        <div className="palette">
+          <div className="group">
+            <label>Draw</label>
+            {TOOLS.map((t) => (
+              <button
+                key={t.id}
+                className={`tool${tool === t.id ? ' on' : ''}`}
+                title={t.hint}
+                onClick={() => { cancelDraw(); closeAllMenus(); setTool(t.id) }}
+              >
+                {t.icon}
+                <span>{t.label}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="group">
+            <label>Stitch</label>
+            {TYPES.map((t) => (
+              <button
+                key={t.id}
+                className={`tool${selected?.type === t.id ? ' on' : ''}`}
+                title={t.hint}
+                disabled={!selected}
+                onClick={() => selected && patch(selected.id, (o) => ({ ...o, type: t.id }))}
+              >
+                {t.icon}
+                <span>{t.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
