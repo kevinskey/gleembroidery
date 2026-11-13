@@ -53,6 +53,8 @@ export interface RenderOptions {
   marquee?: { a: Pt; b: Pt } | null
   /** A grip at the centre of each letter, for nudging letters singly. */
   letterHandles?: Pt[] | null
+  /** Where the selected object starts and finishes sewing. */
+  endpoints?: { entry?: Pt; exit?: Pt } | null
   /** Reference image drawn behind everything, for tracing over. */
   backdrop?: { bitmap: CanvasImageSource; origin: Pt; widthMm: number; heightMm: number } | null
 }
@@ -314,6 +316,30 @@ export function render(
       ctx.fill()
       ctx.stroke()
     }
+    ctx.restore()
+  }
+
+  // --- start and end markers ------------------------------------------------
+  // Green starts, red ends — the one colour pairing nobody has to be taught.
+  // Drawn after the stitches for the same reason the letter grips are: they
+  // sit on the object they belong to.
+  if (opt.endpoints) {
+    const dot = (at: Pt, fill: string, label: string) => {
+      const p = toS(at)
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2)
+      ctx.fillStyle = fill
+      ctx.fill()
+      ctx.strokeStyle = dark ? '#0f1216' : '#ffffff'
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+      ctx.fillStyle = dark ? '#e5e7eb' : '#111827'
+      ctx.font = '10px system-ui, sans-serif'
+      ctx.fillText(label, p.x + 8, p.y + 3)
+    }
+    ctx.save()
+    if (opt.endpoints.entry) dot(opt.endpoints.entry, '#22c55e', 'start')
+    if (opt.endpoints.exit) dot(opt.endpoints.exit, '#ef4444', 'end')
     ctx.restore()
   }
 

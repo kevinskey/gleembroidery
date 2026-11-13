@@ -262,6 +262,50 @@ ${warn}
  * Dimensions are given in mm so the printer renders physical size; a
  * measurement bar is included so a mis-scaled print is obvious at a glance.
  */
+/**
+ * Cutting outlines for every appliqué object, at TRUE SIZE.
+ *
+ * The operator cuts fabric to this and lays it against the placement run, so
+ * it is drawn from the SAME outline the placement run was generated from —
+ * a cut file derived from anything else would be trimming to a line the
+ * machine never sewed.
+ *
+ * Returns null when the design has no appliqué, so nothing empty is written.
+ */
+export function appliqueCutSvg(doc: Doc): string | null {
+  const objs = doc.objects.filter((o) => o.type === 'applique' && o.visible && o.paths.length)
+  if (!objs.length) return null
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const o of objs) for (const r of o.paths) for (const q of r) {
+    if (q.x < minX) minX = q.x
+    if (q.y < minY) minY = q.y
+    if (q.x > maxX) maxX = q.x
+    if (q.y > maxY) maxY = q.y
+  }
+  const pad = 10
+  const w = maxX - minX + pad * 2
+  const h = maxY - minY + pad * 2
+
+  const shapes = objs.map((o) => {
+    const d = o.paths.map((r) =>
+      r.map((q, i) => `${i ? 'L' : 'M'}${(q.x - minX + pad).toFixed(3)} ${(q.y - minY + pad).toFixed(3)}`)
+        .join(' ') + ' Z').join(' ')
+    // Cut lines are hairlines with no fill: a filled shape printed solid
+    // wastes toner and hides the line being cut to.
+    return `<path d="${d}" fill="none" stroke="#000" stroke-width="0.2"/>`
+      + `<text x="${(pad).toFixed(1)}" y="${(pad - 3).toFixed(1)}" font-size="4" fill="#000">${esc(o.name)}</text>`
+  }).join('\n  ')
+
+  // width/height in mm with a matching viewBox is what makes a printer put
+  // this on paper at the size the fabric has to be.
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${w.toFixed(2)}mm" height="${h.toFixed(2)}mm" viewBox="0 0 ${w.toFixed(2)} ${h.toFixed(2)}">
+  <title>${esc(doc.name)} — appliqué cutting outlines (true size)</title>
+  ${shapes}
+</svg>`
+}
+
 export function placementTemplateSvg(doc: Doc, plan: StitchPlan): string {
   const hw = doc.hoop.widthMm, hh = doc.hoop.heightMm
   const pad = 12

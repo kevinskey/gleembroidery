@@ -35,6 +35,7 @@ import {
 import {
   DEFAULT_MACHINE,
   packageStats,
+  appliqueCutSvg,
   placementTemplateSvg,
   runSheetHtml,
   writeCol,
@@ -309,7 +310,7 @@ export default function App() {
   const [sim, setSim] = useState<number | null>(null)
   const [machine, setMachine] = useState<MachineProfile>(DEFAULT_MACHINE)
   const [note, setNote] = useState<string | null>(null)
-  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee' | 'backdrop' | 'letterHandles'>>({
+  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee' | 'backdrop' | 'letterHandles' | 'endpoints'>>({
     showGrid: true, showArt: true, showStitches: true, showPoints: false, showJumps: true,
   })
 
@@ -385,6 +386,7 @@ export default function App() {
    */
   const [letterBoxes, setLetterBoxes] = useState<{ id: string; letters: LetterOutline[] } | null>(null)
   const letterDrag = useRef<{ id: string; index: number; start: Pt; from: LetterNudge } | null>(null)
+  const endDrag = useRef<{ id: string; which: 'entry' | 'exit' } | null>(null)
   /**
    * Reference image behind the design, and the pixels the wand reads.
    *
@@ -465,6 +467,8 @@ export default function App() {
       nodeEdit: tool === 'node' && selected ? { shapes: shapesOf(selected), active: activeNode } : null,
       letterHandles: tool === 'select' && selected?.text?.mode === 'fill' && letterBoxes?.id === selected.id
         ? letterBoxes.letters.map((l) => l.centre) : null,
+      endpoints: tool === 'select' && selected && (selected.entry || selected.exit)
+        ? { entry: selected.entry, exit: selected.exit } : null,
     })
   }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop, letterBoxes])
 
@@ -876,6 +880,9 @@ export default function App() {
     download(`${n}.col`, writeCol(centered), 'text/plain')
     download(`${n}.edr`, writeEdr(centered))
     download(`${n}-template.svg`, placementTemplateSvg(doc, centered), 'image/svg+xml')
+    // Appliqué jobs need the fabric cut before the machine can finish them.
+    const cut = appliqueCutSvg(doc)
+    if (cut) download(`${n}-applique-cut.svg`, cut, 'image/svg+xml')
     const sheet = window.open('', '_blank')
     if (sheet) {
       sheet.document.write(runSheetHtml(doc, stats, machine))
@@ -996,6 +1003,19 @@ export default function App() {
       if (e.button !== 0) return
       const p = atMm(e)
       const snapshot = () => selectedObjs.map((o) => ({ id: o.id, paths: o.paths }))
+      // Start/end markers are grabbed before anything else: they sit ON the
+      // object, so testing the object first would make them unreachable.
+      if (selected && (selected.entry || selected.exit)) {
+        const tol = HANDLE_PX / view.scale
+        for (const which of ['entry', 'exit'] as const) {
+          const at = selected[which]
+          if (at && Math.hypot(p.x - at.x, p.y - at.y) <= tol) {
+            history.begin()
+            endDrag.current = { id: selected.id, which }
+            return
+          }
+        }
+      }
       // Per-letter handles take precedence over the object's own handles:
       // they sit INSIDE the selection box, so anything else would make them
       // unreachable.
@@ -1110,6 +1130,11 @@ export default function App() {
     }
     if (marquee.current) {
       setMarquee({ a: marquee.current, b: atMm(e) })
+      return
+    }
+    const ed = endDrag.current
+    if (ed) {
+      patch(ed.id, (o) => ({ ...o, [ed.which]: atMm(e) }))
       return
     }
     const ld = letterDrag.current
@@ -1285,6 +1310,7 @@ export default function App() {
       setSelectedIds((prev) => [...new Set([...prev, ...hits.map((o) => o.id)])])
       return
     }
+    if (endDrag.current) { endDrag.current = null; history.end(); return }
     if (letterDrag.current) { letterDrag.current = null; history.end(); return }
     if (xform.current) { xform.current = null; history.end(); return }
     if (nodeDrag.current) { nodeDrag.current = null; history.end(); return }
@@ -1669,6 +1695,7 @@ export default function App() {
                   <option value="bean">Bean — triple-pass line</option>
                   <option value="satin">Satin — zigzag column</option>
                   <option value="fill">Fill — tatami area</option>
+                  <option value="applique">Appliqué — fabric, with stops</option>
                   <option value="none">Off — stitches nothing</option>
                 </select>
               </div>
@@ -1768,6 +1795,34 @@ export default function App() {
                 </fieldset>
               )}
 
+              <fieldset>
+                <legend>Start and end</legend>
+                <div className="row wide">
+                  <label className="dim">
+                    {selected.entry || selected.exit
+                      ? 'Drag the green start and red end markers on the canvas'
+                      : 'Automatic — set a start or end to control travel'}
+                  </label>
+                </div>
+                <div className="row wide">
+                  <div className="checks">
+                    <button onClick={() => {
+                      const b = objectBox(selected)
+                      if (b) patch(selected.id, (o) => ({ ...o, entry: { x: b.minX, y: b.minY } }))
+                    }}>Set start</button>
+                    <button onClick={() => {
+                      const b = objectBox(selected)
+                      if (b) patch(selected.id, (o) => ({ ...o, exit: { x: b.maxX, y: b.maxY } }))
+                    }}>Set end</button>
+                    <button
+                      disabled={!selected.entry && !selected.exit}
+                      onClick={() => patch(selected.id, (o) => ({ ...o, entry: undefined, exit: undefined }))}>
+                      Automatic
+                    </button>
+                  </div>
+                </div>
+              </fieldset>
+
               {(selected.type === 'run' || selected.type === 'bean') && (
                 <fieldset>
                   <legend>{selected.type === 'bean' ? 'Bean' : 'Run'}</legend>
@@ -1794,6 +1849,43 @@ export default function App() {
                       { id: 'zigzag', label: 'Zigzag' },
                     ]}
                     onChange={(next) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, underlay: next } }))} />
+                </fieldset>
+              )}
+
+              {selected.type === 'applique' && (
+                <fieldset>
+                  <legend>Appliqué</legend>
+                  {/* The order is fixed because the machine and the operator
+                      take turns; only the sizes are the digitizer's call. */}
+                  <div className="row wide">
+                    <label className="dim">
+                      Placement run · STOP · tack-down · STOP · border
+                    </label>
+                  </div>
+                  <Num label="Tack-down width (mm)" value={selected.applique.tackWidth} step={0.1} min={0.6} max={4}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, applique: { ...o.applique, tackWidth: v } }), 'ap.tw')} />
+                  <Num label="Tack-down spacing (mm)" value={selected.applique.tackDensity} step={0.05} min={0.3} max={2}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, applique: { ...o.applique, tackDensity: v } }), 'ap.td')} />
+                  <div className="row wide">
+                    <label>Border</label>
+                    <div className="checks">
+                      <label className="check">
+                        <input type="checkbox" checked={selected.applique.border}
+                          onChange={(e) => patch(selected.id, (o) => ({ ...o, applique: { ...o.applique, border: e.target.checked } }))} />
+                        Finish the cut edge
+                      </label>
+                    </div>
+                  </div>
+                  {selected.applique.border && (
+                    <>
+                      <Num label="Border width (mm)" value={selected.applique.borderWidth} step={0.1} min={1} max={8}
+                        onChange={(v) => patch(selected.id, (o) => ({ ...o, applique: { ...o.applique, borderWidth: v } }), 'ap.bw')} />
+                      <Num label="Border spacing (mm)" value={selected.applique.borderDensity} step={0.05} min={0.2} max={1}
+                        onChange={(v) => patch(selected.id, (o) => ({ ...o, applique: { ...o.applique, borderDensity: v } }), 'ap.bd')} />
+                      <Num label="Border pull comp (mm)" value={selected.applique.borderPullComp} step={0.05} min={0} max={1}
+                        onChange={(v) => patch(selected.id, (o) => ({ ...o, applique: { ...o.applique, borderPullComp: v } }), 'ap.bp')} />
+                    </>
+                  )}
                 </fieldset>
               )}
 

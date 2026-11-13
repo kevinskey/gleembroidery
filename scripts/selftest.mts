@@ -2,14 +2,14 @@
 //   npx tsx scripts/selftest.mts
 
 import { readDst, writeDst } from '../src/dst'
-import { centerPlan, digitize, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
+import { appliquePhases, centerPlan, digitize, orientToEntryExit, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
 import { tatamiFill } from '../src/fill'
 import { dist, resample, toRegions } from '../src/geometry'
-import { DEFAULT_FILL, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, emptyDoc, newObject, orderedUnderlay, type Pt } from '../src/model'
+import { DEFAULT_APPLIQUE, DEFAULT_FILL, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, emptyDoc, newObject, orderedUnderlay, type Pt } from '../src/model'
 import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
 import { SCHEMA_VERSION, ProjectError, deserialize, serialize } from '../src/project'
-import { packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
+import { appliqueCutSvg, packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { unionSelfChecked } from '../src/boolean'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
@@ -449,11 +449,31 @@ console.log('\n# project save / reopen')
   doc.objects[1].run = { length: 1.75 }
   doc.objects[1].satin = { width: 4.2, density: 0.31, pullComp: 0.11, underlay: ['center', 'zigzag'] }
   doc.objects[1].visible = false
+  // Entry/exit and the appliqué recipe, so a dropped field cannot hide here
+  // either.
+  doc.objects[0].entry = { x: -11, y: 7 }
+  doc.objects[0].exit = { x: 13, y: -4 }
+  doc.objects[1].applique = {
+    tackWidth: 1.9, tackDensity: 0.55, borderWidth: 3.1,
+    borderDensity: 0.37, borderPullComp: 0.25, border: false,
+  }
 
   const text = serialize(doc, true)
   const back = deserialize(text)
 
-  ok(JSON.stringify(back) === JSON.stringify(doc), 'every document field round-trips')
+  // Compared with keys SORTED: the contract is that every field survives, not
+  // that the writer happens to emit them in the order the constructor does.
+  const canon = (v: unknown): unknown =>
+    Array.isArray(v) ? v.map(canon)
+      : v && typeof v === 'object'
+        ? Object.fromEntries(Object.keys(v as object).sort()
+          .map((k) => [k, canon((v as Record<string, unknown>)[k])]))
+        : v
+  ok(JSON.stringify(canon(back)) === JSON.stringify(canon(doc)), 'every document field round-trips')
+  ok(back.objects[0].entry?.x === -11 && back.objects[0].exit?.y === -4,
+    'entry and exit points survive')
+  ok(back.objects[1].applique.borderWidth === 3.1 && back.objects[1].applique.border === false,
+    'the appliqué recipe survives')
   ok(back.hoop.widthMm === doc.hoop.widthMm && back.spacing === doc.spacing,
     'hoop and bracket spacing survive', `${back.hoop.name} / ${back.spacing}`)
   ok(back.objects[0].thread.code === '1902', 'thread assignment survives')
@@ -1670,6 +1690,125 @@ console.log('\n# medial axis (satin lettering)')
   }
 
   ok(traceSkeleton(new Uint8Array(100), 10, 10).length === 0, 'an empty mask traces nothing')
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# appliqué sequence')
+{
+  const ring = [...rect(0, 0, 40, 30), { x: 0, y: 0 }]
+  const obj = newObject({ name: 'Patch', type: 'applique', color: '#c0392b', paths: [ring] })
+  const warn: string[] = []
+  const phases = appliquePhases(obj, warn)
+  ok(phases.length === 3, 'placement, tack-down and border', `${phases.length}`)
+  ok(/placement/.test(phases[0].label) && /lay fabric/.test(phases[0].label),
+    'the first phase tells the operator to lay the fabric', phases[0].label)
+  ok(/tack-down/.test(phases[1].label) && /trim/.test(phases[1].label),
+    'the second tells them to trim', phases[1].label)
+  ok(/border/.test(phases[2].label), 'the third is the covering border')
+  // Order is the whole point: placement BEFORE tack-down BEFORE border.
+  ok(phases.every((p) => p.stitches.length > 0), 'every phase actually generates stitches',
+    phases.map((p) => p.stitches.length).join('/'))
+  // The border must be wider than the tack-down, or it cannot cover the cut edge.
+  const span = (st: typeof phases[0]['stitches']) => {
+    let min = Infinity, max = -Infinity
+    for (const s of st) { if (s.y < min) min = s.y; if (s.y > max) max = s.y }
+    return max - min
+  }
+  ok(span(phases[2].stitches) > span(phases[1].stitches),
+    'the border is wider than the tack-down, so it covers the cut edge',
+    `${span(phases[1].stitches).toFixed(1)} vs ${span(phases[2].stitches).toFixed(1)}`)
+
+  // Turning the border off leaves two phases, not a silent three.
+  const noBorder = newObject({
+    name: 'P2', type: 'applique', paths: [ring],
+    applique: { ...DEFAULT_APPLIQUE(), border: false },
+  })
+  ok(appliquePhases(noBorder, []).length === 2, 'the border can be turned off')
+
+  // An open path is not an appliqué: there is nothing to lay fabric inside.
+  const open = newObject({ name: 'P3', type: 'applique', paths: [[{ x: 0, y: 0 }, { x: 10, y: 0 }]] })
+  const w2: string[] = []
+  ok(appliquePhases(open, w2).length === 0 && w2.length > 0,
+    'an open outline is refused and reported', w2[0] ?? '')
+
+  // --- and through the real pipeline: each phase its own BLOCK, so the
+  //     machine stops between them.
+  {
+    const d = emptyDoc()
+    d.objects = [obj]
+    const { plan } = digitize(d)
+    ok(plan.blocks.length === 3, 'appliqué emits three blocks — the stops between them',
+      `${plan.blocks.length}`)
+    ok(plan.blocks.every((b) => b.stitches.length > 2), 'and each block carries stitches')
+    // Written out, the stops are real colour-change records.
+    const dst = readDst(writeDst(centerPlan(plan), 'ap'))
+    ok(dst.colorChanges === 2, 'the DST carries two stops — one per operator step',
+      `${dst.colorChanges}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n# appliqué cutting file')
+{
+  const d = emptyDoc()
+  ok(appliqueCutSvg(d) === null, 'a design with no appliqué writes no cut file')
+  d.objects = [newObject({
+    name: 'Shield', type: 'applique',
+    paths: [[...rect(-20, -15, 40, 30), { x: -20, y: -15 }]],
+  })]
+  const svg = appliqueCutSvg(d)!
+  ok(svg.includes('<svg'), 'a cut file is produced')
+  // TRUE SIZE is the whole point: mm units with a matching viewBox is what
+  // makes a printer put it on paper at the size the fabric has to be.
+  const m = /width="([\d.]+)mm" height="([\d.]+)mm" viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(svg)
+  ok(!!m, 'with physical mm dimensions', m ? m[0] : svg.slice(0, 80))
+  if (m) {
+    ok(Math.abs(parseFloat(m[1]) - parseFloat(m[3])) < 1e-6
+      && Math.abs(parseFloat(m[2]) - parseFloat(m[4])) < 1e-6,
+      'and a viewBox that matches them 1:1 — otherwise it prints to the wrong size')
+    // 40x30 shape plus 10 mm padding each side.
+    ok(Math.abs(parseFloat(m[1]) - 60) < 0.01 && Math.abs(parseFloat(m[2]) - 50) < 0.01,
+      'sized to the outline plus a margin', `${m[1]} x ${m[2]}`)
+  }
+  ok(svg.includes('fill="none"'), 'cut lines are hairlines, not filled shapes')
+  ok(svg.includes('Shield'), 'and each piece is labelled')
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n# entry and exit points')
+{
+  const line: Stitch[] = [
+    { x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }, { x: 30, y: 0 },
+  ]
+  const base = newObject({ type: 'run', paths: [[{ x: 0, y: 0 }, { x: 30, y: 0 }]] })
+
+  ok(orientToEntryExit(line, base)[0].x === 0, 'with no entry or exit, nothing is reordered')
+
+  // Entry near the far end flips the direction.
+  const flipped = orientToEntryExit(line, { ...base, entry: { x: 29, y: 0 } })
+  ok(flipped[0].x === 30 && flipped[flipped.length - 1].x === 0,
+    'an entry near the far end sews the object the other way round',
+    `${flipped[0].x} -> ${flipped[flipped.length - 1].x}`)
+
+  // Entry near the natural start leaves it alone.
+  const kept = orientToEntryExit(line, { ...base, entry: { x: 1, y: 0 } })
+  ok(kept[0].x === 0, 'an entry near the natural start changes nothing')
+
+  // Exit alone is enough to decide.
+  const byExit = orientToEntryExit(line, { ...base, exit: { x: 1, y: 0 } })
+  ok(byExit[byExit.length - 1].x === 0, 'an exit alone can flip it too')
+
+  // Entry and exit together: the pairing that costs least wins.
+  const both = orientToEntryExit(line, { ...base, entry: { x: 31, y: 0 }, exit: { x: -1, y: 0 } })
+  ok(both[0].x === 30, 'entry and exit together pick the cheaper orientation')
+
+  // A fill sewn backwards is the same fill, so reversing is always valid —
+  // but it must not drop or duplicate anything.
+  const long = Array.from({ length: 200 }, (_, i) => ({ x: i, y: i % 3 }))
+  const rev = orientToEntryExit(long, { ...base, entry: { x: 199, y: 0 } })
+  ok(rev.length === long.length, 'reversing preserves every stitch', `${rev.length}`)
+  ok(orientToEntryExit([], base).length === 0, 'an empty object is not a crash')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

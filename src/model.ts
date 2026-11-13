@@ -22,6 +22,7 @@ export interface Pt {
 export type Region = Pt[][]
 
 export type StitchType =
+  | 'applique' // placement, stop, tack-down, stop, finishing border
   | 'run' // single running stitch along the path
   | 'bean' // triple-pass running stitch (bold outline)
   | 'satin' // zigzag column centred on the path
@@ -92,6 +93,32 @@ export interface FillParams {
  * when nothing is — deliberately, rather than printing a hex code that reads
  * like information.
  */
+/**
+ * An appliqué run: fabric laid on the garment, not thread filling a shape.
+ *
+ * The sequence is fixed because the machine and the operator have to take
+ * turns, and the order is the whole point:
+ *   placement run  — marks where the fabric goes
+ *   STOP           — operator lays the fabric
+ *   tack-down      — holds it while the excess is still attached
+ *   STOP           — operator trims to the tack-down
+ *   border         — satin covering the raw edge
+ * Each phase is its own colour block, which is what produces the machine
+ * stops between them: DST has no "pause" of its own, and every controller
+ * treats a colour change as one.
+ */
+export interface AppliqueParams {
+  /** Width of the tack-down zigzag, mm. Narrow — it only has to hold. */
+  tackWidth: number
+  tackDensity: number
+  /** Width of the finishing satin that covers the cut edge, mm. */
+  borderWidth: number
+  borderDensity: number
+  borderPullComp: number
+  /** Skip the border when the edge is finished some other way. */
+  border: boolean
+}
+
 export interface ThreadRef {
   brand?: string
   code?: string
@@ -141,9 +168,20 @@ export interface EmbObject {
    * the moment it is set, and fixing a typo means deleting and retyping.
    */
   text?: TextSpec
+  /**
+   * Where this object should START and FINISH sewing, document mm.
+   *
+   * Absent means "wherever generation happens to begin", which is fine for a
+   * single object and poor across a design: the travel between objects is
+   * decided by where the previous one ended, so controlling the ends is how
+   * a digitizer keeps jumps short and hides them under later stitching.
+   */
+  entry?: Pt
+  exit?: Pt
   run: RunParams
   satin: SatinParams
   fill: FillParams
+  applique: AppliqueParams
 }
 
 /** Machine bracket spacing. A hoop's arms must match what the machine takes. */
@@ -275,6 +313,15 @@ export interface Doc {
 
 export const DEFAULT_RUN = (): RunParams => ({ length: 2.5 })
 
+export const DEFAULT_APPLIQUE = (): AppliqueParams => ({
+  tackWidth: 1.6,
+  tackDensity: 0.6,
+  borderWidth: 2.5,
+  borderDensity: 0.4,
+  borderPullComp: 0.2,
+  border: true,
+})
+
 export const DEFAULT_SATIN = (): SatinParams => ({
   width: 2.5,
   density: 0.4,
@@ -318,6 +365,7 @@ export function newObject(partial: Partial<EmbObject> = {}): EmbObject {
     run: DEFAULT_RUN(),
     satin: DEFAULT_SATIN(),
     fill: DEFAULT_FILL(),
+    applique: DEFAULT_APPLIQUE(),
     ...partial,
   }
 }

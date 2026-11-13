@@ -217,6 +217,91 @@ function nextDistinct(stitches: Stitch[], from: number, at: Pt): Pt | null {
   return null
 }
 
+/**
+ * The phases of an appliqué object, each its own block so the machine stops
+ * between them.
+ *
+ * Generated from the object's OUTLINE, the same geometry the cut file comes
+ * from — the placement run and the cutting line have to be the same shape or
+ * the operator is trimming to a line the machine never sewed.
+ */
+export function appliquePhases(
+  obj: EmbObject, warnings: string[],
+): { label: string; stitches: Stitch[] }[] {
+  const p = obj.applique
+  const rings = obj.paths.filter((r) => r.length >= 3).map((r) => (isClosedRing(r) ? r : [...r, r[0]]))
+  if (!rings.length) {
+    warnings.push(`${obj.name}: appliqué needs a closed outline`)
+    return []
+  }
+  const out: { label: string; stitches: Stitch[] }[] = []
+
+  // 1. Placement: a plain run the operator lays the fabric against.
+  const placement: Stitch[] = []
+  for (const ring of rings) placement.push(...runStitch(ring, { length: 2.5 }))
+  if (placement.length) out.push({ label: `${obj.name} — placement (lay fabric)`, stitches: placement })
+
+  // 2. Tack-down: a narrow zigzag holding the fabric while the excess is
+  //    still attached. Narrow on purpose — it is not meant to be seen, and a
+  //    wide one would be cut through when the excess comes off.
+  const tack: Stitch[] = []
+  for (const ring of rings) {
+    const params = {
+      width: Math.max(0.6, p.tackWidth), density: Math.max(0.3, p.tackDensity),
+      pullComp: 0, underlay: [] as never[],
+    }
+    const check = satinCheck(ring, params)
+    if (check.errors.length) {
+      for (const e of check.errors) warnings.push(`${obj.name}: tack-down NOT STITCHED — ${e}`)
+      continue
+    }
+    tack.push(...satinColumn(ring, params))
+  }
+  if (tack.length) out.push({ label: `${obj.name} — tack-down (trim excess)`, stitches: tack })
+
+  // 3. Border: the satin that covers the cut edge. Optional, because some
+  //    jobs finish the edge another way.
+  if (p.border) {
+    const border: Stitch[] = []
+    for (const ring of rings) {
+      const params = {
+        width: Math.max(1, p.borderWidth), density: Math.max(0.2, p.borderDensity),
+        pullComp: Math.max(0, p.borderPullComp), underlay: [] as never[],
+      }
+      const check = satinCheck(ring, params)
+      if (check.errors.length) {
+        for (const e of check.errors) warnings.push(`${obj.name}: border NOT STITCHED — ${e}`)
+        continue
+      }
+      border.push(...satinColumn(ring, params))
+    }
+    if (border.length) out.push({ label: `${obj.name} — border`, stitches: border })
+  }
+  return out
+}
+
+function isClosedRing(r: Pt[]): boolean {
+  return r.length > 2 && dist(r[0], r[r.length - 1]) < 1e-6
+}
+
+/**
+ * Start the object at the end nearest its entry marker, and finish nearest
+ * its exit.
+ *
+ * Only the two natural ends are candidates — a stitch order is a sequence,
+ * and the only free choice that keeps it valid is which way round it runs.
+ * Rotating a fill to begin anywhere would scramble the row order it depends
+ * on. Reversing one is always valid: a fill sewn backwards is the same fill.
+ */
+export function orientToEntryExit(stitches: Stitch[], obj: EmbObject): Stitch[] {
+  if (stitches.length < 2 || (!obj.entry && !obj.exit)) return stitches
+  const head = stitches[0]
+  const tail = stitches[stitches.length - 1]
+  const cost = (start: Pt, end: Pt) =>
+    (obj.entry ? dist(obj.entry, start) : 0) + (obj.exit ? dist(obj.exit, end) : 0)
+  return cost(tail, head) < cost(head, tail) ? [...stitches].reverse() : stitches
+}
+
 function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM): Stitch[] {
   const out: Stitch[] = []
   const push = (parts: Stitch[]) => {
@@ -232,6 +317,12 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
 
   switch (obj.type) {
     case 'none':
+      return []
+
+    case 'applique':
+      // Handled by the caller, which needs the phases as separate blocks to
+      // get a machine stop between them. Reaching here means something asked
+      // for an appliqué as one flat run of stitches, which it never is.
       return []
 
     case 'run':
@@ -363,7 +454,27 @@ export function digitize(doc: Doc): DigitizeResult {
 
   for (const obj of doc.objects) {
     if (!obj.visible || obj.type === 'none') continue
-    const stitches = stitchObject(obj, warnings, floor)
+
+    // Appliqué is a SEQUENCE, not a stitch: each phase becomes its own block
+    // so the machine stops between them for the operator. They are never
+    // merged with a neighbour even on the same thread — merging would delete
+    // exactly the stop the operator is waiting for.
+    if (obj.type === 'applique') {
+      for (const phase of appliquePhases(obj, warnings)) {
+        // Same finishing the other stitch types get: locks, trims, length caps.
+        const laid = suppressShortStitches(
+          enforceMaxStitch(applyTrimsAndLocks(phase.stitches)), floor)
+        if (!laid.length) continue
+        blocks.push({
+          color: obj.color,
+          label: phase.label,
+          stitches: [{ ...laid[0], jump: true }, ...laid.slice(1)],
+        })
+      }
+      continue
+    }
+
+    const stitches = orientToEntryExit(stitchObject(obj, warnings, floor), obj)
     if (!stitches.length) continue
 
     // Merge only when the NEEDLE would not change. Keying on the screen

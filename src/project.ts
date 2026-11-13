@@ -18,6 +18,7 @@
 
 import type { PathNode, Shape } from './nodes'
 import {
+  DEFAULT_APPLIQUE,
   DEFAULT_FILL,
   DEFAULT_RUN,
   DEFAULT_SATIN,
@@ -90,6 +91,9 @@ function objectOut(o: EmbObject) {
     // Full precision on purpose: rounding here would make a reopened project
     // generate a subtly different plan from the one that was approved.
     paths: o.paths.map((p) => p.map((q) => [q.x, q.y])),
+    ...(o.entry ? { entry: [o.entry.x, o.entry.y] } : {}),
+    ...(o.exit ? { exit: [o.exit.x, o.exit.y] } : {}),
+    applique: { ...o.applique },
     ...(o.twoRail ? { twoRail: true } : {}),
     ...(o.text ? { text: { ...o.text } } : {}),
     // The editable outline rides alongside the flattened cache. Without it a
@@ -193,6 +197,12 @@ function hoopIn(v: unknown): Hoop {
 
 /** Read editable outlines. Anything malformed is dropped, not guessed at —
  *  the object still has its flattened `paths` and stays sewable. */
+/** A stored [x, y] pair, or undefined when absent or malformed. */
+function ptIn(v: unknown): Pt | undefined {
+  return Array.isArray(v) && v.length === 2 && typeof v[0] === 'number' && typeof v[1] === 'number'
+    ? { x: v[0], y: v[1] } : undefined
+}
+
 function shapesIn(v: unknown): Shape[] | undefined {
   if (!Array.isArray(v)) return undefined
   const pt = (q: unknown): Pt | undefined =>
@@ -256,7 +266,9 @@ function objectIn(v: unknown, index: number): EmbObject | null {
   const satin = isObj(v.satin) ? v.satin : {}
   const fill = isObj(v.fill) ? v.fill : {}
   const border = isObj(fill.border) ? fill.border : {}
+  const ap = isObj(v.applique) ? v.applique : {}
   const dRun = DEFAULT_RUN(), dSatin = DEFAULT_SATIN(), dFill = DEFAULT_FILL()
+  const dApp = DEFAULT_APPLIQUE()
   return {
     id: str(v.id, `o${index + 1}`),
     name: str(v.name, `Object ${index + 1}`),
@@ -272,6 +284,16 @@ function objectIn(v: unknown, index: number): EmbObject | null {
     type: oneOf(v.type, STITCH_TYPES, 'fill'),
     paths,
     shapes: shapesIn(v.shapes),
+    entry: ptIn(v.entry),
+    exit: ptIn(v.exit),
+    applique: {
+      tackWidth: num(ap.tackWidth, dApp.tackWidth),
+      tackDensity: num(ap.tackDensity, dApp.tackDensity),
+      borderWidth: num(ap.borderWidth, dApp.borderWidth),
+      borderDensity: num(ap.borderDensity, dApp.borderDensity),
+      borderPullComp: num(ap.borderPullComp, dApp.borderPullComp),
+      border: ap.border !== false,
+    },
     ...(v.twoRail === true ? { twoRail: true } : {}),
     ...(isObj(v.text) && typeof v.text.content === 'string' ? {
       text: {
