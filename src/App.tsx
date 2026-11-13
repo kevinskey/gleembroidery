@@ -3,6 +3,7 @@ import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { close, toRegions } from './geometry'
 import { useHistory } from './history'
+import { CELL_MM, analyseDensity } from './density'
 import { DEFAULT_TOLERANCE, traceRegionAt, type Raster } from './trace'
 import {
   DEFAULT_TEXT, SUGGESTED_FACES, textToColumns, textToOutlines,
@@ -310,7 +311,7 @@ export default function App() {
   const [sim, setSim] = useState<number | null>(null)
   const [machine, setMachine] = useState<MachineProfile>(DEFAULT_MACHINE)
   const [note, setNote] = useState<string | null>(null)
-  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee' | 'backdrop' | 'letterHandles' | 'endpoints'>>({
+  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee' | 'backdrop' | 'letterHandles' | 'endpoints' | 'density'>>({
     showGrid: true, showArt: true, showStitches: true, showPoints: false, showJumps: true,
   })
 
@@ -377,6 +378,7 @@ export default function App() {
    * outline to pick a different object would lose it.
    */
   const [cmdHeld, setCmdHeld] = useState(false)
+  const [showDensity, setShowDensity] = useState(false)
   /**
    * Letter boxes of the selected lettering, for its per-letter handles.
    *
@@ -406,6 +408,9 @@ export default function App() {
   // result can never land on top of a newer edit.
   const { plan, warnings, busy, ms, inline } = useStitchPlan(doc)
   const counts = useMemo(() => countStitches(plan), [plan])
+  // Computed from the SAME plan that is exported, so what is flagged is what
+  // the machine will sew — not a separate estimate that could disagree.
+  const density = useMemo(() => analyseDensity(plan), [plan])
   const pb = useMemo(() => planBounds(plan), [plan])
   const total = counts.stitches + counts.jumps
   const stats = useMemo(() => packageStats(doc, plan, warnings, machine), [doc, plan, warnings, machine])
@@ -469,8 +474,9 @@ export default function App() {
         ? letterBoxes.letters.map((l) => l.centre) : null,
       endpoints: tool === 'select' && selected && (selected.entry || selected.exit)
         ? { entry: selected.entry, exit: selected.exit } : null,
+      density: showDensity ? { cells: density.hotspots, cellMm: CELL_MM } : null,
     })
-  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop, letterBoxes])
+  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop, letterBoxes, showDensity, density])
 
   useEffect(() => { draw() }, [draw])
 
@@ -1593,6 +1599,10 @@ export default function App() {
               {lbl}
             </label>
           ))}
+          <label className="check" title="Shade areas with more thread than the fabric can take">
+            <input type="checkbox" checked={showDensity} onChange={(e) => setShowDensity(e.target.checked)} />
+            Density
+          </label>
         </div>
       </div>
 
@@ -1852,6 +1862,46 @@ export default function App() {
                 </fieldset>
               )}
 
+              {selected.type === 'satin' && (
+                <fieldset>
+                  <legend>3D puff</legend>
+                  <div className="row wide">
+                    <div className="checks">
+                      <label className="check">
+                        <input type="checkbox" checked={selected.puff.enabled}
+                          onChange={(e) => patch(selected.id, (o) => ({ ...o, puff: { ...o.puff, enabled: e.target.checked } }))} />
+                        Sew over foam
+                      </label>
+                    </div>
+                  </div>
+                  {selected.puff.enabled && (
+                    <>
+                      <div className="row">
+                        <label>Foam thickness</label>
+                        <select value={String(selected.puff.thickness)}
+                          onChange={(e) => patch(selected.id, (o) => ({ ...o, puff: { ...o.puff, thickness: Number(e.target.value) } }))}>
+                          <option value="2">2 mm</option>
+                          <option value="3">3 mm</option>
+                          <option value="4">4 mm</option>
+                          <option value="6">6 mm</option>
+                        </select>
+                      </div>
+                      <Num label="Density ×" value={selected.puff.densityScale} step={0.05} min={0.4} max={1}
+                        onChange={(v) => patch(selected.id, (o) => ({ ...o, puff: { ...o.puff, densityScale: v } }), 'puff.ds')} />
+                      <div className="row wide">
+                        <div className="checks">
+                          <label className="check" title="Perforates the ends so the excess foam tears along the stitching">
+                            <input type="checkbox" checked={selected.puff.capEnds}
+                              onChange={(e) => patch(selected.id, (o) => ({ ...o, puff: { ...o.puff, capEnds: e.target.checked } }))} />
+                            Cap the ends
+                          </label>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </fieldset>
+              )}
+
               {selected.type === 'applique' && (
                 <fieldset>
                   <legend>Appliqué</legend>
@@ -1952,6 +2002,14 @@ export default function App() {
         {ms > 0 && <span className="dim">{ms.toFixed(0)} ms{inline ? ' inline' : ''}</span>}
         {note && <span className="note">{note}</span>}
         {stats.warnings.map((w, i) => <span key={i} className="warn">⚠ {w}</span>)}
+        {/* Density is a diagnostic, not a refusal: it tells the operator
+            where the trouble is and offers to show them. */}
+        {density.warnings.map((w) => (
+          <span key={w} className="warn">
+            ⚠ {w}{' '}
+            <button className="link" onClick={() => setShowDensity(true)}>show</button>
+          </span>
+        ))}
         <span className="sim">
           <label>Stitch-out</label>
           <input

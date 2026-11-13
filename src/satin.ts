@@ -10,7 +10,7 @@
 //     OUTER rail keeps the requested density instead of the spine doing so.
 //   * Pull compensation widens the column, because satin drags its edges in.
 
-import { SATIN_UNDERLAY_ORDER, orderedUnderlay, type Pt, type RunParams, type SatinParams, type SatinUnderlay } from './model'
+import { SATIN_UNDERLAY_ORDER, orderedUnderlay, type PuffParams, type Pt, type RunParams, type SatinParams, type SatinUnderlay } from './model'
 import type { Stitch } from './stitches'
 import { dedupe, dist, isClosed, pathLength, resample, tangentAt } from './geometry'
 
@@ -639,6 +639,85 @@ export function twoRailCheck(railA: Pt[], railB: Pt[], p: SatinParams): SatinChe
     prev = v
   }
   return { errors, warnings }
+}
+
+// ---------------------------------------------------------------------------
+// 3D puff
+// ---------------------------------------------------------------------------
+
+/**
+ * Narrowest column that will stand up over foam, mm.
+ *
+ * Below this the thread simply flattens the foam instead of standing on it —
+ * the design sews, it just is not 3D, which is worse than refusing because
+ * the operator has already loaded the foam.
+ */
+export const PUFF_MIN_MM = 3.5
+
+/** Widest column foam supports before it collapses in the middle, mm. */
+export const PUFF_MAX_MM = 12
+
+/**
+ * Check a column before sewing it over foam.
+ *
+ * These are WARNINGS, not refusals, and that is deliberate: unlike a column
+ * folded through its own centre, a badly-sized puff column still sews. The
+ * fault only appears on the garment, so the operator needs telling before
+ * they load foam — but they are the one who decides.
+ */
+export function puffCheck(p: SatinParams, puff: PuffParams): SatinCheck {
+  const errors: string[] = []
+  const warnings: string[] = []
+  const w = p.width + p.pullComp
+  if (w < PUFF_MIN_MM) {
+    warnings.push(`${w.toFixed(1)} mm is narrow for puff — under about ${PUFF_MIN_MM} mm the thread flattens the foam instead of standing on it`)
+  }
+  if (w > PUFF_MAX_MM) {
+    warnings.push(`${w.toFixed(1)} mm is wide for puff — over about ${PUFF_MAX_MM} mm the foam collapses in the middle`)
+  }
+  // Foam is thicker than the fabric, so the column has to climb over it: a
+  // column barely wider than the foam is tall has nowhere to lie down.
+  if (w < puff.thickness * 1.5) {
+    warnings.push(`a ${w.toFixed(1)} mm column over ${puff.thickness} mm foam is too steep — use a wider column or thinner foam`)
+  }
+  if (!puff.capEnds) {
+    warnings.push('end capping is off — the excess foam will not tear cleanly at the ends')
+  }
+  return { errors, warnings }
+}
+
+/**
+ * Perforate the ends of a puff column so the excess foam tears along the
+ * stitching.
+ *
+ * A very tight zigzag across the column at each end, which is what a
+ * digitizer does by hand: the needle punches a dense line of holes, and the
+ * foam separates on that line when it is pulled away. Without it the foam
+ * tears wherever it feels like, which is the commonest way a puff job is
+ * ruined after it has already sewn.
+ */
+export function puffCaps(path: Pt[], p: SatinParams): Stitch[] {
+  const pts = dedupe(path)
+  if (pts.length < 2) return []
+  const half = (p.width + p.pullComp) / 2
+  const closed = isClosed(path)
+  // A closed column has no ends to cap — the foam is enclosed by the ring.
+  if (closed) return []
+
+  const out: Stitch[] = []
+  for (const end of [0, pts.length - 1]) {
+    const t = tangentAt(pts, end, false)
+    const n = { x: -t.y, y: t.x }
+    const c = pts[end]
+    // Half the normal satin pitch: this is a perforation, not coverage.
+    const step = Math.max(0.2, p.density / 2)
+    const count = Math.max(2, Math.ceil((half * 2) / step))
+    for (let i = 0; i <= count; i++) {
+      const u = -half + (i / count) * half * 2
+      out.push({ x: c.x + n.x * u, y: c.y + n.y * u })
+    }
+  }
+  return out
 }
 
 export const MAX_SATIN_MM = 10

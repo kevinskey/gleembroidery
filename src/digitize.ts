@@ -16,7 +16,7 @@ import type { ColorBlock, Stitch, StitchPlan } from './stitches'
 import { dist, resample, scanlineSpans, toRegions } from './geometry'
 import { unionSelfChecked } from './boolean'
 import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
-import { beanStitch, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
+import { beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
 export const MAX_STITCH_MM = 10
@@ -368,8 +368,20 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
           for (const e of check.errors) warnings.push(`${obj.name}: NOT STITCHED — ${e}`)
           continue
         }
-        push(satinUnderlay(path, obj.satin))
-        push(satinColumn(path, obj.satin))
+        // Puff tightens the density and caps the ends; everything else about
+        // the column is unchanged, which is the point — puff is a treatment
+        // OF a satin column, not a different stitch.
+        const sp = obj.puff.enabled
+          ? { ...obj.satin, density: Math.max(0.12, obj.satin.density * obj.puff.densityScale) }
+          : obj.satin
+        if (obj.puff.enabled) {
+          for (const w of puffCheck(sp, obj.puff).warnings) warnings.push(`${obj.name}: ${w}`)
+        }
+        push(satinUnderlay(path, sp))
+        push(satinColumn(path, sp))
+        // Caps go LAST: they are a perforation through thread and foam
+        // together, so they have to be punched after the column is laid.
+        if (obj.puff.enabled && obj.puff.capEnds) push(puffCaps(path, sp))
       }
       break
 

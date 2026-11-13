@@ -6,6 +6,7 @@
 
 import type { Doc, Pt } from './model'
 import { handlesOf, type Shape } from './nodes'
+import { densityColour } from './density'
 import type { StitchPlan } from './stitches'
 
 export interface View {
@@ -55,6 +56,8 @@ export interface RenderOptions {
   letterHandles?: Pt[] | null
   /** Where the selected object starts and finishes sewing. */
   endpoints?: { entry?: Pt; exit?: Pt } | null
+  /** Over-dense cells to shade, with the grid size they were counted on. */
+  density?: { cells: { x: number; y: number; ratio: number }[]; cellMm: number } | null
   /** Reference image drawn behind everything, for tracing over. */
   backdrop?: { bitmap: CanvasImageSource; origin: Pt; widthMm: number; heightMm: number } | null
 }
@@ -319,30 +322,6 @@ export function render(
     ctx.restore()
   }
 
-  // --- start and end markers ------------------------------------------------
-  // Green starts, red ends — the one colour pairing nobody has to be taught.
-  // Drawn after the stitches for the same reason the letter grips are: they
-  // sit on the object they belong to.
-  if (opt.endpoints) {
-    const dot = (at: Pt, fill: string, label: string) => {
-      const p = toS(at)
-      ctx.beginPath()
-      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2)
-      ctx.fillStyle = fill
-      ctx.fill()
-      ctx.strokeStyle = dark ? '#0f1216' : '#ffffff'
-      ctx.lineWidth = 1.5
-      ctx.stroke()
-      ctx.fillStyle = dark ? '#e5e7eb' : '#111827'
-      ctx.font = '10px system-ui, sans-serif'
-      ctx.fillText(label, p.x + 8, p.y + 3)
-    }
-    ctx.save()
-    if (opt.endpoints.entry) dot(opt.endpoints.entry, '#22c55e', 'start')
-    if (opt.endpoints.exit) dot(opt.endpoints.exit, '#ef4444', 'end')
-    ctx.restore()
-  }
-
   // --- marquee --------------------------------------------------------------
   if (opt.marquee) {
     const a = toS(opt.marquee.a)
@@ -526,6 +505,47 @@ export function render(
         }
       }
     }
+  }
+
+  // --- density heat ----------------------------------------------------------
+  // Over the stitches, because the point is to show WHERE in the design the
+  // trouble is. Only the cells past the threshold are painted: shading
+  // everything would be a picture of the design, not a diagnostic.
+  if (opt.density && opt.density.cells.length) {
+    ctx.save()
+    for (const c of opt.density.cells) {
+      const fill = densityColour(c.ratio)
+      if (!fill) continue
+      const a = toS({ x: c.x, y: c.y })
+      const b = toS({ x: c.x + opt.density.cellMm, y: c.y + opt.density.cellMm })
+      ctx.fillStyle = fill
+      ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y)
+    }
+    ctx.restore()
+  }
+
+  // --- start and end markers ------------------------------------------------
+  // Green starts, red ends — the one colour pairing nobody has to be taught.
+  // Drawn after the stitches for the same reason the letter grips are: they
+  // sit on the object they belong to.
+  if (opt.endpoints) {
+    const dot = (at: Pt, fill: string, label: string) => {
+      const p = toS(at)
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2)
+      ctx.fillStyle = fill
+      ctx.fill()
+      ctx.strokeStyle = dark ? '#0f1216' : '#ffffff'
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+      ctx.fillStyle = dark ? '#e5e7eb' : '#111827'
+      ctx.font = '10px system-ui, sans-serif'
+      ctx.fillText(label, p.x + 8, p.y + 3)
+    }
+    ctx.save()
+    if (opt.endpoints.entry) dot(opt.endpoints.entry, '#22c55e', 'start')
+    if (opt.endpoints.exit) dot(opt.endpoints.exit, '#ef4444', 'end')
+    ctx.restore()
   }
 
   // --- per-letter grips ------------------------------------------------------

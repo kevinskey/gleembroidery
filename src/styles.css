@@ -116,6 +116,11 @@ button, select, input[type='text'], input[type='number'] {
 }
 
 button { cursor: pointer; }
+/* An inline action inside a status message. */
+button.link {
+  background: none; border: 0; padding: 0 2px;
+  color: inherit; text-decoration: underline; font: inherit;
+}
 button:hover { border-color: var(--accent); }
 button:disabled { opacity: 0.45; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }

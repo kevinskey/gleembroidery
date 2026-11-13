@@ -20,6 +20,7 @@ import type { PathNode, Shape } from './nodes'
 import {
   DEFAULT_APPLIQUE,
   DEFAULT_FILL,
+  DEFAULT_PUFF,
   DEFAULT_RUN,
   DEFAULT_SATIN,
   HOOPS,
@@ -94,6 +95,7 @@ function objectOut(o: EmbObject) {
     ...(o.entry ? { entry: [o.entry.x, o.entry.y] } : {}),
     ...(o.exit ? { exit: [o.exit.x, o.exit.y] } : {}),
     applique: { ...o.applique },
+    puff: { ...o.puff },
     ...(o.twoRail ? { twoRail: true } : {}),
     ...(o.text ? { text: { ...o.text } } : {}),
     // The editable outline rides alongside the flattened cache. Without it a
@@ -268,7 +270,9 @@ function objectIn(v: unknown, index: number): EmbObject | null {
   const border = isObj(fill.border) ? fill.border : {}
   const ap = isObj(v.applique) ? v.applique : {}
   const dRun = DEFAULT_RUN(), dSatin = DEFAULT_SATIN(), dFill = DEFAULT_FILL()
+  const pf = isObj(v.puff) ? v.puff : {}
   const dApp = DEFAULT_APPLIQUE()
+  const dPuff = DEFAULT_PUFF()
   return {
     id: str(v.id, `o${index + 1}`),
     name: str(v.name, `Object ${index + 1}`),
@@ -293,6 +297,12 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       borderDensity: num(ap.borderDensity, dApp.borderDensity),
       borderPullComp: num(ap.borderPullComp, dApp.borderPullComp),
       border: ap.border !== false,
+    },
+    puff: {
+      enabled: pf.enabled === true,
+      thickness: num(pf.thickness, dPuff.thickness),
+      densityScale: num(pf.densityScale, dPuff.densityScale),
+      capEnds: pf.capEnds !== false,
     },
     ...(v.twoRail === true ? { twoRail: true } : {}),
     ...(isObj(v.text) && typeof v.text.content === 'string' ? {

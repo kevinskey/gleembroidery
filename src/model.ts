@@ -119,6 +119,31 @@ export interface AppliqueParams {
   border: boolean
 }
 
+/**
+ * 3D puff: satin sewn over foam laid on the garment.
+ *
+ * Puff is a specialised DIGITIZING process, not a finish applied to a
+ * finished file. The column has to be designed for it from the start:
+ *
+ *   • WIDTH has a usable band. Too narrow and the foam will not stand up
+ *     under the thread; too wide and it collapses in the middle and the
+ *     needle strikes the foam rather than piercing it.
+ *   • DENSITY must be tighter than flat satin. Foam shows through gaps that
+ *     a flat column would get away with, and it shows in white.
+ *   • THE ENDS must be perforated so the excess foam TEARS CLEANLY along the
+ *     stitching when it is pulled away. An un-capped end leaves foam hanging
+ *     out of the design, which is the single most common puff failure.
+ */
+export interface PuffParams {
+  enabled: boolean
+  /** Foam thickness in mm — 2 and 3 are what shops stock. */
+  thickness: number
+  /** Multiplier on the satin density; below 1 means tighter. */
+  densityScale: number
+  /** Perforate the ends so the excess foam tears along the stitch line. */
+  capEnds: boolean
+}
+
 export interface ThreadRef {
   brand?: string
   code?: string
@@ -182,6 +207,7 @@ export interface EmbObject {
   satin: SatinParams
   fill: FillParams
   applique: AppliqueParams
+  puff: PuffParams
 }
 
 /** Machine bracket spacing. A hoop's arms must match what the machine takes. */
@@ -313,6 +339,14 @@ export interface Doc {
 
 export const DEFAULT_RUN = (): RunParams => ({ length: 2.5 })
 
+export const DEFAULT_PUFF = (): PuffParams => ({
+  enabled: false,
+  thickness: 3,
+  // Tighter than flat satin: foam shows through gaps, and it shows in white.
+  densityScale: 0.75,
+  capEnds: true,
+})
+
 export const DEFAULT_APPLIQUE = (): AppliqueParams => ({
   tackWidth: 1.6,
   tackDensity: 0.6,
@@ -366,6 +400,7 @@ export function newObject(partial: Partial<EmbObject> = {}): EmbObject {
     satin: DEFAULT_SATIN(),
     fill: DEFAULT_FILL(),
     applique: DEFAULT_APPLIQUE(),
+    puff: DEFAULT_PUFF(),
     ...partial,
   }
 }

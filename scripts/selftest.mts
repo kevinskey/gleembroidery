@@ -10,6 +10,9 @@ import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, sat
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
 import { SCHEMA_VERSION, ProjectError, deserialize, serialize } from '../src/project'
 import { appliqueCutSvg, packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
+import { NOMINAL_PER_MM2, SEVERE_RATIO, WARN_RATIO, analyseDensity, densityColour } from '../src/density'
+import { PUFF_MAX_MM, PUFF_MIN_MM, puffCaps, puffCheck } from '../src/satin'
+import { DEFAULT_PUFF } from '../src/model'
 import { unionSelfChecked } from '../src/boolean'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
@@ -1809,6 +1812,119 @@ console.log('\n# entry and exit points')
   const rev = orientToEntryExit(long, { ...base, entry: { x: 199, y: 0 } })
   ok(rev.length === long.length, 'reversing preserves every stitch', `${rev.length}`)
   ok(orientToEntryExit([], base).length === 0, 'an empty object is not a crash')
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# 3D puff')
+{
+  const line: Pt[] = [{ x: 0, y: 0 }, { x: 40, y: 0 }]
+  const P = { ...DEFAULT_SATIN(), width: 6, density: 0.4, pullComp: 0, underlay: [] }
+  const puff = { ...DEFAULT_PUFF(), enabled: true, thickness: 3 }
+
+  ok(puffCheck(P, puff).warnings.length === 0, 'a 6 mm column over 3 mm foam passes clean',
+    puffCheck(P, puff).warnings[0] ?? '')
+  // Too narrow: the thread flattens the foam instead of standing on it.
+  ok(puffCheck({ ...P, width: 2 }, puff).warnings.some((w) => /narrow/.test(w)),
+    `under ${PUFF_MIN_MM} mm is flagged as too narrow`)
+  // Too wide: the foam collapses in the middle.
+  ok(puffCheck({ ...P, width: 14 }, puff).warnings.some((w) => /wide/.test(w)),
+    `over ${PUFF_MAX_MM} mm is flagged as too wide`)
+  // A column barely wider than the foam is tall has nowhere to lie down.
+  ok(puffCheck({ ...P, width: 4 }, { ...puff, thickness: 3 }).warnings.some((w) => /steep/.test(w)),
+    'a column too narrow for the foam THICKNESS is flagged separately')
+  ok(puffCheck(P, { ...puff, capEnds: false }).warnings.some((w) => /tear cleanly/.test(w)),
+    'turning capping off is called out — this is how puff jobs get ruined')
+  ok(puffCheck(P, puff).errors.length === 0,
+    'puff problems are warnings, not refusals: a bad puff column still sews')
+
+  // --- end caps
+  {
+    const caps = puffCaps(line, P)
+    ok(caps.length > 8, 'caps are generated at the ends', `${caps.length}`)
+    // They must sit AT the ends, across the column.
+    const atStart = caps.filter((c) => Math.abs(c.x) < 0.5)
+    const atEnd = caps.filter((c) => Math.abs(c.x - 40) < 0.5)
+    ok(atStart.length > 2 && atEnd.length > 2, 'one at each end',
+      `${atStart.length} / ${atEnd.length}`)
+    // And span the column's width, so the perforation crosses the whole thing.
+    const span = Math.max(...atStart.map((c) => c.y)) - Math.min(...atStart.map((c) => c.y))
+    ok(Math.abs(span - 6) < 0.1, 'the perforation spans the full column width',
+      `${span.toFixed(2)} of 6`)
+    // Tighter than the column itself — it is a perforation, not coverage.
+    const ys = atStart.map((c) => c.y).sort((a, b) => a - b)
+    let maxGap = 0
+    for (let i = 1; i < ys.length; i++) maxGap = Math.max(maxGap, ys[i] - ys[i - 1])
+    ok(maxGap <= P.density / 2 + 1e-6, 'and is punched tighter than the satin pitch',
+      `${maxGap.toFixed(3)} mm`)
+  }
+
+  // A closed ring has no ends, so nothing to cap.
+  ok(puffCaps([...circle(0, 0, 15, 64), { x: 15, y: 0 }], P).length === 0,
+    'a closed column has no ends to cap')
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n# density diagnostics')
+{
+  const plan = (pts: Pt[]) => ({ blocks: [{ color: '#c0392b', label: 'a', stitches: pts }] })
+
+  // An empty design has nothing to report.
+  const none = analyseDensity({ blocks: [] })
+  ok(none.hotspots.length === 0 && none.penetrations === 0, 'an empty plan reports nothing')
+
+  // A normal fill: one penetration every 0.4 x 4 mm over a 20 mm square.
+  {
+    const pts: Pt[] = []
+    for (let y = 0; y < 20; y += 0.4) for (let x = 0; x < 20; x += 4) pts.push({ x, y })
+    const r = analyseDensity(plan(pts))
+    ok(Math.abs(r.worst - 1) < 0.35, 'a normal commercial fill sits near 1x nominal',
+      `${r.worst.toFixed(2)}x`)
+    ok(r.hotspots.length === 0, 'and raises no hotspots')
+  }
+
+  // Four objects stacked in one place — the overlap case a per-object check
+  // cannot see.
+  {
+    const pts: Pt[] = []
+    for (let k = 0; k < 4; k++) {
+      for (let y = 0; y < 6; y += 0.4) for (let x = 0; x < 6; x += 4) pts.push({ x, y })
+    }
+    const r = analyseDensity(plan(pts))
+    ok(r.worst > WARN_RATIO, 'four stacked fills read as over-dense', `${r.worst.toFixed(2)}x`)
+    ok(r.hotspots.length > 0, 'and produce hotspots', `${r.hotspots.length}`)
+    ok(r.warnings.length > 0 && /density/.test(r.warnings[0]), 'with an actionable message',
+      r.warnings[0])
+    ok(r.hotspots[0].ratio >= r.hotspots[r.hotspots.length - 1].ratio, 'worst first')
+  }
+
+  // Jumps pierce nothing and must not count.
+  {
+    const pts: Pt[] = []
+    for (let i = 0; i < 400; i++) pts.push({ x: 1, y: 1, jump: true })
+    const r = analyseDensity(plan(pts))
+    ok(r.penetrations === 0, 'jumps are not penetrations', `${r.penetrations}`)
+    ok(r.hotspots.length === 0, 'so a pile of jumps is not a hotspot')
+  }
+
+  // Density is counted ACROSS colours: the fabric does not care which needle.
+  {
+    const dense: Pt[] = []
+    for (let i = 0; i < 60; i++) dense.push({ x: 1 + (i % 4) * 0.1, y: 1 + (i % 5) * 0.1 })
+    const two = analyseDensity({ blocks: [
+      { color: '#a', label: 'a', stitches: dense },
+      { color: '#b', label: 'b', stitches: dense },
+    ] })
+    const one = analyseDensity(plan(dense))
+    ok(two.worst > one.worst, 'two colours overlapping read denser than one',
+      `${one.worst.toFixed(1)} -> ${two.worst.toFixed(1)}`)
+  }
+
+  ok(densityColour(1) === null, 'a normal cell gets no overlay')
+  ok(densityColour(WARN_RATIO + 0.1) !== null, 'a warm cell does')
+  ok(densityColour(SEVERE_RATIO + 1) !== densityColour(WARN_RATIO + 0.1),
+    'and a severe cell is coloured differently from a warm one')
+  ok(NOMINAL_PER_MM2 > 0, 'nominal density is a real number')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
