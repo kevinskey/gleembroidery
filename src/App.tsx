@@ -1,5 +1,7 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { Menu, MenuItem, MenuLabel, MenuSep, closeAllMenus } from './Menu'
+import { colourName, reorder, runBlocks, threadChanges } from './runview'
+import { classifyProblems, nextStep, summarise, type Problem } from './problems'
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM } from './satin'
@@ -268,13 +270,20 @@ function Num({ label, value, step = 0.1, min, max, onChange }: {
   )
 }
 
-function Text({ label, value, placeholder, onChange }: {
-  label: string; value: string; placeholder?: string; onChange: (v: string) => void
+function Text({ label, value, placeholder, onChange, tag }: {
+  label: string
+  value: string
+  placeholder?: string
+  onChange: (v: string) => void
+  /** A handle for something elsewhere to focus this field. */
+  tag?: string
 }) {
   return (
     <div className="row">
       <label>{label}</label>
-      <input type="text" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+      <input
+        type="text" value={value} placeholder={placeholder} data-thread={tag}
+        onChange={(e) => onChange(e.target.value)} />
     </div>
   )
 }
@@ -529,6 +538,20 @@ export default function App() {
   const pb = useMemo(() => planBounds(plan), [plan])
   const total = counts.stitches + counts.jumps
   const stats = useMemo(() => packageStats(doc, plan, warnings, machine), [doc, plan, warnings, machine])
+  /**
+   * Everything wrong with the design, sorted and with its fixes attached.
+   *
+   * The density report is folded in here rather than kept beside it: an
+   * over-dense patch is a problem with the design in exactly the way a
+   * refused satin column is, and keeping two lists meant two places to look.
+   */
+  const problems = useMemo(
+    () => classifyProblems([...stats.warnings, ...density.warnings], doc.objects),
+    [stats.warnings, density.warnings, doc.objects])
+  const summary = useMemo(() => summarise(problems), [problems])
+  /** The single most serious thing with something to do about it. */
+  const next = useMemo(() => nextStep(problems), [problems])
+  const [showProblems, setShowProblems] = useState(false)
 
   const selected = doc.objects.find((o) => o.id === selectedId) ?? null
   const selectedObjs = useMemo(
@@ -812,6 +835,114 @@ export default function App() {
   /** Objects a click may land on: locked and hidden groups are not among them. */
   const pickable = useMemo(
     () => doc.objects.filter((o) => !unreachable(o)), [doc.objects, unreachable])
+
+  // --- the run view ---------------------------------------------------------
+  //
+  // Blocks are DERIVED from the document on every render, never stored: the
+  // document is still an ordered list of objects, and this is a reading of
+  // it. Move an object and the blocks re-form.
+
+  const blocks = useMemo(() => runBlocks(doc, plan), [doc, plan])
+  /** The group the selection is in, when it is all in one. */
+  const selGroup = useMemo(() => {
+    const ids = new Set(selectedObjs.map((o) => o.group).filter(Boolean))
+    return ids.size === 1 ? doc.groups.find((g) => g.id === [...ids][0]) ?? null : null
+  }, [selectedObjs, doc.groups])
+  const threads = useMemo(() => threadChanges(blocks), [blocks])
+  /**
+   * A block's identity for folding.
+   *
+   * Keyed on the FIRST object in it, because that is the thing that survives
+   * a re-derive: the block's number changes when something above it is
+   * hidden, and its index changes when anything is reordered.
+   */
+  const blockKey = (b: { objects: { object: EmbObject }[] }) => b.objects[0].object.id
+  const [foldedBlocks, setFoldedBlocks] = useState<string[]>([])
+
+  // Drag-to-reorder. Two buttons per row that each moved an object one place
+  // meant twenty-five presses to bring the bottom object to the top.
+  // Drag a row to change when it sews.
+  //
+  // Pointer events, not HTML5 drag-and-drop. HTML5 DnD does not fire for
+  // synthetic events so none of it could be exercised in a test, it has no
+  // touch story, and inside a scrolling panel its drop targets are famously
+  // unreliable. Pointer capture has none of those problems.
+  //
+  // Named distinctly from the canvas's own `dragging` ref, which is a shape
+  // being drawn out — a different gesture entirely.
+  const [rowDrag, setRowDrag] = useState<number | null>(null)
+  const [dragOver, setDragOver] = useState<number | null>(null)
+
+  /**
+   * Which gap the pointer is over, as an index into the object list.
+   *
+   * The gap ABOVE a row, or the end of the list when the pointer is past the
+   * last one. Read from the DOM rather than from stored geometry because the
+   * panel scrolls and folds while a drag is in flight.
+   */
+  const gapUnder = useCallback((clientY: number): number | null => {
+    const rows = [...document.querySelectorAll<HTMLElement>('.side [data-row]')]
+    if (!rows.length) return null
+    for (const row of rows) {
+      const b = row.getBoundingClientRect()
+      if (clientY < b.top + b.height / 2) return Number(row.dataset.row)
+    }
+    return doc.objects.length
+  }, [doc.objects.length])
+
+  useEffect(() => {
+    if (rowDrag === null) return
+    const onMove = (e: PointerEvent) => setDragOver(gapUnder(e.clientY))
+    const onUp = (e: PointerEvent) => {
+      const to = gapUnder(e.clientY)
+      setRowDrag(null)
+      setDragOver(null)
+      if (to !== null) setDoc((d) => ({ ...d, objects: reorder(d.objects, rowDrag, to) }))
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setRowDrag(null); setDragOver(null) }
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [rowDrag, gapUnder])
+
+  /** Select an object and put the cursor in its thread fields. */
+  const focusThread = (id: string) => {
+    setSelectedId(id)
+    // After the panel has re-rendered for the new selection.
+    setTimeout(() => {
+      const el = document.querySelector<HTMLInputElement>('.side.right input[data-thread="brand"]')
+      el?.focus()
+      el?.scrollIntoView({ block: 'center' })
+    }, 0)
+  }
+
+  /** Select the object a problem is about, and bring it into view. */
+  const showProblemObject = (p: Problem) => {
+    if (!p.objectId) return
+    setSelectedIds([p.objectId])
+    const o = doc.objects.find((q) => q.id === p.objectId)
+    const b = o && objectBox(o)
+    const wrap = wrapRef.current
+    if (b && wrap) {
+      // Centre it and zoom so it fills about half the canvas — enough to see
+      // what is wrong with it, not so much that it loses its context.
+      const w = Math.max(1, b.maxX - b.minX), h = Math.max(1, b.maxY - b.minY)
+      const scale = Math.min(wrap.clientWidth / (w * 2), wrap.clientHeight / (h * 2))
+      setView({
+        scale: Math.max(0.2, Math.min(60, scale)),
+        cx: (b.minX + b.maxX) / 2,
+        cy: (b.minY + b.maxY) / 2,
+      })
+    }
+    setShowProblems(false)
+  }
 
   const applyPreset = (p: StylePreset) => {
     if (!selectedObjs.length) { setNote('select an object first'); return }
@@ -2193,16 +2324,6 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [tool, finishPolygon, finishPen, finishColumn, cancelDraw, history, selected, activeNode, shapesOf, setShapes, picked, editStitches])
 
-  const moveObject = (index: number, delta: number) =>
-    setDoc((d) => {
-      const objs = [...d.objects]
-      const j = index + delta
-      if (j < 0 || j >= objs.length) return d
-      const tmp = objs[index]
-      objs[index] = objs[j]
-      objs[j] = tmp
-      return { ...d, objects: objs }
-    })
 
   // --- render -------------------------------------------------------------
   return (
@@ -2326,6 +2447,33 @@ export default function App() {
             <MenuItem disabled={!selectedObjs.some((o) => o.group)} onClick={ungroupSelection}>
               Ungroup
             </MenuItem>
+            {/* A group's own switches live here rather than as three more
+                buttons on every row of the sequence — that panel is a
+                reading of the RUN, and a group is not something the machine
+                knows about. */}
+            {selGroup && (
+              <>
+                <div className="row wide keep-open">
+                  <label>Group name</label>
+                  <input type="text" value={selGroup.name}
+                    onChange={(e) => patchGroup(selGroup.id, (x) => ({ ...x, name: e.target.value }))} />
+                </div>
+                <MenuItem onClick={() => patchGroup(selGroup.id, (x) => ({ ...x, hidden: !x.hidden }))}
+                  active={!!selGroup.hidden}
+                  hint="Hides every member without forgetting which were hidden on their own">
+                  {selGroup.hidden ? 'Show the group' : 'Hide the group'}
+                </MenuItem>
+                <MenuItem onClick={() => patchGroup(selGroup.id, (x) => ({ ...x, locked: !x.locked }))}
+                  active={!!selGroup.locked}
+                  hint="Locked members cannot be picked on the canvas">
+                  {selGroup.locked ? 'Unlock the group' : 'Lock the group'}
+                </MenuItem>
+                <MenuItem onClick={() => setSelectedIds(
+                  doc.objects.filter((o) => o.group === selGroup.id).map((o) => o.id))}>
+                  Select the whole group
+                </MenuItem>
+              </>
+            )}
           </Menu>
 
           {/* Letterforms somebody digitized, reused. A system font is a set
@@ -2505,105 +2653,131 @@ export default function App() {
       </div>
 
       <div className="body">
-        <div className="side">
-          <h3>Sewing sequence</h3>
-          {/* Group headers sit where their FIRST member sits in the sequence,
-              not at the top: the list is the running order, and a header
-              that floated above it would say a group sews before things that
-              actually sew first. */}
+        <div className={`side${rowDrag !== null ? ' dragging' : ''}`}>
+          {/* THE RUN, not the document.
+              A machine does not see objects, it sees colour blocks: a run of
+              stitching on one needle, then a stop, then the next. Objects
+              sharing a thread AND adjacent in the sequence are one block and
+              cost one threading; the same objects separated by something
+              else are two. That relationship is invisible in a flat list and
+              obvious here, and it is what turns "26 objects" into "you will
+              re-thread 26 times on a 12-needle machine". */}
+          <div className="side-head">
+            <h3>Sewing sequence</h3>
+            {!!blocks.length && (
+              <span className={`runcount${threads > machine.needles ? ' over' : ''}`}
+                title={threads > machine.needles
+                  ? `${threads} threadings on a ${machine.needles}-needle machine — the operator re-threads mid-run`
+                  : `${threads} threading${threads === 1 ? '' : 's'}`}>
+                {threads} thread{threads === 1 ? '' : 's'}
+              </span>
+            )}
+          </div>
           {!doc.objects.length && (
             <div className="empty">
-              {/* This used to read "Import an SVG to begin", which was true
-                  when importing was the only way in — and was the reason the
-                  drawing tools looked like they did not exist. */}
               Draw with the tools above, import an SVG, or load a reference image and trace
               it with the Wand. Each closed shape becomes an object you can assign a stitch
               type to.
             </div>
           )}
-          {doc.objects.map((o, i) => (
-            <Fragment key={o.id}>
-            {(() => {
-              const g = o.group ? doc.groups.find((q) => q.id === o.group) : null
-              const firstOfGroup = !!g
-                && doc.objects.findIndex((q) => q.group === g.id) === i
-              if (!g || !firstOfGroup) return null
-              const members = doc.objects.filter((q) => q.group === g.id)
-              return (
-                <div className="grp">
-                  <button className="eye" title={g.collapsed ? 'Show members' : 'Fold members away'}
-                    onClick={() => patchGroup(g.id, (x) => ({ ...x, collapsed: !x.collapsed }))}>
-                    {g.collapsed ? '▸' : '▾'}
-                  </button>
-                  <input
-                    className="gname" value={g.name}
-                    onChange={(e) => patchGroup(g.id, (x) => ({ ...x, name: e.target.value }))} />
-                  <span className="dim">{members.length}</span>
-                  <button className="eye" title={g.hidden ? 'Show the group' : 'Hide the group'}
-                    onClick={() => patchGroup(g.id, (x) => ({ ...x, hidden: !x.hidden }))}>
-                    {g.hidden ? '◯' : '●'}
-                  </button>
-                  <button className="eye" title={g.locked ? 'Unlock' : 'Lock — members cannot be picked on the canvas'}
-                    onClick={() => patchGroup(g.id, (x) => ({ ...x, locked: !x.locked }))}>
-                    {g.locked ? '🔒' : '🔓'}
-                  </button>
-                  <button className="eye" title="Select the whole group"
-                    onClick={() => setSelectedIds(members.map((q) => q.id))}>⤢</button>
+
+          {blocks.map((b) => {
+            const first = b.objects[0]
+            const g = first.object.group
+              ? doc.groups.find((q) => q.id === first.object.group) : null
+            const folded = foldedBlocks.includes(blockKey(b))
+            return (
+              <div key={blockKey(b)} className={`blk${b.number === 0 ? ' off' : ''}`}>
+                <div
+                  className="blk-head"
+                  onClick={() => setSelectedIds(b.objects.map((q) => q.object.id))}
+                >
+                  <button className="eye" title={folded ? 'Show the objects' : 'Fold the objects away'}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const k = blockKey(b)
+                      setFoldedBlocks((f) => (f.includes(k) ? f.filter((x) => x !== k) : [...f, k]))
+                    }}>{folded ? '▸' : '▾'}</button>
+                  <span className="blk-no" title={b.number ? 'Needle order' : 'Not sewn'}>
+                    {b.number || '–'}
+                  </span>
+                  <span className="sw" style={{ background: b.color }} />
+                  <span className="blk-name">
+                    {b.thread
+                      ? [b.thread.brand, b.thread.code].filter(Boolean).join(' ') || b.thread.name
+                      : colourName(b.color)}
+                  </span>
+                  {!b.thread && b.number > 0 && (
+                    <button className="blk-thread" title="No thread chosen — the run sheet will say UNASSIGNED"
+                      onClick={(e) => { e.stopPropagation(); focusThread(b.objects[0].object.id) }}>
+                      thread?
+                    </button>
+                  )}
+                  {b.isStop && <span className="blk-stop" title="The machine stops here for the operator">stop</span>}
+                  {b.stitches !== null && (
+                    <span className="blk-st">{b.stitches.toLocaleString()}</span>
+                  )}
                 </div>
-              )
-            })()}
-            {(() => {
-              const g = o.group ? doc.groups.find((q) => q.id === o.group) : null
-              return g?.collapsed ? null : (
-            <div
-              className={`obj${selectedIds.includes(o.id) ? ' sel' : ''}${o.group ? ' ingrp' : ''}`}
-              // The sequence list is where a multi-selection is easiest to
-              // build — the objects are named and in order, and several of
-              // them are often stacked on top of each other on the canvas.
-              // Shift extends a RANGE, Cmd/Ctrl toggles one, which is what
-              // every list in every program does.
-              onClick={(e) => {
-                if (e.shiftKey) {
-                  const anchor = doc.objects.findIndex((q) => q.id === selectedId)
-                  const from = anchor < 0 ? i : anchor
-                  const [lo, hi] = from < i ? [from, i] : [i, from]
-                  setSelectedIds(doc.objects.slice(lo, hi + 1).map((q) => q.id))
-                } else if (e.metaKey || e.ctrlKey) {
-                  setSelectedIds(selectedIds.includes(o.id)
-                    ? selectedIds.filter((x) => x !== o.id)
-                    : [...selectedIds, o.id])
-                } else {
-                  setSelectedId(o.id)
-                }
-              }}
-            >
-              <span className="seq">{i + 1}</span>
-              <span className="sw" style={{ background: o.color }} />
-              <span className="nm">{o.name}</span>
-              <span className="ty">{o.type}</span>
-              <button className="eye" title="Sew earlier" disabled={i === 0}
-                onClick={(e) => { e.stopPropagation(); moveObject(i, -1) }}>↑</button>
-              <button className="eye" title="Sew later" disabled={i === doc.objects.length - 1}
-                onClick={(e) => { e.stopPropagation(); moveObject(i, 1) }}>↓</button>
-              <button className="eye" title={o.visible ? 'Hide' : 'Show'}
-                onClick={(e) => { e.stopPropagation(); patch(o.id, (x) => ({ ...x, visible: !x.visible })) }}>
-                {o.visible ? '●' : '○'}
-              </button>
-            </div>
-              )
-            })()}
-            </Fragment>
-          ))}
+                {!folded && b.objects.map(({ object: o, index: i }) => (
+                  <div
+                    key={o.id}
+                    data-row={i}
+                    className={`obj${selectedIds.includes(o.id) ? ' sel' : ''}`
+                      + `${dragOver === i ? ' drop' : ''}${rowDrag === i ? ' dragging' : ''}`}
+                    onClick={(e) => {
+                      if (e.shiftKey) {
+                        const anchor = doc.objects.findIndex((q) => q.id === selectedId)
+                        const from = anchor < 0 ? i : anchor
+                        const [lo, hi] = from < i ? [from, i] : [i, from]
+                        setSelectedIds(doc.objects.slice(lo, hi + 1).map((q) => q.id))
+                      } else if (e.metaKey || e.ctrlKey) {
+                        setSelectedIds(selectedIds.includes(o.id)
+                          ? selectedIds.filter((x) => x !== o.id)
+                          : [...selectedIds, o.id])
+                      } else {
+                        setSelectedId(o.id)
+                      }
+                    }}
+                  >
+                    {/* Drag to reorder. Two buttons per row that each move an
+                        object one place was twenty-five presses to get the
+                        bottom object to the top. */}
+                    <span className="grip" title="Drag to change when this sews"
+                      onPointerDown={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        setRowDrag(i)
+                        setDragOver(i)
+                      }}>⠿</span>
+                    <span className="sw small" style={{ background: o.color }} />
+                    <span className="nm" title={o.name}>{o.name}</span>
+                    {g && <span className="ty" title={`In the group “${g.name}”`}>{g.name}</span>}
+                    <span className="ty">{o.type}</span>
+                    <button className="eye" title={o.visible ? 'Hide' : 'Show'}
+                      onClick={(e) => { e.stopPropagation(); patch(o.id, (x) => ({ ...x, visible: !x.visible })) }}>
+                      {o.visible ? '●' : '○'}
+                    </button>
+
+                  </div>
+                ))}
+              </div>
+            )
+          })}
           {doc.objects.length > 0 && (
-            <div style={{ marginTop: 10, display: 'flex', gap: 6 }}>
-              <button onClick={() => { setDoc((d) => ({ ...d, objects: [] })); setSelectedId(null) }}>Clear all</button>
-              {selected && (
-                <button onClick={() => {
-                  setDoc((d) => ({ ...d, objects: d.objects.filter((o) => o.id !== selected.id) }))
-                  setSelectedId(null)
-                }}>Delete</button>
-              )}
-            </div>
+            <>
+              <div className={`endpad${dragOver === doc.objects.length ? ' drop' : ''}`}>
+                {rowDrag !== null ? 'drop here to sew last' : ''}
+              </div>
+              <div style={{ marginTop: 10, display: 'flex', gap: 6 }}>
+                <button onClick={() => { setDoc((d) => ({ ...d, objects: [] })); setSelectedId(null) }}>Clear all</button>
+                {selected && (
+                  <button onClick={() => {
+                    setDoc((d) => ({ ...d, objects: d.objects.filter((o) => !selectedIds.includes(o.id)) }))
+                    setSelectedId(null)
+                  }}>Delete</button>
+                )}
+              </div>
+            </>
           )}
         </div>
 
@@ -2768,7 +2942,7 @@ export default function App() {
 
               <fieldset>
                 <legend>Thread</legend>
-                <Text label="Brand" placeholder="Isacord" value={selected.thread.brand ?? ''}
+                <Text label="Brand" placeholder="Isacord" tag="brand" value={selected.thread.brand ?? ''}
                   onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, brand: v || undefined } }), 'thread.brand')} />
                 <Text label="Code" placeholder="spool no." value={selected.thread.code ?? ''}
                   onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, code: v || undefined } }), 'thread.code')} />
@@ -3273,6 +3447,59 @@ export default function App() {
         </div>
       </div>
 
+      {/* The problems panel. Opens over the canvas rather than pushing it:
+          you are reading it to decide what to do to the design, so the
+          design has to stay visible. */}
+      {showProblems && (
+        <div className="probs-panel">
+          <div className="probs-head">
+            <b>{summary.actionable} to deal with</b>
+            {summary.errors > 0 && (
+              <span className="warn">{summary.errors} not stitching at all</span>
+            )}
+            <button className="link" onClick={() => setShowProblems(false)}>close</button>
+          </div>
+          {problems.filter((p) => p.severity !== 'note').map((p) => (
+            <div key={p.id} className={`prob ${p.severity}`}>
+              <span className="prob-mark">{p.severity === 'error' ? '✕' : '⚠'}</span>
+              <div className="prob-body">
+                {p.objectName && (
+                  <button className="prob-obj" title="Show it on the canvas"
+                    onClick={() => showProblemObject(p)}>{p.objectName}</button>
+                )}
+                <span className="prob-text">{p.text}</span>
+                {!!p.fixes.length && (
+                  <div className="prob-fixes">
+                    {p.fixes.includes('select') && (
+                      <button onClick={() => showProblemObject(p)}>Show it</button>
+                    )}
+                    {p.fixes.includes('showDensity') && (
+                      <button onClick={() => { setShowDensity(true); setShowProblems(false) }}>
+                        Shade the dense areas
+                      </button>
+                    )}
+                    {p.fixes.includes('overlap') && (
+                      <button className="primary"
+                        title="Knock each object back so nothing is sewn twice where they overlap"
+                        onClick={() => { runRemoveOverlap(); setShowProblems(false) }}>
+                        Remove the overlaps
+                      </button>
+                    )}
+                    {p.fixes.includes('thread') && (
+                      <button onClick={() => {
+                        const b = blocks.find((q) => q.number > 0 && !q.thread)
+                        if (b) focusThread(b.objects[0].object.id)
+                        setShowProblems(false)
+                      }}>Set the threads</button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="status">
         {busy && <span className="busy">generating…</span>}
         <span><b>{counts.stitches.toLocaleString()}</b> stitches</span>
@@ -3322,27 +3549,26 @@ export default function App() {
             }}>keep my edits</button>
           </span>
         )}
-        {stats.warnings.map((w, i) => <span key={i} className="warn">⚠ {w}</span>)}
-        {/* Density is a diagnostic, not a refusal: it tells the operator
-            where the trouble is, offers to show them, and — because the
-            commonest cause by far is two objects covering the same ground —
-            offers the repair. A diagnostic that names a problem with no way
-            to act on it is half a tool. */}
-        {density.warnings.map((w) => (
-          <span key={w} className="warn">
-            ⚠ {w}{' '}
-            <button className="link" onClick={() => setShowDensity(true)}>show</button>
-            {doc.objects.length > 1 && (
-              <>
-                {' · '}
-                <button
-                  className="link"
-                  title="Knock each object back so nothing is sewn twice where they overlap"
-                  onClick={runRemoveOverlap}>fix the overlaps</button>
-              </>
-            )}
-          </span>
-        ))}
+        {/* ONE line, not a wall.
+            Six sentences stacked at the bottom of the window is not a list
+            of problems, it is a wall, and a wall is what people stop
+            reading. The same messages live in a panel, worst first, each
+            carrying what to do about it. */}
+        {!!summary.actionable && (
+          <button
+            className={`probs${summary.errors ? ' bad' : ''}${showProblems ? ' on' : ''}`}
+            title={next
+              ? `Worst first: ${next.objectName ? `${next.objectName} — ` : ''}${next.text}`
+              : 'What is wrong with this design, and what to do about it'}
+            onClick={() => setShowProblems((v) => !v)}
+          >
+            ⚠ {summary.actionable} {summary.actionable === 1 ? 'issue' : 'issues'}
+            {summary.errors > 0 && <b> · {summary.errors} not stitching</b>}
+            <span className="caret">{showProblems ? '▾' : '▸'}</span>
+          </button>
+        )}
+        {!summary.actionable && total > 0 && <span className="ok">✓ no problems found</span>}
+
         <span className="sim">
           <label>Stitch-out</label>
           <input

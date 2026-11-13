@@ -45,6 +45,10 @@ body {
      and took the status bar with it. */
   grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100%;
+  /* The problems panel is positioned against this, so it can sit over the
+     canvas instead of pushing it: you read it to decide what to do to the
+     design, so the design has to stay visible while you do. */
+  position: relative;
 }
 
 /* --- toolbar ------------------------------------------------------------ */
@@ -242,7 +246,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 /* --- body --------------------------------------------------------------- */
 .body {
   display: grid;
-  grid-template-columns: 240px 1fr 260px;
+  grid-template-columns: 262px 1fr 260px;
   /* minmax(0, 1fr), not 1fr. A grid track refuses to shrink below its
      content's minimum by default, so with two dozen objects in the sewing
      sequence the row grew to the list's full height, the sidebar overflowed
@@ -280,6 +284,137 @@ canvas.grabbable { cursor: grab; }
 canvas.arrow { cursor: default; }
 canvas.grabbable:active { cursor: grabbing; }
 
+/* --- problems ----------------------------------------------------------- */
+/* One line in the status bar; the detail in a panel over the canvas. Six
+   sentences stacked at the bottom is not a list, it is a wall. */
+.status .probs {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--warn); border-color: var(--warn);
+  background: none;
+  font-size: 12px;
+}
+.status .probs.bad { background: var(--warn); border-color: var(--warn); color: #231a05; font-weight: 600; }
+.status .probs.on { outline: 2px solid var(--warn); outline-offset: -2px; }
+.status .probs .caret { font-size: 9px; opacity: 0.8; }
+.status .ok { color: var(--muted); }
+
+.probs-panel {
+  position: absolute;
+  left: 272px; right: 270px; bottom: 54px;
+  z-index: 70;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+.probs-head {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 2px 4px 8px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.probs-head b { flex: none; }
+.probs-head .warn { flex: 1; font-size: 11px; }
+
+.prob {
+  display: flex; gap: 8px;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.prob:last-child { border-bottom: 0; }
+.prob-mark { flex: none; color: var(--warn); }
+.prob.error .prob-mark { color: #ef4444; }
+.prob-body { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.prob-obj {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 999px; padding: 0 7px;
+  font-size: 11px; font-weight: 600;
+}
+.prob-text { flex: 1; min-width: 220px; line-height: 1.4; }
+.prob-fixes { display: flex; gap: 6px; flex-wrap: wrap; flex-basis: 100%; padding-top: 2px; }
+.prob-fixes button { font-size: 11px; padding: 3px 8px; }
+
+/* --- the run view ------------------------------------------------------- */
+.side-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.side-head h3 { margin: 0; flex: 1; }
+.runcount {
+  font-size: 11px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
+  white-space: nowrap;
+}
+/* More threadings than needles means the operator stops mid-run to
+   re-thread. That is a fact about the afternoon, so it is coloured. */
+.runcount.over { color: var(--warn); border-color: var(--warn); }
+
+.blk { margin-bottom: 6px; }
+.blk.off { opacity: 0.5; }
+.blk-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.blk-head:hover { background: var(--panel-2); }
+/* The needle number: this is the operator's running order, and it is the
+   first thing they look for. */
+.blk-no {
+  display: grid; place-items: center;
+  width: 19px; height: 19px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  font-size: 11px; font-weight: 700;
+  flex: none;
+}
+.blk-name { flex: 1 1 auto; min-width: 2.2em; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blk-st { font-size: 11px; flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.blk-thread {
+  font-size: 10px; padding: 1px 5px; border-radius: 999px;
+  color: var(--warn); border-color: var(--warn); background: none;
+  flex: none;
+}
+.blk-stop {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--accent); border: 1px solid var(--accent);
+  border-radius: 999px; padding: 0 5px;
+}
+
+/* Drag to reorder. Two buttons per row that each moved an object one place
+   meant twenty-five presses to bring the bottom object to the top. */
+.grip {
+  cursor: grab; color: var(--muted); font-size: 11px;
+  padding: 0 1px; flex: none; user-select: none;
+}
+.grip:active { cursor: grabbing; }
+/* A drag must not also select text in the rows it passes over. */
+.side.dragging, .side.dragging * { user-select: none; }
+.obj { position: relative; }
+/* The insertion point, drawn as a line in the gap the row would land in. */
+.obj.drop::before {
+  content: '';
+  position: absolute; left: 6px; right: 6px; top: -2px;
+  height: 2px; background: var(--accent); border-radius: 2px;
+}
+.obj.dragging { opacity: 0.4; }
+.endpad {
+  height: 22px; border-radius: 6px;
+  display: grid; place-items: center;
+  font-size: 11px; color: var(--muted);
+}
+.endpad { position: relative; }
+.endpad.drop::before {
+  content: '';
+  position: absolute; left: 6px; right: 6px; top: 0;
+  height: 2px; background: var(--accent); border-radius: 2px;
+}
+.endpad.drop { color: var(--accent); }
+
 /* --- object list -------------------------------------------------------- */
 .obj {
   display: flex;
@@ -291,22 +426,20 @@ canvas.grabbable:active { cursor: grabbing; }
   border: 1px solid transparent;
 }
 .obj:hover { background: var(--panel-2); }
-/* Group header: a row ABOUT the objects rather than one of them, so it reads
-   differently — tighter, dimmer, and with the members stepped in under it. */
-.grp {
-  display: flex; align-items: center; gap: 4px;
-  padding: 3px 6px; margin: 4px 0 2px;
-  border-left: 2px solid var(--accent);
-  font-size: 11px; color: var(--muted);
+/* Objects sit UNDER the block that sews them, stepped in and lighter: the
+   block is the thing the operator works in, the objects are what it is
+   made of. */
+.obj {
+  margin-left: 19px;
+  padding: 3px 6px;
+  font-size: 12px;
+  gap: 6px;
 }
-.grp .gname {
-  flex: 1; min-width: 0; background: transparent; border: 0;
-  color: var(--ink); font-size: 11px; font-weight: 600; padding: 1px 2px;
-}
-.grp .gname:focus { background: var(--panel-2); outline: 1px solid var(--line); }
-.obj.ingrp { margin-left: 12px; }
+.obj .nm { font-weight: 400; }
 .obj.sel { background: var(--panel-2); border-color: var(--accent); }
-.obj .sw {
+.obj .sw.small { width: 9px; height: 9px; }
+.sw.small { width: 9px; height: 9px; border-radius: 2px; }
+.sw {
   width: 15px; height: 15px;
   border-radius: 3px;
   border: 1px solid rgba(0, 0, 0, 0.3);

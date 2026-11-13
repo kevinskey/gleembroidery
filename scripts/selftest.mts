@@ -27,6 +27,10 @@ import {
 import {
   normaliseGlyph, parseAlphabets, serializeAlphabets, setAlphabetText, type Alphabet,
 } from '../src/alphabets'
+import {
+  colourName, needleKey, reorder, runBlocks, threadChanges, unassignedBlocks,
+} from '../src/runview'
+import { classifyProblems, nextStep, summarise } from '../src/problems'
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines, textOnPath } from '../src/text'
@@ -3925,6 +3929,184 @@ console.log('\n# native embroidery alphabets')
     ok(normaliseGlyph([], 10) === null, 'nothing cannot become a glyph')
     ok(normaliseGlyph([[{ x: 0, y: 0 }, { x: 10, y: 0 }]], 10) === null,
       'and neither can a horizontal line — it has no height to normalise by')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# the run view')
+{
+  const box = (x: number) => [...rect(x, 0, 10, 10), { x, y: 0 }]
+  const build = () => {
+    const d = emptyDoc()
+    d.objects = [
+      newObject({ id: 'a', name: 'A', color: '#ff0000', type: 'fill', paths: [box(0)] }),
+      newObject({ id: 'b', name: 'B', color: '#ff0000', type: 'fill', paths: [box(20)] }),
+      newObject({ id: 'c', name: 'C', color: '#0000ff', type: 'fill', paths: [box(40)] }),
+      newObject({ id: 'd', name: 'D', color: '#ff0000', type: 'fill', paths: [box(60)] }),
+    ]
+    return d
+  }
+
+  // --- adjacent objects on one thread are ONE block; separated ones are two
+  {
+    const blocks = runBlocks(build())
+    ok(blocks.length === 3, 'four objects become three blocks', `${blocks.length}`)
+    ok(blocks[0].objects.length === 2, 'the two adjacent reds merge',
+      `${blocks[0].objects.length}`)
+    ok(blocks[2].objects[0].object.name === 'D',
+      'and the red AFTER the blue is its own block — a second threading')
+    ok(threadChanges(blocks) === 3, 'so the operator threads three times',
+      `${threadChanges(blocks)}`)
+  }
+
+  // --- the panel must key on the same thing the ENGINE keys on
+  {
+    const d = build()
+    // Same screen colour, DIFFERENT thread codes: the machine does two
+    // blocks, so the panel must show two.
+    d.objects[0].thread = { brand: 'Isacord', code: '1902' }
+    d.objects[1].thread = { brand: 'Isacord', code: '0015' }
+    const blocks = runBlocks(d)
+    ok(blocks.length === 4, 'two thread codes on one colour are two blocks',
+      `${blocks.length}`)
+    // And the engine agrees.
+    ok(digitize(d).plan.blocks.length === blocks.filter((b) => b.number > 0).length,
+      'which is what the engine produces too',
+      `${digitize(d).plan.blocks.length} vs ${blocks.filter((b) => b.number > 0).length}`)
+  }
+
+  // --- an appliqué is a sequence of STOPS and never merges
+  {
+    const d = build()
+    d.objects[1].type = 'applique'
+    const blocks = runBlocks(d)
+    ok(blocks.some((b) => b.isStop), 'an appliqué block is marked as a stop')
+    ok(blocks[0].objects.length === 1,
+      'and the object before it does not merge into it', `${blocks[0].objects.length}`)
+  }
+
+  // --- a hidden object takes no needle number
+  {
+    const d = build()
+    d.objects[2].visible = false
+    const blocks = runBlocks(d)
+    const numbered = blocks.filter((b) => b.number > 0).map((b) => b.number)
+    ok(numbered.join(',') === '1,2', 'numbers run 1,2 with nothing skipped',
+      numbered.join(','))
+    ok(blocks.find((b) => b.objects[0].object.id === 'c')?.number === 0,
+      'and the hidden one has no number')
+  }
+
+  // --- stitch counts come from the generated plan
+  {
+    const d = build()
+    const blocks = runBlocks(d, digitize(d).plan)
+    ok(blocks.every((b) => b.number === 0 || (b.stitches ?? 0) > 0),
+      'every sewing block has a stitch count',
+      blocks.map((b) => b.stitches).join(','))
+    const planTotal = digitize(d).plan.blocks
+      .flatMap((b) => b.stitches).filter((s) => !s.jump).length
+    const viewTotal = blocks.reduce((n, b) => n + (b.stitches ?? 0), 0)
+    ok(planTotal === viewTotal, 'and they add up to the whole plan',
+      `${viewTotal} of ${planTotal}`)
+  }
+
+  // --- unassigned threads are findable
+  {
+    const d = build()
+    d.objects[0].thread = { brand: 'Isacord', code: '1902' }
+    const blocks = runBlocks(d)
+    ok(unassignedBlocks(blocks).length === threadChanges(blocks) - 1,
+      'the blocks with no thread chosen are counted',
+      `${unassignedBlocks(blocks).length}`)
+  }
+
+  // --- reordering, including the case that goes wrong
+  {
+    const xs = ['a', 'b', 'c', 'd']
+    ok(reorder(xs, 0, 2).join('') === 'bacd', 'moving DOWN lands before the target',
+      reorder(xs, 0, 2).join(''))
+    ok(reorder(xs, 3, 1).join('') === 'adbc', 'and moving up does too',
+      reorder(xs, 3, 1).join(''))
+    ok(reorder(xs, 1, 1).join('') === 'abcd', 'a move to its own place changes nothing')
+    ok(reorder(xs, 0, 4).join('') === 'bcda', 'and a move to the end works',
+      reorder(xs, 0, 4).join(''))
+    ok(reorder(xs, 9, 0).join('') === 'abcd', 'an impossible move is refused quietly')
+  }
+
+  // --- colour names, which is what makes a row findable
+  {
+    ok(colourName('#ff0000') === 'Red', 'red is Red', colourName('#ff0000'))
+    ok(colourName('#1f6feb') === 'Blue', 'a mid blue is Blue', colourName('#1f6feb'))
+    ok(colourName('#000000') === 'Black' && colourName('#ffffff') === 'White',
+      'black and white are themselves')
+    ok(colourName('#22aa33') === 'Green', 'and a leaf green is Green', colourName('#22aa33'))
+    ok(colourName('nonsense') === 'Colour', 'an unreadable colour does not throw')
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n# problems')
+{
+  const objects = [{ id: 'o1', name: 'Traced 1' }, { id: 'o2', name: 'Traced 24' }]
+  const raw = [
+    'Traced 1: tight turn (radius 1.65 mm) at (-13.3, -26.2) — inner rail will crowd',
+    'Traced 24: edge underlay could not be computed — this area will sew with NO underlay',
+    '26 colour blocks on a 12-needle machine — the operator must re-thread mid-run.',
+    'Some blocks have no thread assigned — the run sheet will say UNASSIGNED.',
+    '140 areas over 2.8x normal density — expect thread breaks',
+  ]
+  const ps = classifyProblems(raw, objects)
+
+  // --- the object comes from matching a NAME, not from reading the prose
+  {
+    const tight = ps.find((p) => /tight turn/.test(p.text))!
+    ok(tight.objectId === 'o1', 'a message naming an object is attached to it')
+    ok(!/^Traced 1:/.test(tight.text), 'and the name is taken off the front', tight.text)
+    const needles = ps.find((p) => /12-needle/.test(p.text))!
+    ok(!needles.objectId, 'a design-level message belongs to no object')
+    // The guard that matters: a message whose prefix is NOT an object name
+    // must not be mistaken for one.
+    const odd = classifyProblems(['Hoop: too small'], objects)[0]
+    ok(!odd.objectId && odd.text === 'Hoop: too small',
+      'an unmatched prefix is left alone', odd.text)
+  }
+
+  // --- the worst thing is first
+  {
+    ok(ps[0].severity === 'error', 'errors sort first', ps[0].text)
+    ok(/could not be computed/.test(ps[0].text), 'and that is the one that is not stitching')
+    const sev = ps.map((p) => p.severity)
+    ok(sev.join(',') === [...sev].sort().join(','), 'the list is in severity order', sev.join(','))
+  }
+
+  // --- and each carries what to do about it
+  {
+    const dens = ps.find((p) => /density/.test(p.text))!
+    ok(dens.fixes.includes('overlap') && dens.fixes.includes('showDensity'),
+      'the density problem offers both the view and the repair', dens.fixes.join(','))
+    const thread = ps.find((p) => /UNASSIGNED/.test(p.text))!
+    ok(thread.fixes.includes('thread'), 'the thread problem offers the thread fields')
+    ok(ps.find((p) => p.objectId)!.fixes.includes('select'),
+      'and anything with an object offers to show it')
+    // With one object there is nothing to un-overlap, so it is not offered.
+    const solo = classifyProblems(['140 areas over 2.8x normal density'], [objects[0]])
+    ok(!solo[0].fixes.includes('overlap'),
+      'removing overlap is not offered when there is only one object')
+  }
+
+  // --- the summary, and the one thing to do next
+  {
+    const s = summarise(ps)
+    ok(s.errors === 1 && s.actionable === 5, 'the counts are right',
+      `${s.errors}e ${s.warnings}w ${s.notes}n`)
+    const next = nextStep(ps)!
+    ok(next.severity === 'error', 'the next step is the most serious actionable thing',
+      next.text)
+    ok(nextStep([]) === null, 'and a clean design has no next step')
+    ok(nextStep(classifyProblems(['Restored unsaved work from your last session'], [])) === null,
+      'a note is not a problem to fix')
   }
 }
 
