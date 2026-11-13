@@ -22,6 +22,7 @@ import type { Stitch } from './stitches'
 import {
   DEFAULT_APPLIQUE,
   DEFAULT_FILL,
+  DEFAULT_KNOCKDOWN,
   DEFAULT_PUFF,
   DEFAULT_RUN,
   DEFAULT_SATIN,
@@ -98,6 +99,7 @@ function objectOut(o: EmbObject) {
     ...(o.exit ? { exit: [o.exit.x, o.exit.y] } : {}),
     applique: { ...o.applique },
     puff: { ...o.puff },
+    knockdown: { ...o.knockdown },
     ...(o.twoRail ? { twoRail: true } : {}),
     ...(o.text ? { text: { ...o.text } } : {}),
     // The editable outline rides alongside the flattened cache. Without it a
@@ -328,7 +330,9 @@ function objectIn(v: unknown, index: number): EmbObject | null {
   const dRun = DEFAULT_RUN(), dSatin = DEFAULT_SATIN(), dFill = DEFAULT_FILL()
   const pf = isObj(v.puff) ? v.puff : {}
   const dApp = DEFAULT_APPLIQUE()
+  const kd = isObj(v.knockdown) ? v.knockdown : {}
   const dPuff = DEFAULT_PUFF()
+  const dKd = DEFAULT_KNOCKDOWN()
   return {
     id: str(v.id, `o${index + 1}`),
     name: str(v.name, `Object ${index + 1}`),
@@ -353,6 +357,13 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       borderDensity: num(ap.borderDensity, dApp.borderDensity),
       borderPullComp: num(ap.borderPullComp, dApp.borderPullComp),
       border: ap.border !== false,
+      borderStyle: ap.borderStyle === 'overlock' ? 'overlock' : 'satin',
+    },
+    knockdown: {
+      spacing: num(kd.spacing, dKd.spacing),
+      margin: num(kd.margin, dKd.margin),
+      angle: num(kd.angle, dKd.angle),
+      length: num(kd.length, dKd.length),
     },
     puff: {
       enabled: pf.enabled === true,
@@ -388,6 +399,7 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       density: num(satin.density, dSatin.density),
       pullComp: num(satin.pullComp, dSatin.pullComp),
       underlay: underlayIn(satin.underlay, SATIN_UNDERLAY_ORDER, LEGACY_SATIN_UNDERLAY, dSatin.underlay),
+      lean: num(satin.lean, dSatin.lean),
     },
     fill: {
       angle: num(fill.angle, dFill.angle),

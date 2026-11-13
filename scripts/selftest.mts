@@ -12,8 +12,8 @@ import { SCHEMA_VERSION, ProjectError, deserialize, docSignature, serialize } fr
 import { clonePlan, deleteStitches, freeze, freezeState, moveStitches, penetrationCount, pickStitch, pickStitchesIn } from '../src/stitchedit'
 import { appliqueCutSvg, packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { NOMINAL_PER_MM2, SEVERE_RATIO, WARN_RATIO, analyseDensity, densityColour } from '../src/density'
-import { PUFF_MAX_MM, PUFF_MIN_MM, puffCaps, puffCheck } from '../src/satin'
-import { DEFAULT_PUFF } from '../src/model'
+import { OVERLOCK_LEAN, PUFF_MAX_MM, PUFF_MIN_MM, puffCaps, puffCheck } from '../src/satin'
+import { DEFAULT_KNOCKDOWN, DEFAULT_PUFF } from '../src/model'
 import { unionSelfChecked } from '../src/boolean'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
@@ -451,7 +451,10 @@ console.log('\n# project save / reopen')
   doc.objects[0].fill = { angle: 17, spacing: 0.37, length: 3.25, stagger: 0.3, pullComp: 0.22,
     underlay: ['edge', 'zigzag'], border: { enabled: true, width: 1.8, density: 0.33 } }
   doc.objects[1].run = { length: 1.75 }
-  doc.objects[1].satin = { width: 4.2, density: 0.31, pullComp: 0.11, underlay: ['center', 'zigzag'] }
+  doc.objects[1].satin = {
+    width: 4.2, density: 0.31, pullComp: 0.11, underlay: ['center', 'zigzag'], lean: 18,
+  }
+  doc.objects[0].knockdown = { spacing: 2.6, margin: 2.1, angle: 20, length: 3.5 }
   doc.objects[1].visible = false
   // Entry/exit and the appliqué recipe, so a dropped field cannot hide here
   // either.
@@ -459,7 +462,7 @@ console.log('\n# project save / reopen')
   doc.objects[0].exit = { x: 13, y: -4 }
   doc.objects[1].applique = {
     tackWidth: 1.9, tackDensity: 0.55, borderWidth: 3.1,
-    borderDensity: 0.37, borderPullComp: 0.25, border: false,
+    borderDensity: 0.37, borderPullComp: 0.25, border: false, borderStyle: 'overlock',
   }
 
   const text = serialize(doc, true)
@@ -478,6 +481,9 @@ console.log('\n# project save / reopen')
     'entry and exit points survive')
   ok(back.objects[1].applique.borderWidth === 3.1 && back.objects[1].applique.border === false,
     'the appliqué recipe survives')
+  ok(back.objects[1].applique.borderStyle === 'overlock', 'including a faux overlock edge')
+  ok(back.objects[1].satin.lean === 18, 'the satin bar lean survives')
+  ok(back.objects[0].knockdown.margin === 2.1, 'the knockdown recipe survives')
   ok(back.hoop.widthMm === doc.hoop.widthMm && back.spacing === doc.spacing,
     'hoop and bracket spacing survive', `${back.hoop.name} / ${back.spacing}`)
   ok(back.objects[0].thread.code === '1902', 'thread assignment survives')
@@ -2037,6 +2043,122 @@ console.log('\n# manual stitch edits (the freeze model)')
     parsed.doc.frozen.blocks = 'nonsense'
     ok(deserialize(JSON.stringify(parsed)).frozen === undefined,
       'an unreadable frozen plan falls back to generating, not to half a plan')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# knockdown and faux overlock')
+{
+  // --- knockdown: coarse, and BIGGER than what it supports
+  {
+    const d = emptyDoc()
+    const square = [...rect(-15, -15, 30, 30), { x: -15, y: -15 }]
+    d.objects = [newObject({
+      name: 'KD', type: 'knockdown', paths: [square],
+      knockdown: { ...DEFAULT_KNOCKDOWN(), spacing: 2, margin: 2 },
+    })]
+    const { plan } = digitize(d)
+    const pts = plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+    ok(pts.length > 20, 'a knockdown generates stitches', `${pts.length}`)
+
+    // BIGGER than the outline: pile springs back at the boundary.
+    const maxX = Math.max(...pts.map((s) => s.x))
+    const minX = Math.min(...pts.map((s) => s.x))
+    ok(maxX > 15.2 && minX < -15.2,
+      'and reaches beyond the outline by the margin',
+      `${minX.toFixed(1)}..${maxX.toFixed(1)} vs -15..15`)
+
+    // COARSE: a knockdown at fill density would be thousands of wasted
+    // stitches and a stiff patch of fabric.
+    const sameD = emptyDoc()
+    sameD.objects = [newObject({ type: 'fill', paths: [square] })]
+    const fillCount = digitize(sameD).plan.blocks
+      .flatMap((b) => b.stitches).filter((s) => !s.jump).length
+    ok(pts.length < fillCount / 3, 'and is far coarser than a fill of the same shape',
+      `${pts.length} vs ${fillCount}`)
+
+    // Spacing is honoured: looser setting, fewer stitches.
+    const loose = emptyDoc()
+    loose.objects = [newObject({
+      type: 'knockdown', paths: [square],
+      knockdown: { ...DEFAULT_KNOCKDOWN(), spacing: 4, margin: 2 },
+    })]
+    const looseCount = digitize(loose).plan.blocks
+      .flatMap((b) => b.stitches).filter((s) => !s.jump).length
+    ok(looseCount < pts.length, 'looser spacing means fewer stitches',
+      `${looseCount} vs ${pts.length}`)
+  }
+
+  // Sewing order: a knockdown that comes second has flattened nothing.
+  {
+    const square = [...rect(0, 0, 20, 20), { x: 0, y: 0 }]
+    const kd = () => newObject({ name: 'KD', type: 'knockdown', paths: [square] })
+    const fill = () => newObject({ name: 'Logo', type: 'fill', paths: [square] })
+    const good = emptyDoc(); good.objects = [kd(), fill()]
+    const bad = emptyDoc(); bad.objects = [fill(), kd()]
+    ok(!digitize(good).warnings.some((w) => /flattens nothing/.test(w)),
+      'a knockdown first is not complained about')
+    ok(digitize(bad).warnings.some((w) => /flattens nothing/.test(w)),
+      'a knockdown sewn after the design is')
+    // Hidden objects do not count — they are not sewn.
+    const hidden = emptyDoc()
+    hidden.objects = [{ ...fill(), visible: false }, kd()]
+    ok(!digitize(hidden).warnings.some((w) => /flattens nothing/.test(w)),
+      'and a hidden object above it does not trip the check')
+  }
+
+  // An open path has no area to flatten.
+  {
+    const d = emptyDoc()
+    d.objects = [newObject({ name: 'open', type: 'knockdown', paths: [[{ x: 0, y: 0 }, { x: 10, y: 0 }]] })]
+    const { warnings } = digitize(d)
+    ok(warnings.some((w) => /closed area/.test(w)), 'an open knockdown is refused and reported',
+      warnings[0] ?? '')
+  }
+
+  // --- faux overlock: the bars LEAN
+  {
+    const path: Pt[] = [{ x: 0, y: 0 }, { x: 60, y: 0 }]
+    const base = { ...DEFAULT_SATIN(), width: 4, density: 0.5, pullComp: 0, underlay: [], lean: 0 }
+    const square = satinColumn(path, base)
+    const leaned = satinColumn(path, { ...base, lean: OVERLOCK_LEAN })
+
+    // A square bar joins two points at the same x; a leaned one does not.
+    const barDx = (st: typeof square) => {
+      let worst = 0
+      for (let i = 1; i < st.length; i++) worst = Math.max(worst, Math.abs(st[i].x - st[i - 1].x))
+      return worst
+    }
+    ok(barDx(square) < 1, 'an unleaned bar crosses square on', `${barDx(square).toFixed(2)}`)
+    ok(barDx(leaned) > 1.5, 'a leaned bar crosses at an angle', `${barDx(leaned).toFixed(2)}`)
+
+    // 45 degrees over a 2 mm half-width slides each rail 2 mm along the path,
+    // so the two ends of a bar are about 4 mm apart in x.
+    ok(Math.abs(barDx(leaned) - 4) < 1.2, 'by half-width x tan(lean)',
+      `${barDx(leaned).toFixed(2)} of ~4`)
+
+    // It is still a satin: same rails, same width across.
+    const spanY = (st: typeof square) =>
+      Math.max(...st.map((s) => s.y)) - Math.min(...st.map((s) => s.y))
+    ok(Math.abs(spanY(leaned) - spanY(square)) < 0.2,
+      'and the column is still the same width',
+      `${spanY(square).toFixed(2)} vs ${spanY(leaned).toFixed(2)}`)
+    ok(leaned.length > 20, 'with a full set of stitches', `${leaned.length}`)
+  }
+
+  // --- the appliqué border can BE a faux overlock
+  {
+    const ring = [...rect(0, 0, 40, 30), { x: 0, y: 0 }]
+    const plain = appliquePhases(newObject({ name: 'P', type: 'applique', paths: [ring] }), [])
+    const serged = appliquePhases(newObject({
+      name: 'P', type: 'applique', paths: [ring],
+      applique: { ...DEFAULT_APPLIQUE(), borderStyle: 'overlock' },
+    }), [])
+    ok(/overlock/.test(serged[2].label), 'the phase says it is an overlock edge', serged[2].label)
+    ok(!/overlock/.test(plain[2].label), 'and an ordinary border does not')
+    // Same phases either way — it is a finish, not a different sequence.
+    ok(plain.length === serged.length, 'the sequence is unchanged by the edge style')
   }
 }
 

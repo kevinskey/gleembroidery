@@ -1812,6 +1812,7 @@ export default function App() {
                   <option value="satin">Satin — zigzag column</option>
                   <option value="fill">Fill — tatami area</option>
                   <option value="applique">Appliqué — fabric, with stops</option>
+                  <option value="knockdown">Knockdown — flatten pile first</option>
                   <option value="none">Off — stitches nothing</option>
                 </select>
               </div>
@@ -1956,6 +1957,8 @@ export default function App() {
                     onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, density: v } }), 'satin.density')} />
                   <Num label="Pull compensation (mm)" value={selected.satin.pullComp} step={0.05} min={0} max={1}
                     onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, pullComp: v } }), 'satin.pullComp')} />
+                  <Num label="Bar lean (°)" value={selected.satin.lean} step={5} min={-70} max={70}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, lean: v } }), 'satin.lean')} />
                   <UnderlayPicker
                     value={selected.satin.underlay}
                     order={SATIN_UNDERLAY_ORDER}
@@ -1965,6 +1968,26 @@ export default function App() {
                       { id: 'zigzag', label: 'Zigzag' },
                     ]}
                     onChange={(next) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, underlay: next } }))} />
+                </fieldset>
+              )}
+
+              {selected.type === 'knockdown' && (
+                <fieldset>
+                  <legend>Knockdown</legend>
+                  <div className="row wide">
+                    <label className="dim">
+                      Flattens pile on towelling and fleece. Put it FIRST in the
+                      sewing sequence, under the design it supports.
+                    </label>
+                  </div>
+                  <Num label="Row spacing (mm)" value={selected.knockdown.spacing} step={0.1} min={0.8} max={6}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, knockdown: { ...o.knockdown, spacing: v } }), 'kd.sp')} />
+                  <Num label="Extend beyond edge (mm)" value={selected.knockdown.margin} step={0.5} min={0} max={10}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, knockdown: { ...o.knockdown, margin: v } }), 'kd.mg')} />
+                  <Num label="Angle (°)" value={selected.knockdown.angle} step={5} min={-180} max={180}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, knockdown: { ...o.knockdown, angle: v } }), 'kd.an')} />
+                  <Num label="Stitch length (mm)" value={selected.knockdown.length} step={0.5} min={1} max={12}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, knockdown: { ...o.knockdown, length: v } }), 'kd.ln')} />
                 </fieldset>
               )}
 
@@ -2034,6 +2057,22 @@ export default function App() {
                   </div>
                   {selected.applique.border && (
                     <>
+                      <div className="row wide">
+                        <label>Edge style</label>
+                        <div className="checks">
+                          {(['satin', 'overlock'] as const).map((st) => (
+                            <button
+                              key={st}
+                              className={selected.applique.borderStyle === st ? 'primary' : undefined}
+                              title={st === 'overlock'
+                                ? 'Leaned bars imitating a serged edge — what a ready-made patch has'
+                                : 'An ordinary satin border, bars square to the edge'}
+                              onClick={() => patch(selected.id, (o) => ({ ...o, applique: { ...o.applique, borderStyle: st } }))}>
+                              {st === 'satin' ? 'Satin' : 'Faux overlock'}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                       <Num label="Border width (mm)" value={selected.applique.borderWidth} step={0.1} min={1} max={8}
                         onChange={(v) => patch(selected.id, (o) => ({ ...o, applique: { ...o.applique, borderWidth: v } }), 'ap.bw')} />
                       <Num label="Border spacing (mm)" value={selected.applique.borderDensity} step={0.05} min={0.2} max={1}

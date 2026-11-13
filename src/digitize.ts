@@ -15,8 +15,9 @@ import { nodeFractions } from './nodes'
 import type { ColorBlock, Stitch, StitchPlan } from './stitches'
 import { dist, resample, scanlineSpans, toRegions } from './geometry'
 import { unionSelfChecked } from './boolean'
+import { offsetPathsChecked } from './offset'
 import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
-import { beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
+import { OVERLOCK_LEAN, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
 export const MAX_STITCH_MM = 10
@@ -248,7 +249,7 @@ export function appliquePhases(
   for (const ring of rings) {
     const params = {
       width: Math.max(0.6, p.tackWidth), density: Math.max(0.3, p.tackDensity),
-      pullComp: 0, underlay: [] as never[],
+      pullComp: 0, underlay: [] as never[], lean: 0,
     }
     const check = satinCheck(ring, params)
     if (check.errors.length) {
@@ -267,6 +268,10 @@ export function appliquePhases(
       const params = {
         width: Math.max(1, p.borderWidth), density: Math.max(0.2, p.borderDensity),
         pullComp: Math.max(0, p.borderPullComp), underlay: [] as never[],
+        // A faux overlock is an ordinary satin border with its bars leaned
+        // over; a serged edge is made of slanted loops, so slanted bars read
+        // as one.
+        lean: p.borderStyle === 'overlock' ? OVERLOCK_LEAN : 0,
       }
       const check = satinCheck(ring, params)
       if (check.errors.length) {
@@ -275,7 +280,12 @@ export function appliquePhases(
       }
       border.push(...satinColumn(ring, params))
     }
-    if (border.length) out.push({ label: `${obj.name} — border`, stitches: border })
+    if (border.length) {
+      out.push({
+        label: `${obj.name} — ${p.borderStyle === 'overlock' ? 'overlock edge' : 'border'}`,
+        stitches: border,
+      })
+    }
   }
   return out
 }
@@ -318,6 +328,39 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
   switch (obj.type) {
     case 'none':
       return []
+
+    case 'knockdown': {
+      // Flatten the pile over this shape, EXPANDED by the margin. Pile
+      // springs back at the boundary, so a knockdown stopping exactly at the
+      // design's edge leaves a fuzzy rim around the embroidery it supports.
+      const k = obj.knockdown
+      const grown = obj.paths.length
+        ? offsetPathsChecked(obj.paths, Math.max(0, k.margin))
+        : { paths: [], failed: true, attempts: 0 }
+      if (grown.failed) {
+        warnings.push(`${obj.name}: could not expand the knockdown area — it will flatten only up to the outline`)
+      }
+      const regions = toRegions(grown.failed || !grown.paths.length ? obj.paths : grown.paths)
+      if (!regions.length) {
+        warnings.push(`${obj.name}: knockdown needs a closed area`)
+        return []
+      }
+      for (const region of regions) {
+        // A coarse tatami. No underlay and no pull compensation: this IS the
+        // underlay for everything above it, and compensating a net that
+        // nothing lines up with would just move it.
+        push(tatamiFill(region, {
+          angle: k.angle,
+          spacing: Math.max(0.8, k.spacing),
+          length: Math.max(1, k.length),
+          stagger: 0.5,
+          pullComp: 0,
+          underlay: [],
+          border: { enabled: false, width: 0, density: 0.4 },
+        }, out.length ? out[out.length - 1] : undefined, (m) => warnings.push(`${obj.name}: ${m}`)))
+      }
+      break
+    }
 
     case 'applique':
       // Handled by the caller, which needs the phases as separate blocks to
@@ -418,6 +461,7 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
               density: p.border.density,
               pullComp: 0,
               underlay: [],
+              lean: 0,
             }
             // The border is satin and must pass the SAME check the satin tool
             // does. It used to bypass it entirely, so the engine refused a
@@ -463,6 +507,18 @@ export function digitize(doc: Doc): DigitizeResult {
   const warnings: string[] = []
   const blocks: ColorBlock[] = []
   const floor = effectiveFloor(doc)
+
+  // A knockdown exists to be sewn UNDER something. One that sews after the
+  // design it was meant to support has flattened nothing and merely added
+  // thread on top — a fault that is invisible on screen, because the preview
+  // shows the same shapes either way.
+  const sewn = doc.objects.filter((o) => o.visible && o.type !== 'none')
+  sewn.forEach((o, i) => {
+    if (o.type !== 'knockdown') return
+    if (sewn.slice(0, i).some((p) => p.type !== 'knockdown')) {
+      warnings.push(`${o.name}: a knockdown sews after other objects — move it to the start of the sequence or it flattens nothing`)
+    }
+  })
 
   for (const obj of doc.objects) {
     if (!obj.visible || obj.type === 'none') continue

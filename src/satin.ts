@@ -17,6 +17,15 @@ import { dedupe, dist, isClosed, pathLength, resample, tangentAt } from './geome
 /** Hard floor on same-rail penetration spacing, mm. Below this is one hole. */
 export const MIN_RAIL_MM = 0.3
 
+/**
+ * Bar lean used by the faux overlock edge, degrees.
+ *
+ * Around 45 is what a serger actually produces, and it is also the angle at
+ * which the bars still cover the edge: lean much further and consecutive bars
+ * stop overlapping, leaving the cut edge showing between them.
+ */
+export const OVERLOCK_LEAN = 45
+
 /** Arc length over which curvature is measured, mm. */
 const CURV_WINDOW_MM = 0.6
 
@@ -154,7 +163,15 @@ function smoothColumn(pts: Pt[], p: SatinParams, closed: boolean, startSide: num
       carried = Math.max(0, carried - step)
     }
 
-    out.push({ x: fine[i].x + n.x * half * side, y: fine[i].y + n.y * half * side })
+    // Lean: shift each penetration ALONG the path, in opposite directions on
+    // the two rails, so the bar crosses at an angle instead of square on.
+    // The shift is half*tan(lean), which is exactly the offset that turns a
+    // perpendicular bar into one leaning by `lean` degrees.
+    const slide = half * Math.tan((Math.max(-70, Math.min(70, p.lean || 0)) * Math.PI) / 180) * side
+    out.push({
+      x: fine[i].x + n.x * half * side + t.x * slide,
+      y: fine[i].y + n.y * half * side + t.y * slide,
+    })
     side = -side
   }
 
@@ -162,7 +179,11 @@ function smoothColumn(pts: Pt[], p: SatinParams, closed: boolean, startSide: num
   const last = fine[fine.length - 1]
   const tl = tangentAt(fine, fine.length - 1, closed)
   const nl = { x: -tl.y, y: tl.x }
-  const tail = { x: last.x + nl.x * half * side, y: last.y + nl.y * half * side }
+  const tailSlide = half * Math.tan((Math.max(-70, Math.min(70, p.lean || 0)) * Math.PI) / 180) * side
+  const tail = {
+    x: last.x + nl.x * half * side + tl.x * tailSlide,
+    y: last.y + nl.y * half * side + tl.y * tailSlide,
+  }
   if (!out.length || dist(out[out.length - 1], tail) > 1e-6) {
     out.push(tail)
     side = -side
@@ -321,6 +342,9 @@ function satinUnderlayLayer(pts: Pt[], p: SatinParams, layer: SatinUnderlay): St
         density: Math.max(1.2, p.density * 3),
         pullComp: 0,
         underlay: [],
+        // Underlay is never leaned: it is structural, and a slanted underlay
+        // would show through the top stitching it is meant to hide under.
+        lean: 0,
       })
     default:
       return []

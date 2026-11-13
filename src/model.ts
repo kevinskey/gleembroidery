@@ -24,6 +24,7 @@ export type Region = Pt[][]
 
 export type StitchType =
   | 'applique' // placement, stop, tack-down, stop, finishing border
+  | 'knockdown' // coarse fill laid FIRST to flatten a textured fabric
   | 'run' // single running stitch along the path
   | 'bean' // triple-pass running stitch (bold outline)
   | 'satin' // zigzag column centred on the path
@@ -67,6 +68,16 @@ export interface SatinParams {
    * preference, and a fixed order keeps the stitch file deterministic.
    */
   underlay: SatinUnderlay[]
+  /**
+   * Bar lean from perpendicular, degrees.
+   *
+   * Zero is ordinary satin, where every bar crosses the path at a right
+   * angle. Leaning them is what produces a FAUX OVERLOCK edge: a serged edge
+   * is made of slanted loops, so slanted bars read as one. Purely cosmetic
+   * to the machine — the stitches are the same length and density, they just
+   * land at an angle.
+   */
+  lean: number
 }
 
 export interface FillParams {
@@ -118,6 +129,14 @@ export interface AppliqueParams {
   borderPullComp: number
   /** Skip the border when the edge is finished some other way. */
   border: boolean
+  /**
+   * 'satin' is the usual perpendicular column.
+   *
+   * 'overlock' leans the bars to imitate a serged edge — the finish a
+   * ready-made patch has, which is what makes an appliqué read as a patch
+   * rather than as fabric stitched to a shirt.
+   */
+  borderStyle: 'satin' | 'overlock'
 }
 
 /**
@@ -143,6 +162,31 @@ export interface PuffParams {
   densityScale: number
   /** Perforate the ends so the excess foam tears along the stitch line. */
   capEnds: boolean
+}
+
+/**
+ * Knockdown: a coarse fill laid down BEFORE the design to flatten pile.
+ *
+ * On a towel, fleece or anything with a nap, embroidery sinks into the pile
+ * and the fibres push back up between the stitches — the design looks furry
+ * and the edges disappear. A knockdown pass mats the pile down first so the
+ * real stitching sits on a flat surface.
+ *
+ * Two things make it a knockdown rather than just another fill:
+ *   • it is COARSE. The job is to hold the pile down, not to cover anything,
+ *     and a normal density here would be thousands of wasted stitches and a
+ *     stiff patch of fabric.
+ *   • it is BIGGER than what it supports. Pile springs back at the boundary,
+ *     so a knockdown stopping exactly at the design's edge leaves a fuzzy
+ *     rim around it.
+ */
+export interface KnockdownParams {
+  /** Row spacing, mm. Far looser than a fill — this is a net, not coverage. */
+  spacing: number
+  /** How far beyond the outline to flatten, mm. */
+  margin: number
+  angle: number
+  length: number
 }
 
 export interface ThreadRef {
@@ -209,6 +253,7 @@ export interface EmbObject {
   fill: FillParams
   applique: AppliqueParams
   puff: PuffParams
+  knockdown: KnockdownParams
 }
 
 /** Machine bracket spacing. A hoop's arms must match what the machine takes. */
@@ -349,6 +394,13 @@ export interface Doc {
 
 export const DEFAULT_RUN = (): RunParams => ({ length: 2.5 })
 
+export const DEFAULT_KNOCKDOWN = (): KnockdownParams => ({
+  spacing: 2,
+  margin: 1.5,
+  angle: 45,
+  length: 4,
+})
+
 export const DEFAULT_PUFF = (): PuffParams => ({
   enabled: false,
   thickness: 3,
@@ -364,6 +416,7 @@ export const DEFAULT_APPLIQUE = (): AppliqueParams => ({
   borderDensity: 0.4,
   borderPullComp: 0.2,
   border: true,
+  borderStyle: 'satin',
 })
 
 export const DEFAULT_SATIN = (): SatinParams => ({
@@ -371,6 +424,7 @@ export const DEFAULT_SATIN = (): SatinParams => ({
   density: 0.4,
   pullComp: 0.2,
   underlay: ['center'],
+  lean: 0,
 })
 
 export const DEFAULT_FILL = (): FillParams => ({
@@ -411,6 +465,7 @@ export function newObject(partial: Partial<EmbObject> = {}): EmbObject {
     fill: DEFAULT_FILL(),
     applique: DEFAULT_APPLIQUE(),
     puff: DEFAULT_PUFF(),
+    knockdown: DEFAULT_KNOCKDOWN(),
     ...partial,
   }
 }
