@@ -4240,5 +4240,94 @@ console.log('\n# units')
   }
 }
 
+
+// ---------------------------------------------------------------------------
+console.log('\n# the backdrop saves with the project')
+{
+  // A one-pixel PNG is a real image and a real data URL; nothing here cares
+  // how big it is.
+  const PNG = 'data:image/png;base64,'
+    + 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+  const build = () => {
+    const d = emptyDoc()
+    // A FIXED id: newObject mints a fresh one per call, and the signature
+    // comparison below would then be testing the id generator.
+    d.objects = [newObject({
+      id: 'fixed', name: 'A', type: 'fill', paths: [[...rect(0, 0, 20, 20), { x: 0, y: 0 }]],
+    })]
+    d.backdrop = { dataUrl: PNG, pxPerMm: 4.25, origin: { x: -95.6, y: -40 }, name: 'logo.png' }
+    return d
+  }
+
+  // --- it survives, intact
+  {
+    const back = deserialize(serialize(build()))
+    ok(back.backdrop?.dataUrl === PNG, 'the image itself comes back byte for byte')
+    ok(back.backdrop?.pxPerMm === 4.25, 'with its scale — which is what fixes its size on the garment')
+    ok(back.backdrop?.origin.x === -95.6 && back.backdrop?.origin.y === -40, 'and its position')
+    ok(back.backdrop?.name === 'logo.png', 'and the file it came from')
+  }
+
+  // --- a design with no picture does not grow one
+  {
+    const plain = emptyDoc()
+    plain.objects = [newObject({ paths: [[{ x: 0, y: 0 }]] })]
+    ok(deserialize(serialize(plain)).backdrop === undefined, 'no picture means no picture')
+    ok(!/backdrop/.test(serialize(plain)), 'and nothing is written for one', 'key absent')
+  }
+
+  // --- anything that is NOT an image is dropped
+  {
+    const evil = JSON.parse(serialize(build()))
+    for (const bad of [
+      'javascript:alert(1)',
+      'data:text/html;base64,PHNjcmlwdD4=',
+      'https://example.com/logo.png',
+      '',
+    ]) {
+      evil.doc.backdrop.dataUrl = bad
+      ok(deserialize(JSON.stringify(evil)).backdrop === undefined,
+        `a dataUrl of "${bad.slice(0, 24)}" is refused`)
+    }
+    // This string is handed to an <img>, and a project file is something
+    // people email each other. The media type is checked, not assumed.
+  }
+
+  // --- a picture with no scale cannot be placed, so it is not kept
+  {
+    const odd = JSON.parse(serialize(build()))
+    odd.doc.backdrop.pxPerMm = 0
+    ok(deserialize(JSON.stringify(odd)).backdrop === undefined, 'a zero scale is refused')
+    odd.doc.backdrop.pxPerMm = 'big'
+    ok(deserialize(JSON.stringify(odd)).backdrop === undefined, 'and so is a nonsense one')
+  }
+
+  // --- a missing origin is recoverable; a missing NAME is not fatal
+  {
+    const part = JSON.parse(serialize(build()))
+    delete part.doc.backdrop.origin
+    delete part.doc.backdrop.name
+    const r = deserialize(JSON.stringify(part)).backdrop
+    ok(!!r && r.origin.x === 0 && r.origin.y === 0, 'a lost origin falls back to the middle')
+    ok(r?.name === 'image', 'and a lost name to something sayable', r?.name)
+  }
+
+  // --- IT MUST NOT CHANGE THE STITCHES. It is a tracing aid.
+  {
+    const withPic = build()
+    const without = build()
+    without.backdrop = undefined
+    const count = (d: Doc) =>
+      digitize(d).plan.blocks.flatMap((b) => b.stitches).length
+    ok(count(withPic) === count(without), 'a reference picture generates no stitches',
+      `${count(withPic)} vs ${count(without)}`)
+    // And it must not make the plan regenerate: loading a picture is not an
+    // edit to the design.
+    ok(docSignature(withPic) === docSignature(without),
+      'nor does it change the document signature')
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

@@ -35,6 +35,7 @@ import {
   emptyDoc,
   registerExistingIds,
   type Doc,
+  type Backdrop,
   type EmbObject,
   type Group,
   type Hoop,
@@ -199,6 +200,9 @@ export function serialize(doc: Doc, pretty = false): string {
       spacing: doc.spacing,
       tie: { ...doc.tie },
       groups: doc.groups.map((g) => ({ ...g })),
+      // The picture being traced over. Biggest thing in the file by far, so
+      // it is written only when there is one.
+      ...(doc.backdrop ? { backdrop: { ...doc.backdrop, origin: [doc.backdrop.origin.x, doc.backdrop.origin.y] } } : {}),
       objects: doc.objects.map(objectOut),
       // Manual stitch edits ARE the document once they exist. A project that
       // reopened without them would lose work with no way to get it back,
@@ -366,6 +370,29 @@ function groupsIn(v: unknown): Group[] {
     })
   }
   return out
+}
+
+/**
+ * The traced-over picture, if the file has a readable one.
+ *
+ * The data URL is checked for an `image/` media type rather than taken on
+ * trust: this string is handed to an <img>, and a project file is something
+ * people email each other. Anything else is dropped — a design without its
+ * reference picture still opens and still sews, which is the point.
+ */
+function backdropIn(v: unknown): Backdrop | undefined {
+  if (!isObj(v)) return undefined
+  const url = typeof v.dataUrl === 'string' ? v.dataUrl : ''
+  if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(url)) return undefined
+  const px = num(v.pxPerMm, 0)
+  if (!(px > 0)) return undefined
+  const o = ptIn(v.origin) ?? { x: 0, y: 0 }
+  return {
+    dataUrl: url,
+    pxPerMm: px,
+    origin: o,
+    name: typeof v.name === 'string' ? v.name : 'image',
+  }
 }
 
 /** A stored [x, y] pair, or undefined when absent or malformed. */
@@ -633,6 +660,7 @@ export function deserialize(text: string): Doc {
     spacing: oneOf(payload.spacing, SPACINGS, 'TJ500'),
     tie: tieIn(payload.tie),
     groups: groupsIn(payload.groups),
+    ...(backdropIn(payload.backdrop) ? { backdrop: backdropIn(payload.backdrop)! } : {}),
     ...(frozenIn(payload.frozen) ? { frozen: frozenIn(payload.frozen)! } : {}),
     objects,
   }

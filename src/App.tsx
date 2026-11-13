@@ -68,6 +68,7 @@ import {
   type EmbObject,
   type Pt,
   type TieParams,
+  type Backdrop,
   type FillStyle,
   type Group,
   type Spacing,
@@ -305,6 +306,16 @@ function Num({ label, value, step = 0.1, min, max, onChange }: {
 }
 
 const UNIT_KEY = 'gleembroidery.unit.v1'
+
+/** Decode a data URL into an image, or reject with something readable. */
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const im = new Image()
+    im.onload = () => resolve(im)
+    im.onerror = () => reject(new Error('could not decode that image'))
+    im.src = src
+  })
+}
 
 /**
  * A length field for the transform bar.
@@ -614,7 +625,15 @@ export default function App() {
    * image each time.
    */
   const [backdrop, setBackdrop] = useState<
-    { bitmap: HTMLImageElement; raster: Raster; pxPerMm: number; origin: Pt; name: string } | null
+    {
+      bitmap: HTMLImageElement
+      raster: Raster
+      pxPerMm: number
+      origin: Pt
+      name: string
+      /** It is stored in the project, so a document change can clear it. */
+      fromDoc?: boolean
+    } | null
   >(null)
   const [wandTolerance, setWandTolerance] = useState(DEFAULT_TOLERANCE)
   // Shift-drag rubber band over empty space, for selecting several at once.
@@ -883,16 +902,30 @@ export default function App() {
 
   useEffect(() => {
     const t = setTimeout(() => {
-      try {
-        const all = parked.map((p, i) => (i === activeTab ? doc : p.state?.present))
-          .filter((d): d is Doc => !!d && d.objects.length > 0)
-        if (all.length) localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(all.map((d) => serialize(d))))
-        else localStorage.removeItem(AUTOSAVE_KEY)
-      } catch {
-        // Out of quota. Clear the slot rather than leave a smaller, OLDER
-        // autosave behind to be restored later as if it were current.
+      const all = parked.map((p, i) => (i === activeTab ? doc : p.state?.present))
+        .filter((d): d is Doc => !!d && d.objects.length > 0)
+      if (!all.length) {
         try { localStorage.removeItem(AUTOSAVE_KEY) } catch { /* ignore */ }
-        setNote('This design is too large to autosave — use Save to keep it.')
+        return
+      }
+      const write = (docs: Doc[]) =>
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(docs.map((d) => serialize(d))))
+      try {
+        write(all)
+      } catch {
+        // Out of quota, and the commonest reason by far is a reference
+        // picture: an image is bigger than any design. Drop the PICTURES and
+        // keep the designs, because the design is the work and the picture
+        // is a tracing aid that can be loaded again.
+        try {
+          write(all.map((d) => ({ ...d, backdrop: undefined })))
+          setNote('Autosaved without the reference image — it was too large. Use Save to keep it.')
+        } catch {
+          // Still too big. Clear the slot rather than leave a smaller, OLDER
+          // autosave behind to be restored later as if it were current.
+          try { localStorage.removeItem(AUTOSAVE_KEY) } catch { /* ignore */ }
+          setNote('This design is too large to autosave — use Save to keep it.')
+        }
       }
     }, 600)
     return () => clearTimeout(t)
@@ -1723,36 +1756,104 @@ export default function App() {
    * physical size, and the hoop is the only real dimension in the document,
    * so it is the one sensible guess. The operator scales it afterwards.
    */
+  /**
+   * Largest backdrop worth keeping in a project file, bytes.
+   *
+   * A project is autosaved into localStorage, which is a few megabytes in
+   * total. Past this the picture would be most of the file and could crowd
+   * out the thing that actually matters — the design — so it is still shown
+   * and still traceable, just not stored.
+   */
+  const BACKDROP_MAX_BYTES = 3_000_000
+
   const importImage = async (file: File) => {
     // The menu stays open until a file actually arrives — see Menu.tsx
     // for why closing it on the click killed the picker.
     closeAllMenus()
     try {
-      const url = URL.createObjectURL(file)
-      const bitmap = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const im = new Image()
-        im.onload = () => resolve(im)
-        im.onerror = () => reject(new Error('could not decode that image'))
-        im.src = url
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const fr = new FileReader()
+        fr.onload = () => resolve(String(fr.result))
+        fr.onerror = () => reject(new Error('could not read that file'))
+        fr.readAsDataURL(file)
       })
-      const cv = document.createElement('canvas')
-      cv.width = bitmap.naturalWidth
-      cv.height = bitmap.naturalHeight
-      const ctx = cv.getContext('2d', { willReadFrequently: true })
-      if (!ctx) throw new Error('could not read the image')
-      ctx.drawImage(bitmap, 0, 0)
-      const id = ctx.getImageData(0, 0, cv.width, cv.height)
-      const pxPerMm = cv.width / doc.hoop.widthMm
-      const origin = { x: -doc.hoop.widthMm / 2, y: -(cv.height / pxPerMm) / 2 }
-      setBackdrop({ bitmap, raster: { data: id.data, width: cv.width, height: cv.height }, pxPerMm, origin, name: file.name })
+      if (!/^data:image\//i.test(dataUrl)) throw new Error('that is not an image')
+      // Measure it before storing, so pxPerMm is set from the real pixels.
+      const probe = await loadImage(dataUrl)
+      const pxPerMm = probe.naturalWidth / doc.hoop.widthMm
+      const origin = {
+        x: -doc.hoop.widthMm / 2,
+        y: -(probe.naturalHeight / pxPerMm) / 2,
+      }
+      const tooBig = dataUrl.length > BACKDROP_MAX_BYTES
+      if (tooBig) {
+        // Shown and traceable, but not written into the project — and said
+        // out loud, because a picture that silently failed to save is the
+        // same surprise as one that never saved at all.
+        setBackdrop(await decodeBackdrop({ dataUrl, pxPerMm, origin, name: file.name }))
+        setNote(
+          `${file.name} loaded for tracing, but it is ${(dataUrl.length / 1e6).toFixed(1)} MB `
+          + 'and will NOT be saved with the project — scale it down first if you need it kept.',
+        )
+      } else {
+        setDoc((d) => ({ ...d, backdrop: { dataUrl, pxPerMm, origin, name: file.name } }))
+        setNote(`${file.name} loaded — click a colour with the Wand to trace it`)
+      }
       setTool('wand')
-      setNote(`${file.name} loaded — click a colour with the Wand to trace it`)
     } catch (e) {
       alert(`Could not load that image: ${(e as Error).message}`)
     }
   }
 
   /**
+   * Turn a stored backdrop into something the canvas and the wand can use.
+   *
+   * The raster is the wand's input and has to be the image's OWN pixels, so
+   * it is read back off a canvas at natural size rather than from whatever
+   * the screen happens to be showing.
+   */
+  const decodeBackdrop = async (b: Backdrop) => {
+    const bitmap = await loadImage(b.dataUrl)
+    const cv = document.createElement('canvas')
+    cv.width = bitmap.naturalWidth
+    cv.height = bitmap.naturalHeight
+    const ctx = cv.getContext('2d', { willReadFrequently: true })
+    if (!ctx) throw new Error('could not read the image')
+    ctx.drawImage(bitmap, 0, 0)
+    const id = ctx.getImageData(0, 0, cv.width, cv.height)
+    return {
+      bitmap,
+      raster: { data: id.data, width: cv.width, height: cv.height },
+      pxPerMm: b.pxPerMm,
+      origin: b.origin,
+      name: b.name,
+    }
+  }
+
+  /**
+   * Keep the live backdrop in step with the document's.
+   *
+   * ONE path for both cases — a freshly imported picture and one that came
+   * back with an opened project — because two paths means two chances for
+   * the canvas to show one thing while the wand traces another.
+   */
+  const backdropUrl = doc.backdrop?.dataUrl
+  useEffect(() => {
+    if (!doc.backdrop) {
+      // Only drop the live one if it came from the document. An oversized
+      // picture is shown without being stored, and must survive an edit.
+      setBackdrop((b) => (b && b.fromDoc ? null : b))
+      return
+    }
+    let alive = true
+    decodeBackdrop(doc.backdrop)
+      .then((b) => { if (alive) setBackdrop({ ...b, fromDoc: true }) })
+      .catch(() => { if (alive) setNote('The saved reference image could not be decoded') })
+    return () => { alive = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backdropUrl])
+
+    /**
    * Regenerate an object's outlines from its text spec.
    *
    * Lettering is re-rasterised on every edit rather than transformed, so a
@@ -2738,7 +2839,13 @@ export default function App() {
             <FilePick label="Open DST as reference…" accept=".dst,.DST" onPick={importDstReference} />
             <FilePick label="Backdrop image…" accept="image/png,image/jpeg,image/gif,image/webp" onPick={importImage} />
             {backdrop && (
-              <MenuItem onClick={() => { setBackdrop(null); setNote(null) }}>Clear backdrop image</MenuItem>
+              <MenuItem
+                hint={backdrop.fromDoc ? backdrop.name : `${backdrop.name} — not saved with the project`}
+                onClick={() => {
+                  setDoc((d) => ({ ...d, backdrop: undefined }))
+                  setBackdrop(null)
+                  setNote(null)
+                }}>Clear backdrop image</MenuItem>
             )}
             {reference && <MenuItem onClick={() => setReference(null)}>Clear DST reference</MenuItem>}
             <MenuSep />

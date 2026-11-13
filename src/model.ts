@@ -522,6 +522,32 @@ export interface Group {
   locked?: boolean
 }
 
+/**
+ * The reference picture a design is traced from.
+ *
+ * Part of the DOCUMENT, not of the session. Coming back to a half-traced
+ * logo tomorrow and finding the thing you were tracing gone is the kind of
+ * loss that makes someone start the job again from the email.
+ *
+ * It generates no stitches and reaches no machine file. It is kept so the
+ * work can be continued, and for nothing else.
+ *
+ * The image is stored as a data URL — the ORIGINAL bytes, base64 — rather
+ * than re-encoded. Re-encoding would change the pixels the wand reads, so a
+ * trace taken after a save would differ from the same click before it, for
+ * no benefit at all.
+ */
+export interface Backdrop {
+  /** The original file, as a `data:image/...;base64,` URL. */
+  dataUrl: string
+  /** Pixels per millimetre — what fixes its size on the garment. */
+  pxPerMm: number
+  /** Top-left corner, document mm. */
+  origin: Pt
+  /** The file it came from, so the operator knows what they are looking at. */
+  name: string
+}
+
 export interface Doc {
   /**
    * A manually edited stitch plan that has taken over from generation.
@@ -540,6 +566,8 @@ export interface Doc {
   tie: TieParams
   /** Named sets of objects. See Group — they do not affect sewing order. */
   groups: Group[]
+  /** The picture being traced over, if there is one. See Backdrop. */
+  backdrop?: Backdrop
   objects: EmbObject[]
 }
 
