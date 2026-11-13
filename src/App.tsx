@@ -3284,11 +3284,23 @@ export default function App() {
         )}
         {stats.warnings.map((w, i) => <span key={i} className="warn">⚠ {w}</span>)}
         {/* Density is a diagnostic, not a refusal: it tells the operator
-            where the trouble is and offers to show them. */}
+            where the trouble is, offers to show them, and — because the
+            commonest cause by far is two objects covering the same ground —
+            offers the repair. A diagnostic that names a problem with no way
+            to act on it is half a tool. */}
         {density.warnings.map((w) => (
           <span key={w} className="warn">
             ⚠ {w}{' '}
             <button className="link" onClick={() => setShowDensity(true)}>show</button>
+            {doc.objects.length > 1 && (
+              <>
+                {' · '}
+                <button
+                  className="link"
+                  title="Knock each object back so nothing is sewn twice where they overlap"
+                  onClick={runRemoveOverlap}>fix the overlaps</button>
+              </>
+            )}
           </span>
         ))}
         <span className="sim">
