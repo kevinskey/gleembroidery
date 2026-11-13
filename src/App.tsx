@@ -458,6 +458,8 @@ export default function App() {
   // only so the canvas can show it while the mouse is still down.
   const guideDraw = useRef<{ id: string; a: Pt } | null>(null)
   const [guideDrag, setGuideDrag] = useState<{ a: Pt; b: Pt } | null>(null)
+  /** Waiting for a click on the object whose outline lettering should follow. */
+  const [pickingBaseline, setPickingBaseline] = useState(false)
   /**
    * Reference image behind the design, and the pixels the wand reads.
    *
@@ -660,6 +662,28 @@ export default function App() {
   // Kept in localStorage rather than in the document: the point of a preset
   // is that it outlives the project it was made in. A shop's cap-satin
   // settings are a property of the shop, not of one design.
+
+  /**
+   * Turn lettering into ordinary outlines.
+   *
+   * The spec asks for this to be EXPLICIT, and it is a one-way door: the
+   * words, face and size stop existing, and what is left is the polygons
+   * they produced. That is exactly what you want when a letterform has to be
+   * reshaped by hand — a serif extended, a counter opened up — and it is
+   * exactly what you do not want by accident, which is why nothing else in
+   * the program does it silently.
+   */
+  const convertTextToOutlines = (id: string) => {
+    const o = doc.objects.find((q) => q.id === id)
+    if (!o?.text) return
+    if (!window.confirm(
+      'Convert this lettering to outlines?\n\n'
+      + 'The words, font and size stop being editable. The shapes stay, and can be '
+      + 'node-edited like any other outline.')) return
+    patch(id, (q) => ({ ...q, text: undefined }))
+    setLetterBoxes(null)
+    setNote('Converted to outlines — the shapes are editable, the words are not')
+  }
 
   const applyPreset = (p: StylePreset) => {
     if (!selectedObjs.length) { setNote('select an object first'); return }
@@ -1105,7 +1129,10 @@ export default function App() {
     const out = textToOutlines(spec)
     for (const w of out.warnings) setNote(w)
     if (!out.paths.length) return
-    const paths = at ? out.paths.map((r) => r.map((q) => ({ x: q.x + at.x, y: q.y + at.y }))) : null
+    // Lettering on a baseline path is already where it belongs.
+    const paths = out.absolute
+      ? out.paths
+      : at ? out.paths.map((r) => r.map((q) => ({ x: q.x + at.x, y: q.y + at.y }))) : null
     patch(id, (o) => {
       // Keep the lettering where it already sits: re-rasterising recentres on
       // the origin, so without this every edit would teleport it.
@@ -1126,8 +1153,10 @@ export default function App() {
     // need the SAME offset the paths just got — otherwise the handles sit at
     // the document origin while the lettering is wherever it was placed.
     const obj = doc.objects.find((o) => o.id === id)
-    const ob = at ? null : obj && bounds(obj.paths)
-    const off = at ?? (ob ? { x: (ob.minX + ob.maxX) / 2, y: (ob.minY + ob.maxY) / 2 } : { x: 0, y: 0 })
+    const ob = at || out.absolute ? null : obj && bounds(obj.paths)
+    const off = out.absolute
+      ? { x: 0, y: 0 }
+      : at ?? (ob ? { x: (ob.minX + ob.maxX) / 2, y: (ob.minY + ob.maxY) / 2 } : { x: 0, y: 0 })
     setLetterBoxes({
       id,
       letters: out.letters.map((l) => ({ ...l, centre: { x: l.centre.x + off.x, y: l.centre.y + off.y } })),
@@ -1449,6 +1478,29 @@ export default function App() {
       setSelectedId(hit?.id ?? null)
       setActiveNode(null)
       if (!hit) panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
+      return
+    }
+    if (pickingBaseline && selected?.text) {
+      // Picking the object whose outline the lettering will follow. Checked
+      // before the ordinary select handling, which would otherwise just
+      // change the selection and lose the lettering being edited.
+      if (e.button !== 0) return
+      // A generous radius on purpose. Picking a baseline is a deliberate
+      // act with a prompt on screen, and the usual 4 px is tuned for
+      // telling two overlapping objects apart — not for hitting a hairline
+      // curve, which is exactly what a baseline usually is.
+      const hit = pickObject(doc.objects, atMm(e), (PICK_PX * 4) / view.scale)
+      setPickingBaseline(false)
+      if (!hit || hit.id === selected.id) {
+        setNote(hit ? 'lettering cannot follow its own outline' : 'nothing there — baseline unchanged')
+        return
+      }
+      // The LONGEST of its outlines: an object may hold several, and the one
+      // meant as a baseline is the one that goes somewhere.
+      const line = [...hit.paths].sort((a, b) => b.length - a.length)[0]
+      if (!line || line.length < 2) { setNote('that object has no line to follow'); return }
+      applyText(selected.id, { ...selected.text, path: line.map((q) => ({ ...q })) })
+      setNote(`lettering now follows "${hit.name}"`)
       return
     }
     if (tool === 'select' || (cmdHeld && !drawing())) {
@@ -2491,6 +2543,55 @@ export default function App() {
                     onChange={(v) => applyText(selected.id, { ...selected.text!, curveTopMm: v })} />
                   <Num label="Curve bottom (mm)" value={selected.text.curveBottomMm} step={0.5} min={-60} max={60}
                     onChange={(v) => applyText(selected.id, { ...selected.text!, curveBottomMm: v })} />
+                  {/* Text on a path. The baseline is another object's
+                      outline, which means it can be drawn, node-edited and
+                      reshaped with the tools that are already here rather
+                      than with a second set that only lettering can use. */}
+                  <div className="row wide">
+                    <label>Baseline</label>
+                    <div className="checks">
+                      <button
+                        className={selected.text.path?.length ? 'primary' : undefined}
+                        title="Pick another object's outline for the lettering to follow. Its direction is the reading direction — drawn the other way, the letters hang below the line, which is how the bottom of a crest is set."
+                        onClick={() => setPickingBaseline((v) => !v)}>
+                        {selected.text.path?.length ? 'On a path' : 'Follow a path…'}
+                      </button>
+                      {!!selected.text.path?.length && (
+                        <button onClick={() => applyText(selected.id, { ...selected.text!, path: undefined })}>
+                          Straight
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {pickingBaseline && (
+                    <div className="row wide">
+                      <span className="warn">Click the object whose outline the lettering should follow.</span>
+                    </div>
+                  )}
+                  {!!selected.text.path?.length && (
+                    <div className="row wide">
+                      <label>If the path is a different length</label>
+                      <div className="checks">
+                        {([['keep-size', 'Keep letter height'], ['fit-path', 'Fit to path']] as const).map(([v, lbl]) => (
+                          <button key={v}
+                            className={(selected.text!.pathFit ?? 'keep-size') === v ? 'primary' : undefined}
+                            title={v === 'keep-size'
+                              ? 'The letters stay the height you set; the line runs past the end of a short path and says so'
+                              : 'The line is scaled to span the path exactly — which CHANGES the letter height'}
+                            onClick={() => applyText(selected.id, { ...selected.text!, pathFit: v })}>
+                            {lbl}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="row wide">
+                    <button
+                      title="Turn this lettering into ordinary outlines. The words stop being editable — this is the one-way door, and it is explicit."
+                      onClick={() => convertTextToOutlines(selected.id)}>
+                      Convert to outlines
+                    </button>
+                  </div>
                   <div className="row wide">
                     <label>Stitched as</label>
                     <div className="checks">

@@ -26,7 +26,7 @@ import {
 } from '../src/presets'
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
-import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
+import { DEFAULT_TEXT, shapeOutlines, textOnPath } from '../src/text'
 import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton } from '../src/skeleton'
 import { MIN_DRAW_MM, bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from '../src/draw'
 import { MIN_SIZE_MM, boxCentre, fitPaths, handlePoint, hitHandle, hitObject, movePaths, objectBox, pickObject, resizeBox, rotatePaths, rotationAngle, unionBox, type Box } from '../src/transform'
@@ -3562,6 +3562,134 @@ console.log('\n# reusable stitch styles')
     }), holed[0])]
     const n = digitize(d).plan.blocks.flatMap((b) => b.stitches).length
     ok(n > 10, 'and it still sews', `${n} stitches`)
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# lettering on a baseline path')
+{
+  // A word-shaped block of outlines: two 10x20 boxes side by side, baseline
+  // at the bottom. Using boxes rather than real glyphs keeps the test about
+  // the MAPPING; the rasteriser is covered elsewhere and needs a browser.
+  const word = [
+    [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 20 }, { x: 0, y: 20 }, { x: 0, y: 0 }],
+    [{ x: 15, y: 0 }, { x: 25, y: 0 }, { x: 25, y: 20 }, { x: 15, y: 20 }, { x: 15, y: 0 }],
+  ]
+  // Baseline y = 20 (the bottom of the box, +Y down), width 25.
+
+  // --- a straight path is a MOVE, not a distortion
+  {
+    const line = [{ x: 100, y: 50 }, { x: 125, y: 50 }]
+    const r = textOnPath(word, line)
+    ok(r.warnings.length === 0, 'a path exactly as long as the type fits', r.warnings[0] ?? '')
+    const xs = r.paths.flat().map((q) => q.x)
+    const ys = r.paths.flat().map((q) => q.y)
+    ok(Math.abs(Math.min(...xs) - 100) < 1e-6 && Math.abs(Math.max(...xs) - 125) < 1e-6,
+      'the type lands along the path', `${Math.min(...xs)}..${Math.max(...xs)}`)
+    // Feet ON the line, heads above it. +Y is down, so above is smaller y.
+    ok(Math.abs(Math.max(...ys) - 50) < 1e-6, 'with its feet on the baseline',
+      `${Math.max(...ys)}`)
+    ok(Math.abs(Math.min(...ys) - 30) < 1e-6, 'and its cap height preserved',
+      `${Math.min(...ys)}`)
+  }
+
+  // --- the SIZE is preserved by default, because someone quoted it
+  {
+    // A path only half as long as the type.
+    const short = [{ x: 0, y: 0 }, { x: 12, y: 0 }]
+    const r = textOnPath(word, short, 'keep-size')
+    const xs = r.paths.flat().map((q) => q.x)
+    ok(Math.max(...xs) - Math.min(...xs) > 24,
+      'the letters keep their size on a path too short for them',
+      `${(Math.max(...xs) - Math.min(...xs)).toFixed(1)} mm`)
+    ok(r.warnings.some((w) => /runs on past it/.test(w)),
+      'and the overflow is reported rather than hidden', r.warnings[0] ?? '')
+    // Extended along the tangent, not piled on the last point — piling looks
+    // like a bug, extending shows exactly how much too long the text is.
+    ok(new Set(xs.map((x) => x.toFixed(2))).size > 2, 'the overflow is not collapsed')
+  }
+
+  // --- and 'fit-path' says what it does
+  {
+    const short = [{ x: 0, y: 0 }, { x: 12, y: 0 }]
+    const r = textOnPath(word, short, 'fit-path')
+    const xs = r.paths.flat().map((q) => q.x)
+    ok(Math.abs(Math.max(...xs) - Math.min(...xs) - 12) < 1e-6,
+      'fit-path scales the line to span the path exactly',
+      `${(Math.max(...xs) - Math.min(...xs)).toFixed(2)}`)
+    ok(r.warnings.length === 0, 'and does not complain about it')
+  }
+
+  // --- a CURVED path really bends the letters
+  {
+    // A quarter circle of radius 40, walked so that "above the baseline"
+    // falls OUTSIDE it — lettering around the top of a crest. Walked the
+    // other way the heads point inward, which is how the bottom of a crest
+    // is set, and is checked separately below.
+    const arcPts = Array.from({ length: 65 }, (_, i) => {
+      const a = (i / 64) * (Math.PI / 2)
+      return { x: Math.sin(a) * 40, y: -Math.cos(a) * 40 }
+    })
+    const r = textOnPath(word, arcPts, 'fit-path')
+    const pts = r.paths.flat()
+    const radii = pts.map((q) => Math.hypot(q.x, q.y))
+    ok(Math.min(...radii) >= 40 - 0.5, 'the feet sit ON the arc, nothing inside it',
+      `${Math.min(...radii).toFixed(2)} of 40`)
+    // Cap height 20 mm scaled by (arc length / type length) = 62.83 / 25.
+    const cap = 20 * (62.83 / 25)
+    ok(Math.abs(Math.max(...radii) - (40 + cap)) < 2,
+      'and the caps stand off it by the scaled cap height',
+      `${Math.max(...radii).toFixed(1)} of ${(40 + cap).toFixed(1)}`)
+    // The letters must have TURNED, not merely translated: a rigid stamp
+    // would keep every box axis-aligned.
+    const edgeAngles = r.paths.map((ring) =>
+      Math.atan2(ring[1].y - ring[0].y, ring[1].x - ring[0].x))
+    ok(Math.abs(edgeAngles[0] - edgeAngles[1]) > 0.3,
+      'the two letters sit at different angles, so they followed the curve',
+      `${edgeAngles.map((a) => ((a * 180) / Math.PI).toFixed(0)).join(' vs ')} deg`)
+  }
+
+  // --- the path's DIRECTION is the reading direction
+  {
+    const fwd = textOnPath(word, [{ x: 0, y: 0 }, { x: 25, y: 0 }])
+    const rev = textOnPath(word, [{ x: 25, y: 0 }, { x: 0, y: 0 }])
+    const topOf = (r: typeof fwd) => Math.min(...r.paths.flat().map((q) => q.y))
+    const botOf = (r: typeof fwd) => Math.max(...r.paths.flat().map((q) => q.y))
+    ok(topOf(fwd) < 0 && botOf(fwd) === 0, 'forwards, the heads are above the line')
+    ok(botOf(rev) > 0 && topOf(rev) === 0,
+      'backwards, they are below it — which is how you set the bottom of a crest')
+  }
+
+  // --- degenerate input is returned untouched rather than throwing
+  {
+    ok(textOnPath(word, [{ x: 0, y: 0 }]).paths === word, 'a one-point path does nothing')
+    ok(textOnPath(word, [{ x: 1, y: 1 }, { x: 1, y: 1 }]).paths === word,
+      'and neither does a zero-length one')
+    ok(textOnPath([], [{ x: 0, y: 0 }, { x: 9, y: 0 }]).paths.length === 0,
+      'and no outlines is no outlines')
+  }
+
+  // --- it survives a save and reopen
+  {
+    const d = emptyDoc()
+    d.objects = [newObject({ name: 'curved', type: 'fill', paths: [word[0]] })]
+    d.objects[0].text = {
+      ...DEFAULT_TEXT(), content: 'arc',
+      path: [{ x: 0, y: 0 }, { x: 30, y: -5 }, { x: 60, y: 0 }],
+      pathFit: 'fit-path',
+    }
+    const back = deserialize(serialize(d))
+    ok(back.objects[0].text?.path?.length === 3, 'a baseline path survives a save',
+      `${back.objects[0].text?.path?.length}`)
+    ok(back.objects[0].text?.path?.[1].y === -5, 'with its points intact')
+    ok(back.objects[0].text?.pathFit === 'fit-path', 'and the fit choice too')
+
+    // A half-read path cannot bend anything, so it is dropped.
+    const raw = JSON.parse(serialize(d))
+    raw.doc.objects[0].text.path = [[1, 2]]
+    ok(deserialize(JSON.stringify(raw)).objects[0].text?.path === undefined,
+      'a one-point path is dropped on reading, not applied')
   }
 }
 

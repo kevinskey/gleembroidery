@@ -121,7 +121,12 @@ export function objectOut(o: EmbObject) {
     puff: { ...o.puff },
     knockdown: { ...o.knockdown },
     ...(o.twoRail ? { twoRail: true } : {}),
-    ...(o.text ? { text: { ...o.text } } : {}),
+    ...(o.text ? {
+      text: {
+        ...o.text,
+        ...(o.text.path?.length ? { path: o.text.path.map((q) => [q.x, q.y]) } : {}),
+      },
+    } : {}),
     // The editable outline rides alongside the flattened cache. Without it a
     // reopened project could be sewn but never shaped again.
     shapes: o.shapes?.map((sh) => ({
@@ -448,6 +453,18 @@ function objectIn(v: unknown, index: number): EmbObject | null {
         slantDeg: num(v.text.slantDeg, 0),
         curveTopMm: num(v.text.curveTopMm, 0),
         curveBottomMm: num(v.text.curveBottomMm, 0),
+        // A baseline path with fewer than two points cannot bend anything,
+        // so a half-read one is dropped rather than applied.
+        path: (() => {
+          const raw = Array.isArray(v.text.path) ? v.text.path : null
+          if (!raw) return undefined
+          const pts = raw.flatMap((q: unknown) => {
+            const p = ptIn(q)
+            return p ? [p] : []
+          })
+          return pts.length >= 2 ? pts : undefined
+        })(),
+        pathFit: v.text.pathFit === 'fit-path' ? 'fit-path' : 'keep-size',
         mode: v.text.mode === 'satin' ? 'satin' : 'fill',
         nudges: isObj(v.text.nudges)
           ? Object.fromEntries(Object.entries(v.text.nudges).flatMap(([k, n]) =>
