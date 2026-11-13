@@ -4,8 +4,8 @@
 import { readDst, writeDst } from '../src/dst'
 import { appliquePhases, centerPlan, digitize, orientToEntryExit, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
 import { tatamiFill } from '../src/fill'
-import { dist, resample, toRegions } from '../src/geometry'
-import { DEFAULT_APPLIQUE, DEFAULT_FILL, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, emptyDoc, newObject, orderedUnderlay, type Pt } from '../src/model'
+import { dist, isClosed, resample, ringArea, toRegions } from '../src/geometry'
+import { DEFAULT_APPLIQUE, DEFAULT_FILL, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, orderedUnderlay, type Pt } from '../src/model'
 import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths , angleAt, assignGuides, resolveGuides } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
 import { SCHEMA_VERSION, SIGNATURE_GEOMETRY_KEYS, ProjectError, deserialize, docSignature, objectOut, serialize } from '../src/project'
@@ -15,6 +15,8 @@ import { NOMINAL_PER_MM2, SEVERE_RATIO, WARN_RATIO, analyseDensity, densityColou
 import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM, GUIDE_REACH_MM, MAX_BAR_ANGLE, OVERLOCK_LEAN, PUFF_MAX_MM, PUFF_MIN_MM, puffCaps, puffCheck } from '../src/satin'
 import { DEFAULT_KNOCKDOWN, DEFAULT_PUFF, DEFAULT_TIE, type Doc } from '../src/model'
 import { unionSelfChecked } from '../src/boolean'
+import { ALIGN_EDGES, alignDeltas, distributeDeltas, mirrorPaths, mirrorPt } from '../src/arrange'
+import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
 import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton } from '../src/skeleton'
@@ -2652,6 +2654,278 @@ console.log('\n# tie-in and tie-off as settings')
     const back = deserialize(JSON.stringify(raw))
     ok(back.tie.tieIn && back.tie.tieOff,
       'a project saved before ties existed still ties')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# shape operations')
+{
+  const box = (x: number, y: number, w: number, h: number) => [...rect(x, y, w, h), { x, y }]
+  const A = [box(0, 0, 20, 20)]
+  const B = [box(10, 10, 20, 20)]
+
+  // --- booleans
+  {
+    const u = booleanOp('union', [A, B])
+    ok(u.errors.length === 0 && u.paths.length === 1, 'two overlapping squares unite into one',
+      u.errors[0] ?? `${u.paths.length} paths`)
+    // Union area: 400 + 400 - 100 overlap = 700.
+    const area = Math.abs(ringArea(u.paths[0]))
+    ok(Math.abs(area - 700) < 1, 'with the right area', `${area.toFixed(1)} of 700`)
+
+    const i = booleanOp('intersection', [A, B])
+    ok(Math.abs(Math.abs(ringArea(i.paths[0])) - 100) < 1, 'intersect keeps only the overlap',
+      `${Math.abs(ringArea(i.paths[0])).toFixed(1)} of 100`)
+
+    const d = booleanOp('difference', [A, B])
+    ok(Math.abs(Math.abs(ringArea(d.paths[0])) - 300) < 1,
+      'subtract takes the FRONT shape out of the back one',
+      `${Math.abs(ringArea(d.paths[0])).toFixed(1)} of 300`)
+
+    const x = booleanOp('xor', [A, B])
+    const xArea = x.paths.reduce((n, p) => n + Math.abs(ringArea(p)), 0)
+    ok(Math.abs(xArea - 600) < 1, 'exclude keeps everything but the overlap',
+      `${xArea.toFixed(1)} of 600`)
+  }
+
+  // --- a boolean needs AREAS, and says so rather than inventing one
+  {
+    const line = [[{ x: 0, y: 0 }, { x: 20, y: 0 }]]
+    const r = booleanOp('union', [A, line])
+    ok(r.errors.length === 1 && /closed shape/.test(r.errors[0]),
+      'an open path is refused, not silently closed', r.errors[0])
+    ok(booleanOp('union', [A]).errors.length === 1, 'and one object is not a boolean')
+  }
+
+  // --- a result with no area is an ANSWER, phrased as one
+  {
+    const far = [box(500, 500, 10, 10)]
+    ok(/do not overlap/.test(booleanOp('intersection', [A, far]).errors[0] ?? ''),
+      'intersecting shapes that miss each other says they miss')
+    const big = [box(-10, -10, 60, 60)]
+    ok(/completely/.test(booleanOp('difference', [A, big]).errors[0] ?? ''),
+      'subtracting something that covers it says so')
+  }
+
+  // --- remove overlap: the one embroidery needs most
+  {
+    // Sewing order: A first, B second. B is on top, so B keeps everything.
+    const out = removeOverlap([A, B])
+    ok(out.every((r) => r.errors.length === 0), 'remove overlap runs clean')
+    const aArea = out[0].paths.reduce((n, p) => n + Math.abs(ringArea(p)), 0)
+    const bArea = out[1].paths.reduce((n, p) => n + Math.abs(ringArea(p)), 0)
+    ok(Math.abs(bArea - 400) < 1, 'the object sewn LAST keeps its whole shape',
+      `${bArea.toFixed(1)} of 400`)
+    ok(Math.abs(aArea - 300) < 1, 'and the one under it is knocked back',
+      `${aArea.toFixed(1)} of 300`)
+    // The whole point: no area is covered twice.
+    ok(Math.abs(aArea + bArea - 700) < 1, 'so nothing is sewn twice',
+      `${(aArea + bArea).toFixed(1)} of 700 total`)
+
+    // Completely buried means nothing left, not a stubborn remnant.
+    const buried = removeOverlap([[box(5, 5, 5, 5)], [box(0, 0, 20, 20)]])
+    ok(buried[0].paths.length === 0, 'an object completely covered keeps nothing')
+
+    // An open path has no area to knock out; it passes through rather than
+    // failing the whole operation.
+    const mixed = removeOverlap([[[{ x: 0, y: 0 }, { x: 9, y: 9 }]], B])
+    ok(mixed[0].paths.length === 1 && mixed[0].errors.length === 0,
+      'an open path in the mix is left alone')
+  }
+
+  // --- offset
+  {
+    const grown = offsetOp(A, 2)
+    ok(grown.errors.length === 0, 'an outline grows', grown.errors[0] ?? '')
+    const gb = bounds(grown.paths)!
+    ok(Math.abs(gb.maxX - gb.minX - 24) < 0.6, 'by the distance asked for, on both sides',
+      `${(gb.maxX - gb.minX).toFixed(2)} of 24`)
+
+    const shrunk = offsetOp(A, -2)
+    const sb = bounds(shrunk.paths)!
+    ok(Math.abs(sb.maxX - sb.minX - 16) < 0.6, 'and shrinks', `${(sb.maxX - sb.minX).toFixed(2)} of 16`)
+
+    ok(/closed shape/.test(offsetOp([[{ x: 0, y: 0 }, { x: 10, y: 0 }]], 2).errors[0] ?? ''),
+      'offsetting an open path is refused — that is a satin column, not an offset')
+    ok(offsetOp([box(0, 0, 3, 3)], -5).errors.length === 1,
+      'shrinking past nothing is reported rather than returning an empty shape')
+  }
+
+  // --- simplify
+  {
+    // A circle sampled far more finely than any needle can follow.
+    const fine = Array.from({ length: 400 }, (_, i) => {
+      const t = (i / 400) * Math.PI * 2
+      return { x: Math.cos(t) * 20, y: Math.sin(t) * 20 }
+    })
+    fine.push({ ...fine[0] })
+    const r = simplifyPaths([fine], 0.2)
+    ok(r.paths[0].length < fine.length / 3, 'a 400-point circle thins out',
+      `${fine.length} -> ${r.paths[0].length}`)
+    // And still a circle: every surviving point is on the original radius.
+    const worst = Math.max(...r.paths[0].map((p) => Math.abs(Math.hypot(p.x, p.y) - 20)))
+    ok(worst < 0.3, 'without moving off the shape', `${worst.toFixed(3)} mm`)
+    ok(isClosed(r.paths[0]), 'and stays closed')
+
+    const tri = [box(0, 0, 10, 10)]
+    ok(simplifyPaths(tri, 0.2).paths[0].length >= 4,
+      'a shape already at its minimum is not thinned away')
+  }
+
+  // --- node cleanup keeps the CURVES
+  {
+    const shapes = [{
+      closed: false,
+      nodes: [
+        { x: 0, y: 0 },
+        { x: 5, y: 0 },              // collinear, no handles -> goes
+        { x: 5.01, y: 0 },           // a duplicate -> goes
+        { x: 10, y: 0 },
+        { x: 15, y: 5, hIn: { x: 12, y: 0 }, hOut: { x: 18, y: 10 } }, // has handles -> stays
+        { x: 20, y: 10 },
+      ],
+    }]
+    const c = cleanNodes(shapes, 0.1)
+    ok(c.removed === 2, 'a duplicate and a bare collinear node are removed', `${c.removed}`)
+    ok(c.shapes[0].nodes.some((n) => n.hIn || n.hOut),
+      'and a node with handles survives, however straight it looks')
+  }
+
+  // --- split
+  {
+    const open = { closed: false, nodes: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }, { x: 30, y: 0 }] }
+    const s = splitShapeAt(open, 1)
+    ok(s.shapes.length === 2, 'cutting an open path gives two')
+    ok(s.shapes[0].nodes.length === 2 && s.shapes[1].nodes.length === 3, 'split at the right node')
+    ok(dist(s.shapes[0].nodes[1], s.shapes[1].nodes[0]) < 1e-9,
+      'and the cut node is kept on both sides')
+    ok(splitShapeAt(open, 0).errors.length === 1, 'cutting at an end is refused')
+
+    const ring = { closed: true, nodes: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }] }
+    const c = splitShapeAt(ring, 2)
+    ok(c.shapes.length === 1 && !c.shapes[0].closed,
+      'cutting a RING once opens it — one cut cannot make two pieces')
+    ok(c.shapes[0].nodes.length === 5, 'and the cut node appears at both ends')
+  }
+
+  // --- join
+  {
+    // Three segments of one line, drawn in a muddle: one backwards, one in
+    // the wrong order. This is what an SVG import looks like.
+    const segs = [
+      { closed: false, nodes: [{ x: 0, y: 0 }, { x: 10, y: 0 }] },
+      { closed: false, nodes: [{ x: 30, y: 0 }, { x: 20, y: 0 }] },
+      { closed: false, nodes: [{ x: 10, y: 0 }, { x: 20, y: 0 }] },
+    ]
+    const j = joinShapes(segs, 0.5)
+    ok(j.shapes.length === 1, 'three scattered segments join into one', `${j.shapes.length}`)
+    ok(j.joined === 2, 'in two joins')
+    ok(j.shapes[0].nodes.length === 4, 'with no node lost or doubled',
+      `${j.shapes[0].nodes.length}`)
+
+    // Ends that meet make a RING, which is what turns segments into
+    // something fillable.
+    const sides = [
+      { closed: false, nodes: [{ x: 0, y: 0 }, { x: 10, y: 0 }] },
+      { closed: false, nodes: [{ x: 10, y: 0 }, { x: 10, y: 10 }] },
+      { closed: false, nodes: [{ x: 10, y: 10 }, { x: 0, y: 10 }] },
+      { closed: false, nodes: [{ x: 0, y: 10 }, { x: 0, y: 0 }] },
+    ]
+    const ring = joinShapes(sides, 0.5)
+    ok(ring.shapes.length === 1 && ring.shapes[0].closed,
+      'four sides become a closed ring')
+    ok(ring.shapes[0].nodes.length === 4, 'with four corners, not five',
+      `${ring.shapes[0].nodes.length}`)
+
+    // Ends that are nowhere near each other are left alone.
+    const apart = joinShapes([
+      { closed: false, nodes: [{ x: 0, y: 0 }, { x: 10, y: 0 }] },
+      { closed: false, nodes: [{ x: 90, y: 0 }, { x: 99, y: 0 }] },
+    ], 0.5)
+    ok(apart.shapes.length === 2 && apart.joined === 0, 'unrelated segments are not welded')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# align, distribute and mirror')
+{
+  const B = (minX: number, minY: number, w: number, h: number) =>
+    ({ minX, minY, maxX: minX + w, maxY: minY + h })
+
+  // --- align is to the SELECTION's bounds, not to a member
+  {
+    const boxes = [B(0, 0, 10, 10), B(50, 20, 30, 10), B(20, 40, 5, 10)]
+    const left = alignDeltas(boxes, 'left')
+    const moved = boxes.map((b, i) => b.minX + left[i].x)
+    ok(moved.every((x) => Math.abs(x - 0) < 1e-9), 'left edges all land on the leftmost',
+      moved.map((x) => x.toFixed(1)).join(','))
+
+    const right = alignDeltas(boxes, 'right')
+    const rs = boxes.map((b, i) => b.maxX + right[i].x)
+    ok(rs.every((x) => Math.abs(x - 80) < 1e-9), 'right edges all land on the rightmost',
+      rs.map((x) => x.toFixed(1)).join(','))
+
+    const mid = alignDeltas(boxes, 'centreX')
+    const cs = boxes.map((b, i) => (b.minX + b.maxX) / 2 + mid[i].x)
+    ok(cs.every((x) => Math.abs(x - 40) < 1e-9), 'centres all land on the group centre',
+      cs.map((x) => x.toFixed(1)).join(','))
+
+    // Vertical edges do not move anything horizontally and vice versa.
+    ok(alignDeltas(boxes, 'top').every((d) => d.x === 0), 'a vertical align leaves x alone')
+    ok(alignDeltas(boxes, 'left').every((d) => d.y === 0), 'and a horizontal one leaves y alone')
+  }
+
+  // --- order of selection must not change the answer
+  {
+    const boxes = [B(0, 0, 10, 10), B(50, 20, 30, 10), B(20, 40, 5, 10)]
+    const a = alignDeltas(boxes, 'centreX').map((d, i) => (boxes[i].minX + boxes[i].maxX) / 2 + d.x)
+    const rev = [...boxes].reverse()
+    const b = alignDeltas(rev, 'centreX').map((d, i) => (rev[i].minX + rev[i].maxX) / 2 + d.x)
+    ok(JSON.stringify(a) === JSON.stringify([...b].reverse()),
+      'aligning does not depend on the order things were picked')
+  }
+
+  // --- distribute evens the GAPS, not the centres
+  {
+    // Widths 10, 30, 5 between x=0 and x=100. Total width 45, so three gaps
+    // of (100-45)/2 = 27.5 between the two outer ones.
+    const boxes = [B(0, 0, 10, 10), B(40, 0, 30, 10), B(95, 0, 5, 10)]
+    const d = distributeDeltas(boxes, true)
+    const laid = boxes.map((b, i) => ({ lo: b.minX + d[i].x, hi: b.maxX + d[i].x }))
+      .sort((p, q) => p.lo - q.lo)
+    ok(Math.abs(laid[0].lo - 0) < 1e-9 && Math.abs(laid[2].hi - 100) < 1e-9,
+      'the two outermost objects do not move')
+    const g1 = laid[1].lo - laid[0].hi
+    const g2 = laid[2].lo - laid[1].hi
+    ok(Math.abs(g1 - g2) < 1e-9, 'and the gaps between come out equal',
+      `${g1.toFixed(3)} vs ${g2.toFixed(3)}`)
+    // The naive centre-spacing version gets this wrong, which is the point:
+    // with these widths, even centres give unequal gaps.
+    ok(Math.abs(g1 - 27.5) < 1e-9, 'at the right size', g1.toFixed(2))
+
+    ok(distributeDeltas(boxes.slice(0, 2), true).every((q) => q.x === 0 && q.y === 0),
+      'two objects have one gap, so there is nothing to even out')
+  }
+
+  // --- mirror is about the selection's own centre, so twice is a no-op
+  {
+    const paths = [[{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 4 }, { x: 0, y: 0 }]]
+    const once = mirrorPaths(paths, 5, true)
+    ok(once[0][0].x === 10 && once[0][1].x === 0, 'a horizontal mirror flips x about the line')
+    ok(once[0][0].y === 0, 'and leaves y alone')
+    const twice = mirrorPaths(once, 5, true)
+    ok(JSON.stringify(twice) === JSON.stringify(paths), 'mirroring twice puts it back exactly')
+
+    const v = mirrorPaths(paths, 2, false)
+    ok(v[0][2].y === 0 && v[0][2].x === 10, 'a vertical mirror flips y')
+    ok(JSON.stringify(mirrorPaths(v, 2, false)) === JSON.stringify(paths), 'and is also its own undo')
+
+    // The point helper has to agree with the path version, or a mirrored
+    // object's guides and markers end up somewhere else.
+    const p = mirrorPt({ x: 3, y: 7 }, 5, true)
+    ok(p.x === 7 && p.y === 7, 'the point mirror matches the path mirror')
   }
 }
 

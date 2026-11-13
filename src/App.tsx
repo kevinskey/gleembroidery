@@ -2,6 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM } from './satin'
+import {
+  BOOL_LABEL, BOOL_OPS, booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap,
+  simplifyPaths, splitShapeAt,
+} from './shapeops'
+import {
+  DUPLICATE_OFFSET_MM, alignDeltas, boxCentreOf, distributeDeltas, mirrorPt,
+  type AlignEdge,
+} from './arrange'
+import type { BoolOp } from './boolean'
 import { close, segDist, toRegions } from './geometry'
 import { useHistory } from './history'
 import { CELL_MM, analyseDensity } from './density'
@@ -634,6 +643,259 @@ export default function App() {
    */
   const setDocTie = (next: Partial<TieParams>) =>
     setDoc((d) => ({ ...d, tie: { ...d.tie, ...next } }), `tie:${Object.keys(next)[0]}`)
+
+  // --- shape operations ----------------------------------------------------
+  //
+  // All of these are GEOMETRY edits: they produce ordinary objects the user
+  // can go on editing, they never touch stitch parameters, and they never
+  // generate stitches. Each one reports what it could not do rather than
+  // quietly returning nothing, because "the button did nothing" is
+  // indistinguishable from "the button is broken".
+
+  /**
+   * Replace the whole selection with one object carrying `paths`.
+   *
+   * The survivor is the BACK-most selected object — the one sewn first. It
+   * keeps its name, colour, thread and every stitch parameter, so a boolean
+   * does not silently reset a column anyone had set up. It also keeps its
+   * position in the sewing sequence, which is what a digitizer expects: the
+   * combined shape sews where the shape it was built on sewed.
+   *
+   * `shapes` are deliberately dropped. A boolean result is a NEW boundary
+   * that no longer corresponds to the nodes either operand had; carrying the
+   * old ones forward would mean the next flatten threw the result away.
+   */
+  const replaceSelection = (paths: Pt[][], verb: string) => {
+    const ids = selectedObjs.map((o) => o.id)
+    const keeper = selectedObjs[0]
+    setDoc((d) => {
+      const at = d.objects.findIndex((o) => o.id === keeper.id)
+      const merged: EmbObject = {
+        ...keeper, paths, shapes: undefined, guides: keeper.guides,
+        name: `${keeper.name} (${verb})`,
+      }
+      const rest = d.objects.filter((o) => !ids.includes(o.id))
+      rest.splice(Math.min(at, rest.length), 0, merged)
+      return { ...d, objects: rest }
+    })
+    setSelectedIds([keeper.id])
+  }
+
+  const runBoolean = (op: BoolOp) => {
+    const r = booleanOp(op, selectedObjs.map((o) => o.paths))
+    if (r.errors.length) { setNote(r.errors[0]); return }
+    replaceSelection(r.paths, BOOL_LABEL[op].toLowerCase())
+    setNote(`${BOOL_LABEL[op]}d ${selectedObjs.length} objects`)
+  }
+
+  const runRemoveOverlap = () => {
+    // Over the WHOLE design when nothing is selected, because double density
+    // is a property of the design rather than of a selection — and the usual
+    // reason to reach for this is a density warning about the whole thing.
+    const targets = selectedObjs.length > 1 ? selectedObjs : doc.objects
+    if (targets.length < 2) { setNote('needs at least two overlapping objects'); return }
+    const ids = targets.map((o) => o.id)
+    const out = removeOverlap(targets.map((o) => o.paths))
+    const problem = out.find((r) => r.errors.length)
+    if (problem) { setNote(problem.errors[0]); return }
+    let emptied = 0
+    setDoc((d) => ({
+      ...d,
+      objects: d.objects.flatMap((o) => {
+        const i = ids.indexOf(o.id)
+        if (i < 0) return [o]
+        if (!out[i].paths.length) { emptied++; return [] }
+        return [{ ...o, paths: out[i].paths, shapes: undefined }]
+      }),
+    }))
+    setNote(emptied
+      ? `overlap removed; ${emptied} object${emptied === 1 ? ' was' : 's were'} completely covered and deleted`
+      : `overlap removed across ${targets.length} objects`)
+  }
+
+  const runOffset = (delta: number) => {
+    const bad: string[] = []
+    const next = new Map<string, Pt[][]>()
+    for (const o of selectedObjs) {
+      const r = offsetOp(o.paths, delta)
+      if (r.errors.length) bad.push(`${o.name}: ${r.errors[0]}`)
+      else next.set(o.id, r.paths)
+    }
+    if (!next.size) { setNote(bad[0] ?? 'nothing to offset'); return }
+    setDoc((d) => ({
+      ...d,
+      objects: d.objects.map((o) =>
+        next.has(o.id) ? { ...o, paths: next.get(o.id)!, shapes: undefined } : o),
+    }))
+    setNote(bad.length
+      ? `${next.size} offset; ${bad[0]}`
+      : `${next.size} outline${next.size === 1 ? '' : 's'} ${delta > 0 ? 'grown' : 'shrunk'} by ${Math.abs(delta)} mm`)
+  }
+
+  const runSimplify = () => {
+    let before = 0, after = 0
+    const next = new Map<string, { paths: Pt[][]; shapes?: Shape[] }>()
+    for (const o of selectedObjs) {
+      // An object with editable nodes gets its NODES cleaned, which keeps its
+      // curves; only a raw polyline is thinned point by point. Running the
+      // polyline simplifier over a Bézier outline would throw the curves away
+      // and leave a shape nobody could get back.
+      if (o.shapes?.length) {
+        const c = cleanNodes(o.shapes)
+        before += o.shapes.reduce((n, s) => n + s.nodes.length, 0)
+        after += c.shapes.reduce((n, s) => n + s.nodes.length, 0)
+        next.set(o.id, { paths: shapesToPaths(c.shapes), shapes: c.shapes })
+      } else {
+        const r = simplifyPaths(o.paths)
+        before += o.paths.reduce((n, p) => n + p.length, 0)
+        after += r.paths.reduce((n, p) => n + p.length, 0)
+        next.set(o.id, { paths: r.paths })
+      }
+    }
+    if (!next.size) return
+    setDoc((d) => ({
+      ...d,
+      objects: d.objects.map((o) => {
+        const v = next.get(o.id)
+        return v ? { ...o, paths: v.paths, ...(v.shapes ? { shapes: v.shapes } : {}) } : o
+      }),
+    }))
+    setNote(before === after ? 'already minimal — nothing to remove'
+      : `${before - after} point${before - after === 1 ? '' : 's'} removed (${before} → ${after})`)
+  }
+
+  const runJoin = () => {
+    if (selectedObjs.length < 1) return
+    // Across the whole selection, not object by object: the case this exists
+    // for is an import that arrived as a pile of separate segments, and those
+    // land as separate OBJECTS.
+    const all = selectedObjs.flatMap((o) => shapesOf(o))
+    const j = joinShapes(all)
+    if (!j.joined) { setNote('no ends close enough to join'); return }
+    replaceSelection(shapesToPaths(j.shapes), 'joined')
+    // Put the joined shapes back so the result stays node-editable — the only
+    // operation here whose output IS the same nodes that went in.
+    const keeper = selectedObjs[0]
+    patch(keeper.id, (o) => ({ ...o, shapes: j.shapes, paths: shapesToPaths(j.shapes) }))
+    const rings = j.shapes.filter((s) => s.closed).length
+    setNote(`${j.joined} join${j.joined === 1 ? '' : 's'}${rings ? `, ${rings} closed into ${rings === 1 ? 'a ring' : 'rings'}` : ''}`)
+  }
+
+  /** Cut the selected outline at the node the Nodes tool has active. */
+  const runSplit = () => {
+    if (!selected || !activeNode) { setNote('pick a node with the Nodes tool first'); return }
+    const shapes = shapesOf(selected)
+    const r = splitShapeAt(shapes[activeNode.s], activeNode.i)
+    if (r.errors.length) { setNote(r.errors[0]); return }
+    const next = [...shapes.slice(0, activeNode.s), ...r.shapes, ...shapes.slice(activeNode.s + 1)]
+    setShapes(selected.id, next)
+    setActiveNode(null)
+    setNote(r.shapes.length === 2 ? 'cut into two outlines' : 'ring opened at that node')
+  }
+
+  // --- arrange -------------------------------------------------------------
+
+  /**
+   * Apply a per-object geometric change, carrying EVERY piece of geometry.
+   *
+   * paths, shapes, angle guides and the entry/exit markers all live in
+   * document mm. Any one of them left behind is a bug that only shows up
+   * later and somewhere else, which is why they are mapped together here and
+   * in the drag handler and nowhere else.
+   */
+  const mapObjects = (ids: readonly string[], f: (o: EmbObject) => (p: Pt) => Pt) =>
+    setDoc((d) => ({
+      ...d,
+      objects: d.objects.map((o) => {
+        if (!ids.includes(o.id)) return o
+        const m = f(o)
+        return {
+          ...o,
+          paths: o.paths.map((p) => p.map(m)),
+          ...(o.shapes ? {
+            shapes: o.shapes.map((sh) => ({
+              ...sh,
+              nodes: sh.nodes.map((n) => {
+                const at = m({ x: n.x, y: n.y })
+                return { ...n, x: at.x, y: at.y, hIn: n.hIn && m(n.hIn), hOut: n.hOut && m(n.hOut) }
+              }),
+            })),
+          } : {}),
+          ...(o.guides ? { guides: o.guides.map((g) => ({ a: m(g.a), b: m(g.b) })) } : {}),
+          ...(o.entry ? { entry: m(o.entry) } : {}),
+          ...(o.exit ? { exit: m(o.exit) } : {}),
+        }
+      }),
+    }))
+
+  const runAlign = (edge: AlignEdge) => {
+    const boxes = selectedObjs.map(objectBox).filter((b): b is Box => !!b)
+    if (boxes.length < 2) { setNote('select two or more objects to align'); return }
+    const deltas = alignDeltas(boxes, edge)
+    const ids = selectedObjs.map((o) => o.id)
+    mapObjects(ids, (o) => {
+      const d = deltas[ids.indexOf(o.id)] ?? { x: 0, y: 0 }
+      return (p) => ({ x: p.x + d.x, y: p.y + d.y })
+    })
+    setNote(`aligned ${boxes.length} objects`)
+  }
+
+  const runDistribute = (horizontal: boolean) => {
+    const boxes = selectedObjs.map(objectBox).filter((b): b is Box => !!b)
+    if (boxes.length < 3) { setNote('select three or more objects to distribute'); return }
+    const deltas = distributeDeltas(boxes, horizontal)
+    const ids = selectedObjs.map((o) => o.id)
+    mapObjects(ids, (o) => {
+      const d = deltas[ids.indexOf(o.id)] ?? { x: 0, y: 0 }
+      return (p) => ({ x: p.x + d.x, y: p.y + d.y })
+    })
+    setNote(`spaced ${boxes.length} objects evenly`)
+  }
+
+  const runMirror = (horizontal: boolean) => {
+    if (!selBox) { setNote('select something to mirror'); return }
+    // About the selection's own centre, so pressing it twice puts everything
+    // back exactly where it was.
+    const c = boxCentreOf(selBox)
+    const about = horizontal ? c.x : c.y
+    mapObjects(selectedObjs.map((o) => o.id), () => (p) => mirrorPt(p, about, horizontal))
+    setNote(`mirrored ${horizontal ? 'left to right' : 'top to bottom'}`)
+  }
+
+  const runDuplicate = () => {
+    if (!selectedObjs.length) return
+    const copies = selectedObjs.map((o) => ({
+      ...structuredClone(o),
+      id: newObject().id,
+      name: `${o.name} copy`,
+    }))
+    const shift = (p: Pt) => ({ x: p.x + DUPLICATE_OFFSET_MM, y: p.y + DUPLICATE_OFFSET_MM })
+    for (const c of copies) {
+      c.paths = c.paths.map((p) => p.map(shift))
+      if (c.shapes) {
+        c.shapes = c.shapes.map((sh) => ({
+          ...sh,
+          nodes: sh.nodes.map((n) => {
+            const at = shift({ x: n.x, y: n.y })
+            return { ...n, x: at.x, y: at.y, hIn: n.hIn && shift(n.hIn), hOut: n.hOut && shift(n.hOut) }
+          }),
+        }))
+      }
+      if (c.guides) c.guides = c.guides.map((g) => ({ a: shift(g.a), b: shift(g.b) }))
+      if (c.entry) c.entry = shift(c.entry)
+      if (c.exit) c.exit = shift(c.exit)
+    }
+    // Copies sew straight after the objects they came from, which keeps the
+    // sequence readable and usually avoids a thread change.
+    const lastAt = Math.max(...selectedObjs.map((o) => doc.objects.findIndex((q) => q.id === o.id)))
+    setDoc((d) => {
+      const out = [...d.objects]
+      out.splice(lastAt + 1, 0, ...copies)
+      return { ...d, objects: out }
+    })
+    setSelectedIds(copies.map((c) => c.id))
+    setNote(`duplicated ${copies.length} object${copies.length === 1 ? '' : 's'}`)
+  }
 
   const addPaths = (paths: Pt[][], label: string) => {
     // Split into regions so a letter keeps its counter as a hole of the SAME
@@ -1627,6 +1889,15 @@ export default function App() {
         }
         return
       }
+      // Cmd/Ctrl+D duplicates, as it does in every vector program. Checked
+      // before the single-letter tool picks, or the 'd' would just switch to
+      // the Draw tool with the modifier ignored.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd') {
+        e.preventDefault()
+        runDuplicate()
+        return
+      }
+      if (e.metaKey || e.ctrlKey) return
       const pick: Record<string, Tool> = {
         v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column', g: 'angle', w: 'wand', t: 'text', s: 'stitch',
         r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand',
@@ -1715,6 +1986,60 @@ export default function App() {
           ))}
         </div>
 
+        {/* Shape editing: everything here changes the OUTLINE, never the
+            stitch settings, and everything produces objects that can still
+            be node-edited afterwards. */}
+        <div className="group">
+          <label>Shape</label>
+          {BOOL_OPS.map((op) => (
+            <button key={op} disabled={selectedObjs.length < 2}
+              title={
+                op === 'union' ? 'Combine the selected outlines into one'
+                  : op === 'difference' ? 'Cut the objects in front out of the back one'
+                  : op === 'intersection' ? 'Keep only what they all cover'
+                  : 'Keep everything except where they overlap'
+              }
+              onClick={() => runBoolean(op)}>{BOOL_LABEL[op]}</button>
+          ))}
+          <button
+            disabled={doc.objects.length < 2}
+            title="Knock each object back so nothing is sewn twice where they overlap — double density is where needles break"
+            onClick={runRemoveOverlap}>No overlap</button>
+          <button disabled={!selectedObjs.length} title="Grow the outline by 1 mm"
+            onClick={() => runOffset(1)}>Grow</button>
+          <button disabled={!selectedObjs.length} title="Shrink the outline by 1 mm"
+            onClick={() => runOffset(-1)}>Shrink</button>
+          <button disabled={!selectedObjs.length}
+            title="Remove points that add nothing — keeps curves on outlines that have them"
+            onClick={runSimplify}>Simplify</button>
+          <button disabled={!selectedObjs.length}
+            title="Weld outlines whose ends meet; ends that close a loop become a ring"
+            onClick={runJoin}>Join</button>
+          <button disabled={!selected || !activeNode}
+            title="Cut the outline at the node selected with the Nodes tool"
+            onClick={runSplit}>Split</button>
+        </div>
+
+        <div className="group">
+          <label>Arrange</label>
+          {([['left', 'L'], ['centreX', 'C'], ['right', 'R'],
+            ['top', 'T'], ['middle', 'M'], ['bottom', 'B']] as const).map(([edge, short]) => (
+            <button key={edge} disabled={selectedObjs.length < 2}
+              title={`Align ${edge === 'centreX' ? 'horizontal centres' : edge === 'middle' ? 'vertical middles' : edge}`}
+              onClick={() => runAlign(edge as AlignEdge)}>{short}</button>
+          ))}
+          <button disabled={selectedObjs.length < 3} title="Even out the gaps left to right"
+            onClick={() => runDistribute(true)}>Space H</button>
+          <button disabled={selectedObjs.length < 3} title="Even out the gaps top to bottom"
+            onClick={() => runDistribute(false)}>Space V</button>
+          <button disabled={!selectedObjs.length} title="Flip left to right about the selection's centre"
+            onClick={() => runMirror(true)}>Flip H</button>
+          <button disabled={!selectedObjs.length} title="Flip top to bottom about the selection's centre"
+            onClick={() => runMirror(false)}>Flip V</button>
+          <button disabled={!selectedObjs.length} title="Duplicate (Cmd/Ctrl+D)"
+            onClick={runDuplicate}>Duplicate</button>
+        </div>
+
         {tool === 'wand' && (
           <div className="group">
             <label>Wand</label>
@@ -1801,7 +2126,29 @@ export default function App() {
             </div>
           )}
           {doc.objects.map((o, i) => (
-            <div key={o.id} className={`obj${o.id === selectedId ? ' sel' : ''}`} onClick={() => setSelectedId(o.id)}>
+            <div
+              key={o.id}
+              className={`obj${selectedIds.includes(o.id) ? ' sel' : ''}`}
+              // The sequence list is where a multi-selection is easiest to
+              // build — the objects are named and in order, and several of
+              // them are often stacked on top of each other on the canvas.
+              // Shift extends a RANGE, Cmd/Ctrl toggles one, which is what
+              // every list in every program does.
+              onClick={(e) => {
+                if (e.shiftKey) {
+                  const anchor = doc.objects.findIndex((q) => q.id === selectedId)
+                  const from = anchor < 0 ? i : anchor
+                  const [lo, hi] = from < i ? [from, i] : [i, from]
+                  setSelectedIds(doc.objects.slice(lo, hi + 1).map((q) => q.id))
+                } else if (e.metaKey || e.ctrlKey) {
+                  setSelectedIds(selectedIds.includes(o.id)
+                    ? selectedIds.filter((x) => x !== o.id)
+                    : [...selectedIds, o.id])
+                } else {
+                  setSelectedId(o.id)
+                }
+              }}
+            >
               <span className="seq">{i + 1}</span>
               <span className="sw" style={{ background: o.color }} />
               <span className="nm">{o.name}</span>
