@@ -17,6 +17,7 @@ import { DEFAULT_KNOCKDOWN, DEFAULT_PUFF, DEFAULT_TIE, type Doc } from '../src/m
 import { unionSelfChecked } from '../src/boolean'
 import { ALIGN_EDGES, alignDeltas, distributeDeltas, mirrorPaths, mirrorPt } from '../src/arrange'
 import { MOTIFS, crossStitchFill, echoFill, motifFill, motifRun, stippleFill } from '../src/decorative'
+import { chainPaths, enterRingNear, orderPaths, travelCost, travelIsHidden } from '../src/travel'
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
@@ -3121,6 +3122,208 @@ console.log('\n# decorative stitch styles')
     })]
     ok(digitize(d).warnings.some((w) => /underlay is not used/.test(w)),
       'underlay under an open fill is refused and reported')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# travel planning')
+{
+  // --- chaining: the biggest win on imported artwork
+  {
+    // One SVG outline that arrived as four separate sides, in a muddle, two
+    // of them drawn backwards. This is what an import actually looks like.
+    const sides = [
+      [{ x: 0, y: 0 }, { x: 40, y: 0 }],
+      [{ x: 40, y: 30 }, { x: 40, y: 0 }],
+      [{ x: 0, y: 30 }, { x: 40, y: 30 }],
+      [{ x: 0, y: 30 }, { x: 0, y: 0 }],
+    ]
+    const chained = chainPaths(sides)
+    ok(chained.length === 1, 'four sides chain into one path', `${chained.length}`)
+    ok(chained[0].length === 5, 'with no point lost or doubled', `${chained[0].length}`)
+    ok(dist(chained[0][0], chained[0][chained[0].length - 1]) < 1e-9,
+      'and its ends meet, so it is a ring')
+
+    // The point of it: what that costs the machine.
+    const before = travelCost(sides, 6)
+    const after = travelCost(chained, 6)
+    ok(before.trims > 0, 'unchained, the sides cost thread cuts', `${before.trims} trims`)
+    ok(after.trims === 0, 'chained, they cost none')
+    ok(after.travelMm < before.travelMm, 'and far less travel',
+      `${before.travelMm.toFixed(1)} -> ${after.travelMm.toFixed(1)} mm`)
+
+    // Ends that are nowhere near each other are NOT welded.
+    const apart = chainPaths([
+      [{ x: 0, y: 0 }, { x: 10, y: 0 }],
+      [{ x: 80, y: 0 }, { x: 90, y: 0 }],
+    ])
+    ok(apart.length === 2, 'unrelated segments stay separate')
+  }
+
+  // --- ordering: file order is an accident of whatever drew it
+  {
+    // Five dashes along a line, listed in the worst possible order.
+    const dashes = [0, 60, 20, 80, 40].map((x) => [{ x, y: 0 }, { x: x + 10, y: 0 }])
+    const before = travelCost(dashes, 6)
+    const after = travelCost(orderPaths(dashes, { x: 0, y: 0 }), 6)
+    ok(after.travelMm < before.travelMm / 2, 'ordering nearest-first halves the travel at least',
+      `${before.travelMm.toFixed(1)} -> ${after.travelMm.toFixed(1)} mm`)
+    ok(orderPaths(dashes).length === dashes.length, 'and nothing is dropped')
+  }
+
+  // --- a path may be entered from EITHER end
+  {
+    // Reached from its far end, a path costs a travel as long as itself.
+    const two = [
+      [{ x: 0, y: 0 }, { x: 10, y: 0 }],
+      [{ x: 60, y: 0 }, { x: 11, y: 0 }],
+    ]
+    const ordered = orderPaths(two, { x: 0, y: 0 })
+    ok(Math.abs(ordered[1][0].x - 11) < 1e-9,
+      'the second path is entered at the near end, reversing it if need be',
+      `${ordered[1][0].x}`)
+    ok(travelCost(ordered, 6).travelMm < 2, 'so the travel is a millimetre, not fifty',
+      `${travelCost(ordered, 6).travelMm.toFixed(2)} mm`)
+  }
+
+  // --- a RING keeps its direction but may be re-entered anywhere
+  {
+    const ring = [...rect(0, 0, 20, 20), { x: 0, y: 0 }]
+    const r = enterRingNear(ring, { x: 20, y: 20 })
+    ok(dist(r[0], { x: 20, y: 20 }) < 1e-9, 'a ring is re-entered at its nearest corner')
+    ok(r.length === ring.length, 'with the same number of points')
+    ok(dist(r[0], r[r.length - 1]) < 1e-9, 'and it is still closed')
+    // Direction is load-bearing: it decides which way a satin border leans
+    // and which side a fill insets its underlay.
+    const signedArea = (p: typeof ring) => {
+      let a = 0
+      for (let i = 1; i < p.length; i++) a += p[i - 1].x * p[i].y - p[i].x * p[i - 1].y
+      return a
+    }
+    ok(Math.sign(signedArea(r)) === Math.sign(signedArea(ring)),
+      'and its direction is unchanged')
+  }
+
+  // --- hiding: a travel is only worth sewing when something covers it
+  {
+    const cover = [toRegions([[...rect(0, 0, 40, 40), { x: 0, y: 0 }]])[0]]
+    ok(travelIsHidden(cover, { x: 5, y: 5 }, { x: 35, y: 35 }),
+      'a travel inside a filled shape is hidden')
+    ok(!travelIsHidden(cover, { x: 5, y: 5 }, { x: 80, y: 80 }),
+      'one that leaves it is not')
+    ok(!travelIsHidden([], { x: 0, y: 0 }, { x: 1, y: 1 }),
+      'and with nothing to hide under, nothing is hidden')
+    // The whole way, not just the ends — this is the case a naive endpoint
+    // test gets wrong.
+    const donut = toRegions([
+      [...rect(0, 0, 40, 40), { x: 0, y: 0 }],
+      [...rect(10, 10, 20, 20), { x: 10, y: 10 }],
+    ])[0]
+    ok(!travelIsHidden([donut], { x: 5, y: 20 }, { x: 35, y: 20 }),
+      'a travel across a hole is not hidden, however covered its ends are')
+  }
+
+  // --- and it reaches the real pipeline
+  {
+    const d = emptyDoc()
+    // The same four sides, as a run object.
+    d.objects = [newObject({
+      name: 'outline', type: 'run',
+      paths: [
+        [{ x: 0, y: 0 }, { x: 40, y: 0 }],
+        [{ x: 40, y: 30 }, { x: 40, y: 0 }],
+        [{ x: 0, y: 30 }, { x: 40, y: 30 }],
+        [{ x: 0, y: 30 }, { x: 0, y: 0 }],
+      ],
+    })]
+    const plan = digitize(d).plan
+    const jumps = plan.blocks.flatMap((b) => b.stitches).filter((s) => s.jump).length
+    // One leading jump to reach the design is expected and unavoidable.
+    ok(jumps <= 1, 'a run of loose segments sews with no jumps between them',
+      `${jumps} jumps`)
+    ok(countTrims(plan) === 0, 'and no thread cuts', `${countTrims(plan)}`)
+  }
+
+  // --- travel BETWEEN objects on the same needle
+  {
+    // Two lines end to end. Their stitching really does finish and start
+    // next to each other, which is the case where a cut is pure waste.
+    //
+    // NOTE on what this does NOT do: two FILLS sitting side by side still
+    // cut, because a fill's stitching ends wherever its last scanline row
+    // ends and begins wherever its first row begins — which can be the far
+    // corners even when the shapes touch. Routing a travel through one
+    // shape to shorten that hop is real work that is not done here; the
+    // tool for it today is the entry/exit markers, which let the digitizer
+    // say where each object should finish and start.
+    const build = (gapMm: number) => {
+      const d = emptyDoc()
+      d.objects = [
+        newObject({
+          name: 'A', color: '#ff0000', type: 'run',
+          paths: [[{ x: 0, y: 0 }, { x: 20, y: 0 }]],
+        }),
+        newObject({
+          name: 'B', color: '#ff0000', type: 'run',
+          paths: [[{ x: 20 + gapMm, y: 0 }, { x: 40 + gapMm, y: 0 }]],
+        }),
+      ]
+      return digitize(d).plan
+    }
+
+    const near = build(1)
+    ok(countTrims(near) === 0, 'two objects that end and start together sew without a cut',
+      `${countTrims(near)} trims`)
+    ok(near.blocks.length === 1, 'and stay in one colour block', `${near.blocks.length}`)
+
+    // Far apart with nothing to hide under, the cut is CORRECT: the
+    // alternative is thread lying across bare fabric.
+    const far = build(60)
+    ok(countTrims(far) > 0, 'two distant objects still cut', `${countTrims(far)} trims`)
+
+    // The ties either side of a cut that did not happen are waste — a knot
+    // of short stitches in the middle of one continuous thread.
+    const midLocks = (plan: ReturnType<typeof digitize>['plan']) => {
+      const st = plan.blocks[0].stitches
+      return st.slice(6, -6).filter((q) => q.lock).length
+    }
+    ok(midLocks(near) === 0, 'and the ties that would have bracketed it are removed',
+      `${midLocks(near)} stray lock stitches`)
+    ok(midLocks(far) > 0, 'while a real cut keeps its ties', `${midLocks(far)} lock stitches`)
+  }
+
+  // --- a travel that can HIDE is sewn even when it is long
+  {
+    const d = emptyDoc()
+    const big = [...rect(0, 0, 60, 60), { x: 0, y: 0 }]
+    d.objects = [
+      // A big fill, then a run that starts deep inside it. The travel to
+      // reach the run never leaves the filled area, so it disappears under
+      // stitches that are already there.
+      newObject({ name: 'bg', color: '#ff0000', type: 'fill', paths: [big] }),
+      newObject({
+        name: 'line', color: '#ff0000', type: 'run',
+        paths: [[{ x: 10, y: 30 }, { x: 50, y: 30 }]],
+      }),
+    ]
+    const plan = digitize(d).plan
+    ok(countTrims(plan) === 0, 'a long travel under an existing fill is sewn, not cut',
+      `${countTrims(plan)} trims`)
+  }
+
+  // --- a FILL's paths are a region, and must never be chained or reordered
+  {
+    const d = emptyDoc()
+    const outer = [...rect(0, 0, 40, 40), { x: 0, y: 0 }]
+    const hole = [...rect(12, 12, 16, 16), { x: 12, y: 12 }]
+    d.objects = [newObject({ name: 'ring', type: 'fill', paths: [outer, hole] })]
+    const pts = digitize(d).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+    // If the hole had been chained to the outline or treated as a shape of
+    // its own, the middle would be stitched.
+    const inMiddle = pts.filter((p) =>
+      p.x > 15 && p.x < 25 && p.y > 15 && p.y < 25).length
+    ok(inMiddle === 0, 'the hole in a filled ring stays empty', `${inMiddle} stitches in it`)
   }
 }
 

@@ -17,6 +17,7 @@ import { dist, pathLength, resample, scanlineSpans, toRegions } from './geometry
 import { unionSelfChecked } from './boolean'
 import { offsetPathsChecked } from './offset'
 import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
+import { chainPaths, orderPaths, travelIsHidden } from './travel'
 import { MIN_MOTIF_MM, crossStitchFill, echoFill, motifById, motifFill, motifRun, stippleFill } from './decorative'
 import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
 
@@ -312,6 +313,19 @@ export function appliquePhases(
   return out
 }
 
+/**
+ * Chain the paths that meet, then walk what is left nearest-first.
+ *
+ * Only for the LINE types. A fill's paths are a region — an outer boundary
+ * and its holes — and chaining or reordering those would weld a counter to
+ * its letter, or fill the hole instead of the shape. A satin object's paths
+ * are its strokes or its two rails, where the pairing is the whole meaning.
+ */
+function planPaths(paths: Pt[][], sewnSoFar: Stitch[]): Pt[][] {
+  const at = sewnSoFar.length ? sewnSoFar[sewnSoFar.length - 1] : undefined
+  return orderPaths(chainPaths(paths), at)
+}
+
 function isClosedRing(r: Pt[]): boolean {
   return r.length > 2 && dist(r[0], r[r.length - 1]) < 1e-6
 }
@@ -394,7 +408,11 @@ function stitchObject(
       return []
 
     case 'run':
-      for (const path of obj.paths) {
+      // Chain first, then order. Both are about TRAVEL, which is invisible in
+      // the preview and the usual difference between a file that runs well
+      // and one that does not — on imported line art this routinely turns
+      // dozens of jumps into none.
+      for (const path of planPaths(obj.paths, out)) {
         if (obj.run.style === 'motif') {
           // Too short for even one motif: the run comes back plain, and the
           // operator is told rather than left wondering why the border on
@@ -411,7 +429,7 @@ function stitchObject(
       break
 
     case 'bean':
-      for (const path of obj.paths) push(beanStitch(path, obj.run))
+      for (const path of planPaths(obj.paths, out)) push(beanStitch(path, obj.run))
       break
 
     case 'satin':
@@ -579,6 +597,8 @@ export function digitize(doc: Doc): DigitizeResult {
   const warnings: string[] = []
   const blocks: ColorBlock[] = []
   const floor = effectiveFloor(doc)
+  /** Which object closed the current block, so its area can hide a travel. */
+  let lastObjId: string | null = null
 
   // A knockdown exists to be sewn UNDER something. One that sews after the
   // design it was meant to support has flattened nothing and merely added
@@ -634,10 +654,60 @@ export function digitize(doc: Doc): DigitizeResult {
     const lastKey = blocks.length ? threadKey(doc.objects, last.label, last.color) : null
     if (last && lastKey === threadKey(doc.objects, obj.name, obj.color)) {
       // Same thread already in the needle — travel, do not stop the machine.
-      // slice(1) because the jump already lands on stitches[0]; repeating it
-      // as a sewn point is a zero-length stitch.
-      last.stitches.push({ ...stitches[0], jump: true, trim: true }, ...stitches.slice(1))
+      //
+      // How that travel is made is the question. Cutting unconditionally was
+      // the old behaviour and it is wrong whenever the two objects are
+      // near each other: two touching pieces of the same colour cost a
+      // thread cut, a tie-off, a tie-in and a few seconds, for a gap the
+      // needle could have stepped across.
+      // Where the travel would really run, which is NOT where the lock
+      // stitches are. A tie-off is laid along the direction of travel and
+      // deliberately steps a millimetre past the stitching it anchors, so it
+      // often sits just outside the shape — and judging the travel from
+      // there asked whether a point outside the fill was covered by the fill,
+      // and got the obvious answer every time.
+      let cut = last.stitches.length
+      while (cut > 0 && last.stitches[cut - 1].lock) cut--
+      let head = 0
+      while (head < stitches.length && stitches[head].lock) head++
+      const from = last.stitches[Math.max(0, cut - 1)]
+      const to = stitches[Math.min(head, stitches.length - 1)]
+      const gap = dist(from, to)
+      // Something already stitched, or about to be, that this travel could
+      // disappear underneath. Only fills count: a run or a satin covers a
+      // line, not an area, so nothing can hide beneath it.
+      // The covering area is what was STITCHED, which is the outline grown
+      // by its own pull compensation — a fill really does lay thread a
+      // fraction outside its outline, and testing against the raw outline
+      // said a travel starting on the fill's own last stitch was not
+      // covered by that fill.
+      const cover = [obj, doc.objects.find((q) => q.id === lastObjId)]
+        .filter((q): q is EmbObject => !!q && q.type === 'fill')
+        .flatMap((q) => {
+          const comp = Math.max(0, q.fill.pullComp)
+          const grown = comp > 0 ? offsetPathsChecked(q.paths, comp) : null
+          return toRegions(grown && !grown.failed && grown.paths.length ? grown.paths : q.paths)
+        })
+      const hidden = travelIsHidden(cover, from, to)
+      if (gap <= TRAVEL_TRIM_MM || hidden) {
+        // No cut, so the tie-off that ended the last object and the tie-in
+        // that starts this one are both waste — a knot of short stitches in
+        // the middle of one continuous thread. Drop them.
+        last.stitches.length = cut
+        const rest = stitches.slice(head)
+        if (!rest.length) continue
+        const tail = last.stitches[last.stitches.length - 1]
+        // Walk there in sewable steps. enforceMaxStitch would subdivide it
+        // anyway; doing it here keeps the intent visible.
+        if (tail) for (const q of resample([tail, rest[0]], MAX_STITCH_MM).slice(1, -1)) last.stitches.push(q)
+        last.stitches.push(...rest)
+      } else {
+        // slice(1) because the jump already lands on stitches[0]; repeating
+        // it as a sewn point is a zero-length stitch.
+        last.stitches.push({ ...stitches[0], jump: true, trim: true }, ...stitches.slice(1))
+      }
       last.label += ` + ${obj.name}`
+      lastObjId = obj.id
     } else {
       // The first penetration of a block is reached needle-UP: after a colour
       // change the needle is wherever the last block ended, which is nowhere
@@ -647,6 +717,7 @@ export function digitize(doc: Doc): DigitizeResult {
         label: obj.name,
         stitches: [{ ...stitches[0], jump: true }, ...stitches.slice(1)],
       })
+      lastObjId = obj.id
     }
   }
 
