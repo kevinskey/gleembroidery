@@ -1296,6 +1296,27 @@ export default function App() {
     mapObjects(selectedObjs.map((o) => o.id), () => (p) => ({ x: p.x + dx, y: p.y + dy }))
   }
 
+  /**
+   * Delete the selected objects.
+   *
+   * Plural on purpose: a multi-selection deletes as one step, so undo takes
+   * the whole lot back rather than restoring them one at a time.
+   */
+  const deleteSelection = () => {
+    if (!selectedObjs.length) return
+    const n = selectedObjs.length
+    const ids = selectedObjs.map((o) => o.id)
+    setDoc((d) => ({
+      ...d,
+      objects: d.objects.filter((o) => !ids.includes(o.id)),
+      // A group with no members left is a row in the panel that nothing
+      // belongs to, so it goes with them.
+      groups: d.groups.filter((g) => d.objects.some((o) => o.group === g.id && !ids.includes(o.id))),
+    }))
+    setSelectedIds([])
+    setNote(`${n} object${n === 1 ? '' : 's'} deleted — Cmd/Ctrl+Z puts ${n === 1 ? 'it' : 'them'} back`)
+  }
+
   const applyPreset = (p: StylePreset) => {
     if (!selectedObjs.length) { setNote('select an object first'); return }
     const ids = selectedObjs.map((o) => o.id)
@@ -2642,6 +2663,19 @@ export default function App() {
         setNote(`${n} stitch${n === 1 ? '' : 'es'} deleted`)
         return
       }
+      // Delete the SELECTION. Last of the three Delete handlers, because the
+      // stitch and node tools are editing something inside an object and
+      // their Delete means that smaller thing; with any other tool there is
+      // nothing smaller selected, so it means the object.
+      //
+      // The `typing` guard above is what keeps Backspace in a name field
+      // from deleting the design instead of a character.
+      if ((e.key === 'Delete' || e.key === 'Backspace')
+        && tool !== 'stitch' && tool !== 'node' && selectedObjs.length) {
+        e.preventDefault()
+        deleteSelection()
+        return
+      }
       if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'node' && selected && activeNode) {
         e.preventDefault()
         const shapes = [...shapesOf(selected)]
@@ -3191,9 +3225,28 @@ export default function App() {
               )
             })}
             {doc.objects.length > 0 && (
-              <div className={`endpad${dragOver === doc.objects.length ? ' drop' : ''}`}>
-                {rowDrag !== null ? 'sew last' : ''}
-              </div>
+              <>
+                <div className={`endpad${dragOver === doc.objects.length ? ' drop' : ''}`}>
+                  {rowDrag !== null ? 'sew last' : ''}
+                </div>
+                <div className="tree-foot">
+                  <button disabled={!selectedObjs.length} onClick={deleteSelection}
+                    title="Delete the selected objects (Delete)">
+                    Delete{selectedObjs.length > 1 ? ` ${selectedObjs.length}` : ''}
+                  </button>
+                  <button disabled={!selectedObjs.length} onClick={runDuplicate}
+                    title="Duplicate (Cmd/Ctrl+D)">Duplicate</button>
+                  <button
+                    title="Remove every object from this design"
+                    onClick={() => {
+                      if (!window.confirm(
+                        `Remove all ${doc.objects.length} objects from “${doc.name}”?`
+                        + '\n\nCmd/Ctrl+Z puts them back.')) return
+                      setDoc((d) => ({ ...d, objects: [], groups: [] }))
+                      setSelectedIds([])
+                    }}>Clear all</button>
+                </div>
+              </>
             )}
           </div>
 

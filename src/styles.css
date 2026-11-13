@@ -373,6 +373,16 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
   position: absolute; left: 4px; right: 4px; top: -2px;
   height: 2px; background: var(--accent); border-radius: 2px;
 }
+/* The actions that work on what is selected in the tree, under the tree —
+   because that is where you are looking when you decide to use them. */
+.tree-foot {
+  display: flex; gap: 5px; flex-wrap: wrap;
+  padding: 8px 4px 2px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+}
+.tree-foot button { font-size: 11px; padding: 3px 8px; }
+
 .trow-name { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trow-type { font-size: 10px; color: var(--muted); }
 .trow .eye { background: none; border: 0; padding: 0 2px; opacity: 0.5; }
