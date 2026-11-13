@@ -79,6 +79,23 @@ export interface SatinParams {
    * land at an angle.
    */
   lean: number
+  /**
+   * Breaking a wide bar into sewable pieces.
+   *
+   * The bar IS the stitch, so a column's width is a stitch length: past
+   * ~10 mm it snags and is refused outright. Splitting is how a digitizer
+   * sews a wide column anyway — an extra penetration partway across, with
+   * the split points staggered so they do not line up into a visible seam.
+   */
+  split: SatinSplitParams
+}
+
+export interface SatinSplitParams {
+  enabled: boolean
+  /** Longest single stitch across the column, mm. */
+  maxLength: number
+  /** How far the split point wanders bar to bar, 0 (a seam) to 1 (scattered). */
+  stagger: number
 }
 
 export interface FillParams {
@@ -432,12 +449,25 @@ export const DEFAULT_APPLIQUE = (): AppliqueParams => ({
   borderStyle: 'satin',
 })
 
+/**
+ * No splitting — for the columns the engine builds for itself.
+ *
+ * Underlay, appliqué tack-downs and borders, and a fill's satin edge are all
+ * narrow by construction and have their own checks; an extra penetration in
+ * every bar of a 1.6 mm tack-down would be noise, not safety.
+ */
+export const NO_SPLIT = (): SatinSplitParams => ({ enabled: false, maxLength: 6, stagger: 0.7 })
+
 export const DEFAULT_SATIN = (): SatinParams => ({
   width: 2.5,
   density: 0.4,
   pullComp: 0.2,
   underlay: ['center'],
   lean: 0,
+  // Off by default: a column inside the snag limit needs no split, and an
+  // unasked-for extra hole in every bar is a change to the look of the
+  // stitching. 6 mm leaves margin under the 10 mm limit for the stagger.
+  split: { enabled: false, maxLength: 6, stagger: 0.7 },
 })
 
 export const DEFAULT_FILL = (): FillParams => ({

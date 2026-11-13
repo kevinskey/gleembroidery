@@ -10,7 +10,7 @@
 //   * colour grouping, since each change is a manual re-thread — adjacent
 //     objects sharing a colour become ONE block.
 
-import { FILL_UNDERLAY_ORDER, orderedUnderlay, type Doc, type EmbObject, type Pt } from './model'
+import { FILL_UNDERLAY_ORDER, NO_SPLIT, orderedUnderlay, type Doc, type EmbObject, type Pt } from './model'
 import { nodeFractions } from './nodes'
 import type { ColorBlock, Stitch, StitchPlan } from './stitches'
 import { dist, resample, scanlineSpans, toRegions } from './geometry'
@@ -249,7 +249,7 @@ export function appliquePhases(
   for (const ring of rings) {
     const params = {
       width: Math.max(0.6, p.tackWidth), density: Math.max(0.3, p.tackDensity),
-      pullComp: 0, underlay: [] as never[], lean: 0,
+      pullComp: 0, underlay: [] as never[], lean: 0, split: NO_SPLIT(),
     }
     const check = satinCheck(ring, params)
     if (check.errors.length) {
@@ -272,6 +272,7 @@ export function appliquePhases(
         // over; a serged edge is made of slanted loops, so slanted bars read
         // as one.
         lean: p.borderStyle === 'overlock' ? OVERLOCK_LEAN : 0,
+        split: NO_SPLIT(),
       }
       const check = satinCheck(ring, params)
       if (check.errors.length) {
@@ -472,7 +473,7 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
               density: p.border.density,
               pullComp: 0,
               underlay: [],
-              lean: 0,
+              lean: 0, split: NO_SPLIT(),
             }
             // The border is satin and must pass the SAME check the satin tool
             // does. It used to bypass it entirely, so the engine refused a

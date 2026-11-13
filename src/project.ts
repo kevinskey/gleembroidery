@@ -130,7 +130,7 @@ export function objectOut(o: EmbObject) {
       })),
     })),
     run: { ...o.run },
-    satin: { ...o.satin },
+    satin: { ...o.satin, split: { ...o.satin.split } },
     fill: { ...o.fill, border: { ...o.fill.border } },
   }
 }
@@ -435,6 +435,11 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       pullComp: num(satin.pullComp, dSatin.pullComp),
       underlay: underlayIn(satin.underlay, SATIN_UNDERLAY_ORDER, LEGACY_SATIN_UNDERLAY, dSatin.underlay),
       lean: num(satin.lean, dSatin.lean),
+      split: {
+        enabled: isObj(satin.split) ? satin.split.enabled === true : dSatin.split.enabled,
+        maxLength: num(isObj(satin.split) ? satin.split.maxLength : undefined, dSatin.split.maxLength),
+        stagger: num(isObj(satin.split) ? satin.split.stagger : undefined, dSatin.split.stagger),
+      },
     },
     fill: {
       angle: num(fill.angle, dFill.angle),

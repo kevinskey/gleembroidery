@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
+import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM } from './satin'
 import { close, segDist, toRegions } from './geometry'
 import { useHistory } from './history'
 import { CELL_MM, analyseDensity } from './density'
@@ -2032,6 +2033,34 @@ export default function App() {
                       { id: 'zigzag', label: 'Zigzag' },
                     ]}
                     onChange={(next) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, underlay: next } }))} />
+                  <div className="row wide">
+                    <label>
+                      <input type="checkbox" checked={selected.satin.split.enabled}
+                        onChange={(e) => patch(selected.id, (o) => ({
+                          ...o, satin: { ...o.satin, split: { ...o.satin.split, enabled: e.target.checked } },
+                        }))} />
+                      {' '}Split long stitches
+                    </label>
+                    <span className="dim">
+                      The bar IS the stitch, so a column over {MAX_SATIN_MM} mm snags and is
+                      refused. Splitting adds a penetration partway across so a wider one can
+                      be sewn — up to {MAX_SPLIT_SATIN_MM} mm.
+                    </span>
+                  </div>
+                  {selected.satin.split.enabled && (
+                    <>
+                      <Num label="Longest stitch (mm)" value={selected.satin.split.maxLength}
+                        step={0.5} min={1} max={MAX_SATIN_MM}
+                        onChange={(v) => patch(selected.id, (o) => ({
+                          ...o, satin: { ...o.satin, split: { ...o.satin.split, maxLength: v } },
+                        }), 'satin.split.maxLength')} />
+                      <Num label="Split stagger (0–1)" value={selected.satin.split.stagger}
+                        step={0.1} min={0} max={1}
+                        onChange={(v) => patch(selected.id, (o) => ({
+                          ...o, satin: { ...o.satin, split: { ...o.satin.split, stagger: v } },
+                        }), 'satin.split.stagger')} />
+                    </>
+                  )}
                   <div className="row wide">
                     <label>Angle guides</label>
                     {selected.twoRail ? (

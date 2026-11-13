@@ -10,7 +10,7 @@
 //     OUTER rail keeps the requested density instead of the spine doing so.
 //   * Pull compensation widens the column, because satin drags its edges in.
 
-import { SATIN_UNDERLAY_ORDER, orderedUnderlay, type PuffParams, type Pt, type RunParams, type SatinParams, type SatinUnderlay } from './model'
+import { NO_SPLIT, SATIN_UNDERLAY_ORDER, orderedUnderlay, type PuffParams, type Pt, type RunParams, type SatinParams, type SatinUnderlay } from './model'
 import type { Stitch } from './stitches'
 import { dedupe, dist, isClosed, pathLength, resample, tangentAt } from './geometry'
 
@@ -465,7 +465,9 @@ export function satinColumn(
   const cumAll = cumulative(pts)
 
   const corners = findCorners(pts)
-  if (!corners.length) return smoothColumn(pts, p, closed, 1, resolved, 0).stitches
+  if (!corners.length) {
+    return applySatinSplit(smoothColumn(pts, p, closed, 1, resolved, 0).stitches, p)
+  }
 
   const out: Stitch[] = []
   let side = 1
@@ -485,6 +487,64 @@ export function satinColumn(
   const tailSeg = pts.slice(from)
   if (tailSeg.length >= 2) {
     out.push(...smoothColumn(tailSeg, p, false, side, resolved, cumAll[from]).stitches)
+  }
+  return applySatinSplit(out, p)
+}
+
+// ---------------------------------------------------------------------------
+// Satin splitting
+// ---------------------------------------------------------------------------
+//
+// A satin bar is one stitch from rail to rail, so the column's width IS the
+// stitch length. Past about 10 mm that stitch catches on everything — a
+// fingernail, a seatbelt, a washing machine — and pulls, which is why a wide
+// column is otherwise refused outright.
+//
+// Splitting is the way a digitizer sews a wide column anyway: each bar is
+// broken into two or more stitches, with a penetration partway across. The
+// thread still lies in one direction and still reads as satin, but no single
+// stitch is long enough to snag.
+//
+// THE SPLIT POINTS MUST STAGGER. Put them all at the same fraction across and
+// the column grows a visible seam down its middle — a line of needle holes in
+// a surface whose whole appeal is being unbroken. Staggering scatters them so
+// no line forms. It is done from a deterministic phase, NOT from random
+// numbers: the same design must always produce the same stitch file.
+
+/** Widest column that still makes sense as a SPLIT satin, mm. Past this, fill. */
+export const MAX_SPLIT_SATIN_MM = 30
+
+/**
+ * Break bars longer than `maxLength` into sewable pieces.
+ *
+ * A post-pass over emitted stitches rather than something woven into each
+ * generator: every satin engine here emits a flat list in which consecutive
+ * points are the ends of a bar, so one pass covers the spine column, the
+ * two-rail column and the mitred corners alike.
+ */
+export function applySatinSplit(stitches: Stitch[], p: SatinParams): Stitch[] {
+  const sp = p.split
+  if (!sp?.enabled || stitches.length < 2) return stitches
+  const maxLength = Math.max(1, sp.maxLength)
+  const stagger = Math.max(0, Math.min(1, sp.stagger))
+  const out: Stitch[] = [stitches[0]]
+  for (let i = 1; i < stitches.length; i++) {
+    const a = stitches[i - 1], b = stitches[i]
+    const L = Math.hypot(b.x - a.x, b.y - a.y)
+    if (b.jump || a.jump || L <= maxLength) { out.push(b); continue }
+    // The golden ratio spreads consecutive bars across the whole stagger
+    // range without ever repeating a phase — the same job random numbers
+    // would do, and reproducible, which they are not.
+    const phase = (i * 0.6180339887) % 1
+    const shift = (phase - 0.5) * stagger
+    // Count the pieces from the WORST case, so the shift cannot push a piece
+    // back over the limit the split exists to respect.
+    const n = Math.max(2, Math.ceil((L * (1 + Math.abs(shift))) / maxLength))
+    for (let k = 1; k < n; k++) {
+      const f = Math.max(0.05, Math.min(0.95, (k + shift) / n))
+      out.push({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, split: true })
+    }
+    out.push(b)
   }
   return out
 }
@@ -531,6 +591,7 @@ function satinUnderlayLayer(pts: Pt[], p: SatinParams, layer: SatinUnderlay): St
         // Underlay is never leaned: it is structural, and a slanted underlay
         // would show through the top stitching it is meant to hide under.
         lean: 0,
+        split: NO_SPLIT(),
       })
     default:
       return []
@@ -720,7 +781,7 @@ export function satinTwoRail(
   if (!out.length || dist(out[out.length - 1], ends[first]) > 1e-9) out.push(ends[first])
   const second = first === 0 ? 1 : 0
   if (dist(out[out.length - 1], ends[second]) > 1e-9) out.push(ends[second])
-  return out
+  return applySatinSplit(out, p)
 }
 
 /**
@@ -821,8 +882,28 @@ export function twoRailCheck(railA: Pt[], railB: Pt[], p: SatinParams): SatinChe
   const comp = Math.max(0, p.pullComp)
   const widest = Math.max(...widths) + comp
   const narrowest = Math.min(...widths) + comp
-  if (widest > MAX_SATIN_MM)
-    errors.push(`the rails are ${widest.toFixed(1)} mm apart at their widest, over the ${MAX_SATIN_MM} mm limit — use a fill, or split the column`)
+  // Same rule as the spine column: splitting is what makes a wide bar
+  // sewable, so the limit depends on whether it is on.
+  if (p.split?.enabled) {
+    if (p.split.maxLength > MAX_SATIN_MM) {
+      errors.push(
+        `split length ${p.split.maxLength.toFixed(1)} mm is itself over the ${MAX_SATIN_MM} mm ` +
+          'limit — splitting there does not make the stitches sewable')
+    }
+    if (widest > MAX_SPLIT_SATIN_MM) {
+      errors.push(
+        `the rails are ${widest.toFixed(1)} mm apart at their widest, over the ` +
+          `${MAX_SPLIT_SATIN_MM} mm limit even split — use a fill`)
+    } else if (widest > MAX_SATIN_MM) {
+      warnings.push(
+        `the rails reach ${widest.toFixed(1)} mm apart and are only sewable because the column ` +
+          'is split; the split line will show under raking light')
+    }
+  } else if (widest > MAX_SATIN_MM) {
+    errors.push(
+      `the rails are ${widest.toFixed(1)} mm apart at their widest, over the ${MAX_SATIN_MM} mm ` +
+        'limit — use a fill, or turn on satin splitting')
+  }
   if (narrowest < MIN_SATIN_MM)
     errors.push(`the rails close to ${narrowest.toFixed(2)} mm, below the ${MIN_SATIN_MM} mm floor — use a bean run, or pull the rails apart`)
 
@@ -955,8 +1036,28 @@ export function satinCheck(path: Pt[], p: SatinParams): SatinCheck {
   const half = w / 2
   const pts = dedupe(path)
 
-  if (w > MAX_SATIN_MM)
-    errors.push(`${w.toFixed(1)} mm column exceeds the ${MAX_SATIN_MM} mm limit — use a fill, or split the column`)
+  // The bar IS the stitch, so width is a stitch length. Splitting puts an
+  // extra penetration partway across, which is exactly what makes a wider
+  // column sewable — so the limit that applies depends on whether it is on.
+  if (p.split?.enabled) {
+    if (p.split.maxLength > MAX_SATIN_MM) {
+      errors.push(
+        `split length ${p.split.maxLength.toFixed(1)} mm is itself over the ${MAX_SATIN_MM} mm ` +
+          'limit — splitting there does not make the stitches sewable')
+    }
+    if (w > MAX_SPLIT_SATIN_MM) {
+      errors.push(
+        `${w.toFixed(1)} mm column is over the ${MAX_SPLIT_SATIN_MM} mm limit even split — use a fill`)
+    } else if (w > MAX_SATIN_MM) {
+      warnings.push(
+        `${w.toFixed(1)} mm column is only sewable because it is split; the split line will show ` +
+          'under raking light — a fill may read better')
+    }
+  } else if (w > MAX_SATIN_MM) {
+    errors.push(
+      `${w.toFixed(1)} mm column exceeds the ${MAX_SATIN_MM} mm limit — use a fill, ` +
+        'or turn on satin splitting')
+  }
   if (w < MIN_SATIN_MM)
     errors.push(`${w.toFixed(2)} mm column is below the ${MIN_SATIN_MM} mm floor — use a bean run`)
   if (pts.length < 2 || pathLength(pts) < p.density * 2) {

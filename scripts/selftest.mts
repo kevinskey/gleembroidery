@@ -12,7 +12,7 @@ import { SCHEMA_VERSION, SIGNATURE_GEOMETRY_KEYS, ProjectError, deserialize, doc
 import { clonePlan, deleteStitches, freeze, freezeState, moveStitches, penetrationCount, pickStitch, pickStitchesIn } from '../src/stitchedit'
 import { appliqueCutSvg, packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { NOMINAL_PER_MM2, SEVERE_RATIO, WARN_RATIO, analyseDensity, densityColour } from '../src/density'
-import { GUIDE_REACH_MM, MAX_BAR_ANGLE, OVERLOCK_LEAN, PUFF_MAX_MM, PUFF_MIN_MM, puffCaps, puffCheck } from '../src/satin'
+import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM, GUIDE_REACH_MM, MAX_BAR_ANGLE, OVERLOCK_LEAN, PUFF_MAX_MM, PUFF_MIN_MM, puffCaps, puffCheck } from '../src/satin'
 import { DEFAULT_KNOCKDOWN, DEFAULT_PUFF, type Doc } from '../src/model'
 import { unionSelfChecked } from '../src/boolean'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
@@ -453,6 +453,7 @@ console.log('\n# project save / reopen')
   doc.objects[1].run = { length: 1.75 }
   doc.objects[1].satin = {
     width: 4.2, density: 0.31, pullComp: 0.11, underlay: ['center', 'zigzag'], lean: 18,
+    split: { enabled: true, maxLength: 5.5, stagger: 0.4 },
   }
   doc.objects[0].knockdown = { spacing: 2.6, margin: 2.1, angle: 20, length: 3.5 }
   doc.objects[1].visible = false
@@ -487,6 +488,8 @@ console.log('\n# project save / reopen')
     'the appliqué recipe survives')
   ok(back.objects[1].applique.borderStyle === 'overlock', 'including a faux overlock edge')
   ok(back.objects[1].satin.lean === 18, 'the satin bar lean survives')
+  ok(back.objects[1].satin.split.enabled === true && back.objects[1].satin.split.maxLength === 5.5,
+    'the satin split recipe survives')
   ok(back.objects[0].knockdown.margin === 2.1, 'the knockdown recipe survives')
   ok(back.objects[1].guides?.length === 2 && back.objects[1].guides[1].b.x === 12,
     'angle guides survive')
@@ -2426,6 +2429,113 @@ console.log('\n# the plan regenerates when the document changes')
     const ms = (performance.now() - t0) / 10
     ok(ms < 5, 'and 20k points hash fast enough not to drop a drag frame',
       `${ms.toFixed(2)} ms`)
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# satin splitting')
+{
+  const line: Pt[] = [{ x: 0, y: 0 }, { x: 50, y: 0 }]
+  const wide = (over: Partial<ReturnType<typeof DEFAULT_SATIN>> = {}) => ({
+    ...DEFAULT_SATIN(), width: 14, density: 0.5, pullComp: 0, underlay: [], lean: 0, ...over,
+  })
+
+  // --- without splitting, a wide column is still REFUSED
+  {
+    const c = satinCheck(line, wide())
+    ok(c.errors.some((e) => new RegExp(`${MAX_SATIN_MM} mm limit`).test(e)),
+      'a 14 mm column is refused when splitting is off', c.errors[0] ?? '')
+    ok(c.errors.some((e) => /satin splitting/.test(e)),
+      'and the message says what to turn on')
+  }
+
+  // --- with splitting, it is allowed, and the bars really are broken up
+  {
+    const p = wide({ split: { enabled: true, maxLength: 5, stagger: 0.7 } })
+    const c = satinCheck(line, p)
+    ok(c.errors.length === 0, 'the same column is allowed once splitting is on', c.errors[0] ?? '')
+    ok(c.warnings.some((w) => /split line will show/.test(w)),
+      'with an honest warning that the split will be visible')
+
+    const st = satinColumn(line, p)
+    let longest = 0
+    for (let i = 1; i < st.length; i++) longest = Math.max(longest, dist(st[i - 1], st[i]))
+    ok(longest <= 5 + 1e-6, 'and no stitch is longer than the split length',
+      `${longest.toFixed(2)} mm`)
+
+    // It is still a 14 mm column: splitting adds holes, it does not narrow it.
+    const spanY = Math.max(...st.map((s) => s.y)) - Math.min(...st.map((s) => s.y))
+    ok(Math.abs(spanY - 14) < 0.2, 'the column is still its full width', `${spanY.toFixed(2)} mm`)
+
+    const unsplit = satinColumn(line, { ...p, split: { enabled: false, maxLength: 5, stagger: 0 } })
+    ok(st.length > unsplit.length, 'splitting adds penetrations', `${unsplit.length} -> ${st.length}`)
+  }
+
+  // --- THE SPLIT POINTS MUST STAGGER, or the column grows a seam
+  {
+    const p = (stagger: number) => wide({ split: { enabled: true, maxLength: 5, stagger } })
+    // Pick out the added penetrations and see how far across they land.
+    const acrossOf = (stagger: number) =>
+      satinColumn(line, p(stagger)).filter((s) => s.split).map((s) => s.y)
+
+    const seam = acrossOf(0)
+    const scattered = acrossOf(1)
+    const spread = (ys: number[]) => {
+      // How many DISTINCT positions across the column the splits use.
+      return new Set(ys.map((y) => Math.round(y * 2))).size
+    }
+    ok(seam.length > 10 && scattered.length > 10, 'both produce plenty of splits')
+    ok(spread(scattered) > spread(seam),
+      'staggering scatters the split points instead of lining them up',
+      `${spread(seam)} positions -> ${spread(scattered)}`)
+  }
+
+  // --- determinism: no random numbers anywhere in here
+  {
+    const p = wide({ split: { enabled: true, maxLength: 5, stagger: 0.7 } })
+    ok(JSON.stringify(satinColumn(line, p)) === JSON.stringify(satinColumn(line, p)),
+      'splitting is deterministic')
+  }
+
+  // --- splitting does not make ANY width sewable
+  {
+    const huge = wide({ width: 40, split: { enabled: true, maxLength: 5, stagger: 0.7 } })
+    ok(satinCheck(line, huge).errors.some((e) => new RegExp(`${MAX_SPLIT_SATIN_MM} mm`).test(e)),
+      'a 40 mm column is refused even split', satinCheck(line, huge).errors[0] ?? '')
+  }
+
+  // --- a split length over the snag limit is not a split at all
+  {
+    const silly = wide({ split: { enabled: true, maxLength: 12, stagger: 0.7 } })
+    ok(satinCheck(line, silly).errors.some((e) => /does not make the stitches sewable/.test(e)),
+      'splitting at 12 mm is refused — it changes nothing')
+  }
+
+  // --- it works on a TWO-RAIL column too
+  {
+    const railA: Pt[] = [{ x: 0, y: 0 }, { x: 50, y: 0 }]
+    const railB: Pt[] = [{ x: 0, y: 13 }, { x: 50, y: 13 }]
+    const p = wide({ split: { enabled: true, maxLength: 5, stagger: 0.7 } })
+    ok(twoRailCheck(railA, railB, p).errors.length === 0,
+      'a wide two-rail column is allowed when split',
+      twoRailCheck(railA, railB, p).errors[0] ?? '')
+    ok(twoRailCheck(railA, railB, { ...p, split: { enabled: false, maxLength: 5, stagger: 0 } })
+      .errors.length > 0, 'and refused when it is not')
+    const st = satinTwoRail(railA, railB, p)
+    let longest = 0
+    for (let i = 1; i < st.length; i++) longest = Math.max(longest, dist(st[i - 1], st[i]))
+    ok(longest <= 5 + 1e-6, 'with no over-long stitch', `${longest.toFixed(2)} mm`)
+  }
+
+  // --- the engine's OWN columns are never split behind the user's back
+  {
+    // A tack-down is 1.6 mm wide. Splitting it would put a hole in the middle
+    // of every bar of a stitch meant to be invisible.
+    const ring = [...rect(0, 0, 40, 30), { x: 0, y: 0 }]
+    const phases = appliquePhases(newObject({ name: 'A', type: 'applique', paths: [ring] }), [])
+    ok(!phases.some((ph) => ph.stitches.some((s) => s.split)),
+      'no appliqué phase comes back split')
   }
 }
 

@@ -21,6 +21,13 @@ export interface Stitch extends Pt {
    * how every trim ended up restarting with nothing anchoring the thread.
    */
   lock?: boolean
+  /**
+   * A penetration added partway across a satin bar to keep it sewable.
+   *
+   * Marked only so the inspection view can show WHY an extra hole is there;
+   * the machine treats it as an ordinary stitch, which is exactly what it is.
+   */
+  split?: boolean
 }
 
 export interface ColorBlock {
