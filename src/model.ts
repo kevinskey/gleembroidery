@@ -11,6 +11,7 @@
 // units; nothing above it should think in machine coordinates.
 
 import type { Shape } from './nodes'
+import type { TextSpec } from './text'
 
 export interface Pt {
   x: number
@@ -132,6 +133,14 @@ export interface EmbObject {
    * someone added a second path would be an unpleasant surprise.
    */
   twoRail?: boolean
+  /**
+   * The typed text this object was made from, when it was.
+   *
+   * Kept so lettering stays EDITABLE: change the word or the face and the
+   * outlines are regenerated. Without it a name becomes a pile of polygons
+   * the moment it is set, and fixing a typo means deleting and retyping.
+   */
+  text?: TextSpec
   run: RunParams
   satin: SatinParams
   fill: FillParams

@@ -95,6 +95,23 @@ export function maskArea(mask: Uint8Array): number {
   return n
 }
 
+/**
+ * Mask every pixel that is painted at all, rather than flooding from a seed.
+ *
+ * Text is the case this exists for: a word is many separate glyphs, so there
+ * is no one pixel to flood from, and every one of them is wanted. Reading
+ * alpha also means the glyphs can be drawn on a transparent canvas and taken
+ * at full quality, with no colour matching to go wrong.
+ */
+export function alphaMask(img: Raster, threshold = 128): Uint8Array {
+  const { width: w, height: h } = img
+  const mask = new Uint8Array(w * h)
+  for (let i = 0, p = 3; i < mask.length; i++, p += 4) {
+    if (img.data[p] >= threshold) mask[i] = 1
+  }
+  return mask
+}
+
 const key = (x: number, y: number) => `${x.toFixed(1)},${y.toFixed(1)}`
 
 /**
@@ -214,12 +231,20 @@ export function traceRegionAt(img: Raster, sx: number, sy: number, opt: TraceOpt
   const area = maskArea(mask)
   if (area === 0) return { paths: [], area: 0, warnings: ['nothing was selected there'] }
 
+  const { paths, dropped } = contoursToPaths(maskContours(mask, w, h), opt)
+  if (dropped) warnings.push(`${dropped} speck${dropped === 1 ? ' was' : 's were'} too small to sew — dropped`)
+  if (!paths.length) warnings.push('the traced area was too small to sew')
+  return { paths, area, warnings }
+}
+
+/** Scale contours out of pixel space, dropping anything too small to sew. */
+export function contoursToPaths(
+  loops: Pt[][], opt: TraceOptions = {},
+): { paths: Pt[][]; dropped: number } {
   const pxPerMm = opt.pxPerMm && opt.pxPerMm > 0 ? opt.pxPerMm : 1
   const origin = opt.originMm ?? { x: 0, y: 0 }
   const simplifyMm = opt.simplifyMm ?? 0.2
   const minAreaPx = opt.minAreaPx ?? 12
-
-  const loops = maskContours(mask, w, h)
   const paths: Pt[][] = []
   let dropped = 0
   for (const loop of loops) {
@@ -235,7 +260,5 @@ export function traceRegionAt(img: Raster, sx: number, sy: number, opt: TraceOpt
     const thin = simplify(mm, simplifyMm)
     if (thin.length >= 3) paths.push(thin)
   }
-  if (dropped) warnings.push(`${dropped} speck${dropped === 1 ? '' : 's'} too small to sew were dropped`)
-  if (!paths.length) warnings.push('the traced area was too small to sew')
-  return { paths, area, warnings }
+  return { paths, dropped }
 }

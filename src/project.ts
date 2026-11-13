@@ -91,6 +91,7 @@ function objectOut(o: EmbObject) {
     // generate a subtly different plan from the one that was approved.
     paths: o.paths.map((p) => p.map((q) => [q.x, q.y])),
     ...(o.twoRail ? { twoRail: true } : {}),
+    ...(o.text ? { text: { ...o.text } } : {}),
     // The editable outline rides alongside the flattened cache. Without it a
     // reopened project could be sewn but never shaped again.
     shapes: o.shapes?.map((sh) => ({
@@ -272,6 +273,16 @@ function objectIn(v: unknown, index: number): EmbObject | null {
     paths,
     shapes: shapesIn(v.shapes),
     ...(v.twoRail === true ? { twoRail: true } : {}),
+    ...(isObj(v.text) && typeof v.text.content === 'string' ? {
+      text: {
+        content: v.text.content,
+        family: typeof v.text.family === 'string' ? v.text.family : 'Georgia',
+        sizeMm: num(v.text.sizeMm, 12),
+        bold: v.text.bold === true,
+        italic: v.text.italic === true,
+        trackingMm: num(v.text.trackingMm, 0),
+      },
+    } : {}),
     run: { length: num(run.length, dRun.length) },
     satin: {
       width: num(satin.width, dSatin.width),

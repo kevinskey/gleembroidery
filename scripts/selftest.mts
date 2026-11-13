@@ -1477,7 +1477,7 @@ console.log('\n# auto-trace (magic wand)')
     const speck = raster(['....', '.#..', '....'], PAL)
     const tiny = traceRegionAt(speck, 1, 1, { minAreaPx: 12 })
     ok(tiny.paths.length === 0, 'a single-pixel speck is not turned into an object')
-    ok(tiny.warnings.join(' ').includes('small'), 'and the reason is given', tiny.warnings[0] ?? '')
+    ok(tiny.warnings.join(' ').includes('too small to sew'), 'and the reason is given', tiny.warnings[0] ?? '')
   }
 
   // --- simplification keeps the outline where it was

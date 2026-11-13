@@ -4,6 +4,7 @@ import { readDst, writeDst } from './dst'
 import { close, toRegions } from './geometry'
 import { useHistory } from './history'
 import { DEFAULT_TOLERANCE, traceRegionAt, type Raster } from './trace'
+import { DEFAULT_TEXT, SUGGESTED_FACES, textToOutlines, type TextSpec } from './text'
 import {
   arcThrough, autoSmooth, deleteNode, flattenShape, handlesOf, insertNode, moveHandle, moveNode,
   nearestSegment, pathToShape, shapesToPaths, toggleSmooth, type PathNode, type Shape,
@@ -59,7 +60,7 @@ const ROTATE_PX = 26
 const AUTOSAVE_KEY = 'gleembroidery.autosave.v1'
 
 /** Canvas tools. 'select' picks/moves/resizes; empty space still pans. */
-type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column' | 'wand'
+type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column' | 'wand' | 'text'
 
 const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
   {
@@ -113,6 +114,15 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
         <path d="M3 14L13 4" stroke="currentColor" strokeWidth="1.6" fill="none" />
         <path d="M15 2l.7 1.8L17.5 4.5l-1.8.7L15 7l-.7-1.8L12.5 4.5l1.8-.7z" fill="currentColor" />
         <path d="M19 8l.5 1.2 1.2.5-1.2.5L19 11.5l-.5-1.3-1.2-.5 1.2-.5z" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
+    id: 'text', label: 'Text', hint: 'Click to set a line of lettering; edit the words, face and size in Properties (T)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M3 3.5h16M11 3.5V13" stroke="currentColor" strokeWidth="1.7" fill="none" />
+        <path d="M8 13h6" stroke="currentColor" strokeWidth="1.3" fill="none" />
       </svg>
     ),
   },
@@ -649,6 +659,56 @@ export default function App() {
     }
   }
 
+  /**
+   * Regenerate an object's outlines from its text spec.
+   *
+   * Lettering is re-rasterised on every edit rather than transformed, so a
+   * face change or a longer word comes out as that face and that word, not
+   * as the old shapes stretched to fit.
+   */
+  const applyText = useCallback((id: string, spec: TextSpec, at?: Pt) => {
+    const out = textToOutlines(spec)
+    for (const w of out.warnings) setNote(w)
+    if (!out.paths.length) return
+    const paths = at ? out.paths.map((r) => r.map((q) => ({ x: q.x + at.x, y: q.y + at.y }))) : null
+    patch(id, (o) => {
+      // Keep the lettering where it already sits: re-rasterising recentres on
+      // the origin, so without this every edit would teleport it.
+      const b = paths ? null : bounds(o.paths)
+      const c = b ? { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 } : { x: 0, y: 0 }
+      return {
+        ...o,
+        text: spec,
+        shapes: undefined,
+        // Follow the words in the sewing sequence, but only while the name
+        // has not been set by hand — renaming over someone's own label would
+        // lose it the next time they fixed a typo.
+        name: o.name === o.text?.content ? spec.content || o.name : o.name,
+        paths: paths ?? out.paths.map((r) => r.map((q) => ({ x: q.x + c.x, y: q.y + c.y }))),
+      }
+    }, 'text')
+  }, [])
+
+  /** Place a new line of lettering. */
+  const addText = useCallback((at: Pt) => {
+    const spec = DEFAULT_TEXT()
+    const out = textToOutlines(spec)
+    for (const w of out.warnings) setNote(w)
+    if (!out.paths.length) return
+    const n = doc.objects.length
+    const obj = newObject({
+      name: spec.content,
+      color: PALETTE[n % PALETTE.length],
+      type: 'fill',
+      text: spec,
+      paths: out.paths.map((r) => r.map((q) => ({ x: q.x + at.x, y: q.y + at.y }))),
+    })
+    setDoc((d) => ({ ...d, objects: [...d.objects, obj] }))
+    setSelectedId(obj.id)
+    setSim(null)
+    setNote(`${out.widthMm.toFixed(1)} × ${out.heightMm.toFixed(1)} mm — edit the words in Properties`)
+  }, [doc.objects.length, setDoc, setSelectedId])
+
   /** Trace whatever colour was clicked into a new object. */
   const wandAt = useCallback((p: Pt) => {
     if (!backdrop) { setNote('Load a reference image first — Artwork ▸ Image'); return }
@@ -898,6 +958,7 @@ export default function App() {
     }
     if (e.button !== 0) return
     const p = atMm(e)
+    if (tool === 'text') { addText(p); return }
     if (tool === 'pen' || tool === 'column') {
       // Clicking the first node closes the path — the standard way to finish a
       // region, and the only one that does not need a separate control.
@@ -1228,7 +1289,7 @@ export default function App() {
         return
       }
       const pick: Record<string, Tool> = {
-        v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column', w: 'wand',
+        v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column', w: 'wand', t: 'text',
         r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand',
       }
       const t = pick[e.key.toLowerCase()]
@@ -1495,6 +1556,49 @@ export default function App() {
                 <Text label="Name" placeholder="optional" value={selected.thread.name ?? ''}
                   onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, name: v || undefined } }), 'thread.name')} />
               </fieldset>
+
+              {/* Lettering stays editable: the words, face and size are the
+                  object, and the outlines are regenerated from them. */}
+              {selected.text && (
+                <fieldset>
+                  <legend>Lettering</legend>
+                  <div className="row wide">
+                    <label>Text</label>
+                    <input
+                      type="text" value={selected.text.content}
+                      onChange={(e) => applyText(selected.id, { ...selected.text!, content: e.target.value })} />
+                  </div>
+                  <div className="row wide">
+                    <label>Font</label>
+                    <input
+                      type="text" list="gw-faces" value={selected.text.family}
+                      placeholder="any font on this Mac"
+                      onChange={(e) => applyText(selected.id, { ...selected.text!, family: e.target.value })} />
+                    <datalist id="gw-faces">
+                      {SUGGESTED_FACES.map((f) => <option key={f} value={f} />)}
+                    </datalist>
+                  </div>
+                  <Num label="Letter height (mm)" value={selected.text.sizeMm} step={0.5} min={3} max={200}
+                    onChange={(v) => applyText(selected.id, { ...selected.text!, sizeMm: v })} />
+                  <Num label="Letter spacing (mm)" value={selected.text.trackingMm} step={0.1} min={-5} max={20}
+                    onChange={(v) => applyText(selected.id, { ...selected.text!, trackingMm: v })} />
+                  <div className="row wide">
+                    <label>Style</label>
+                    <div className="checks">
+                      <label className="check">
+                        <input type="checkbox" checked={selected.text.bold}
+                          onChange={(e) => applyText(selected.id, { ...selected.text!, bold: e.target.checked })} />
+                        Bold
+                      </label>
+                      <label className="check">
+                        <input type="checkbox" checked={selected.text.italic}
+                          onChange={(e) => applyText(selected.id, { ...selected.text!, italic: e.target.checked })} />
+                        Italic
+                      </label>
+                    </div>
+                  </div>
+                </fieldset>
+              )}
 
               {(selected.type === 'run' || selected.type === 'bean') && (
                 <fieldset>
