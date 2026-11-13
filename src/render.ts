@@ -57,6 +57,41 @@ export interface RenderOptions {
 
 const RULER = 22 // px gutter for the rulers
 
+/**
+ * Thread rendering.
+ *
+ * A colour block drawn as ONE polyline with round caps is a ribbon, not
+ * thread: at any real zoom it reads as melted wax, with a bump wherever the
+ * line happens to turn. Real thread is lots of SEPARATE strands, each a
+ * little round cord catching the light from one direction.
+ *
+ * So above a zoom where it can actually be seen, each stitch is drawn as its
+ * own segment in three passes — a dark side, the body, and a highlight,
+ * offset fractions of a thread width ACROSS the stitch. That gives every
+ * stitch a lit edge and a shaded edge, which is what makes it read as round
+ * and as lifted off the fabric.
+ *
+ * Three passes per BLOCK, not per stitch: each pass accumulates every
+ * segment into one path and strokes once. The cost is three strokes per
+ * colour, not three per stitch, which is what keeps it usable while dragging.
+ */
+const THREAD_MM = 0.4
+/** Below this zoom a thread is a couple of pixels; the detail is invisible. */
+const DETAIL_SCALE = 5
+/** Past this many stitches, stay on the fast path whatever the zoom. */
+const DETAIL_MAX_STITCHES = 80_000
+/** Light from the upper left, the convention every embroidery mock-up uses. */
+const LIGHT = { x: -0.55, y: -0.84 }
+
+/** Mix a hex colour towards white (t > 0) or black (t < 0). */
+function shade(hex: string, t: number): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex)
+  if (!m) return hex
+  const n = parseInt(m[1], 16)
+  const mix = (c: number) => Math.max(0, Math.min(255, Math.round(t >= 0 ? c + (255 - c) * t : c * (1 + t))))
+  return `rgb(${mix((n >> 16) & 255)},${mix((n >> 8) & 255)},${mix(n & 255)})`
+}
+
 export function render(
   ctx: CanvasRenderingContext2D,
   doc: Doc,
@@ -292,21 +327,69 @@ export function render(
     const limit = opt.upTo ?? Infinity
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
+    const threadPx = Math.max(0.8, THREAD_MM * view.scale)
+    const total = plan.blocks.reduce((n, b) => n + b.stitches.length, 0)
+    // Detail only where it can be seen and afforded; otherwise the old fast
+    // polyline, which at that size looks the same anyway.
+    const detailed = view.scale >= DETAIL_SCALE && total <= DETAIL_MAX_STITCHES
+
     for (const b of plan.blocks) {
-      ctx.strokeStyle = b.color
-      // A thread is about 0.4 mm across; never thinner than a hairline.
-      ctx.lineWidth = Math.max(0.8, 0.4 * view.scale)
-      ctx.beginPath()
-      let pen = false
-      for (const s of b.stitches) {
+      if (drawn >= limit) break
+      if (!detailed) {
+        ctx.strokeStyle = b.color
+        ctx.lineWidth = threadPx
+        ctx.beginPath()
+        let pen = false
+        for (const st of b.stitches) {
+          if (drawn >= limit) break
+          drawn++
+          const p = toS(st)
+          if (st.jump) { pen = false; continue }
+          if (!pen) { ctx.moveTo(p.x, p.y); pen = true } else ctx.lineTo(p.x, p.y)
+        }
+        ctx.stroke()
+        continue
+      }
+
+      // Collect this block's sewn segments once, then stroke three offset
+      // passes over them.
+      const segs: [number, number, number, number][] = []
+      let prev: Pt | null = null
+      for (const st of b.stitches) {
         if (drawn >= limit) break
         drawn++
-        const p = toS(s)
-        if (s.jump) { pen = false; continue }
-        if (!pen) { ctx.moveTo(p.x, p.y); pen = true } else ctx.lineTo(p.x, p.y)
+        const p = toS(st)
+        if (st.jump) { prev = null; continue }
+        if (prev) segs.push([prev.x, prev.y, p.x, p.y])
+        prev = p
       }
-      ctx.stroke()
-      if (drawn >= limit) break
+      if (!segs.length) continue
+
+      const pass = (colour: string, width: number, off: number, alpha: number) => {
+        ctx.strokeStyle = colour
+        ctx.lineWidth = Math.max(0.5, width)
+        ctx.globalAlpha = alpha
+        ctx.beginPath()
+        for (const [x0, y0, x1, y1] of segs) {
+          let nx = -(y1 - y0), ny = x1 - x0
+          const len = Math.hypot(nx, ny)
+          if (len < 1e-6) continue
+          nx /= len; ny /= len
+          // Point the normal at the light so every stitch is lit from the
+          // same side, whatever direction it was sewn in. Without this the
+          // highlight flips with the zigzag and the column looks striped.
+          if (nx * LIGHT.x + ny * LIGHT.y < 0) { nx = -nx; ny = -ny }
+          const dx = nx * off, dy = ny * off
+          ctx.moveTo(x0 + dx, y0 + dy)
+          ctx.lineTo(x1 + dx, y1 + dy)
+        }
+        ctx.stroke()
+      }
+
+      pass(shade(b.color, -0.45), threadPx * 1.0, -threadPx * 0.20, 0.85) // shaded side
+      pass(b.color, threadPx * 0.92, 0, 1)                                 // body
+      pass(shade(b.color, 0.5), threadPx * 0.34, threadPx * 0.24, 0.7)     // lit edge
+      ctx.globalAlpha = 1
     }
 
     if (opt.showJumps) {
