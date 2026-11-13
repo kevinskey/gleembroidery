@@ -80,8 +80,41 @@ const THREAD_MM = 0.4
 const DETAIL_SCALE = 5
 /** Past this many stitches, stay on the fast path whatever the zoom. */
 const DETAIL_MAX_STITCHES = 80_000
-/** Light from the upper left, the convention every embroidery mock-up uses. */
-const LIGHT = { x: -0.55, y: -0.84 }
+/**
+ * A stitch is shaded ALONG its length, not across it.
+ *
+ * A satin stitch dips into the fabric at both ends and lies proud in the
+ * middle, so each strand is dark where it enters the cloth and bright where
+ * it sits on top. Across a packed column that reads as fine banding running
+ * PERPENDICULAR to the stitches — which is what real thread looks like, and
+ * what a cross-stitch highlight gets wrong: lighting each strand along one
+ * edge turns a dense fill into harsh stripes.
+ *
+ * These are the fractions of each stitch kept by the body and crown passes.
+ */
+const BODY_SPAN = 0.88
+const CROWN_SPAN = 0.5
+
+/**
+ * How far a stitch end may wander, as a fraction of a thread width.
+ *
+ * Real stitch ends do not land on a ruled line — the needle pulls the cloth
+ * and each penetration sits a hair off its neighbours, which is why the edge
+ * of a real satin column is finely serrated rather than knife-straight. The
+ * wobble is HASHED from the stitch's own coordinates, not random: the same
+ * design must draw identically every frame, or the whole fill shimmers while
+ * panning.
+ */
+const EDGE_WOBBLE = 0.22
+
+function wobble(x: number, y: number): number {
+  // Cheap deterministic hash; the exact mixing does not matter, only that it
+  // is stable and decorrelated between neighbouring stitches.
+  let h = Math.imul(Math.round(x * 16) ^ 0x9e3779b9, 0x85ebca6b)
+  h ^= Math.imul(Math.round(y * 16) ^ 0xc2b2ae35, 0x27d4eb2f)
+  h ^= h >>> 15
+  return ((h >>> 0) / 0xffffffff) * 2 - 1
+}
 
 /** Mix a hex colour towards white (t > 0) or black (t < 0). */
 function shade(hex: string, t: number): string {
@@ -360,36 +393,78 @@ export function render(
         drawn++
         const p = toS(st)
         if (st.jump) { prev = null; continue }
-        if (prev) segs.push([prev.x, prev.y, p.x, p.y])
+        if (prev) {
+          // Nudge each end ALONG the stitch so the column's edge serrates
+          // instead of ruling straight.
+          let dx = p.x - prev.x, dy = p.y - prev.y
+          const len = Math.hypot(dx, dy)
+          if (len > 1e-6) {
+            dx /= len; dy /= len
+            const a = wobble(prev.x, prev.y) * threadPx * EDGE_WOBBLE
+            const c = wobble(p.x, p.y) * threadPx * EDGE_WOBBLE
+            segs.push([prev.x - dx * a, prev.y - dy * a, p.x + dx * c, p.y + dy * c])
+          } else segs.push([prev.x, prev.y, p.x, p.y])
+        }
         prev = p
       }
       if (!segs.length) continue
 
-      const pass = (colour: string, width: number, off: number, alpha: number) => {
+      /**
+       * Stroke every segment at once, keeping only the middle `span` of each.
+       *
+       * Three spans stacked — full, middle, centre — give each strand dark
+       * ends and a bright crown without a gradient per stitch, which at these
+       * counts would be thousands of gradient objects per frame.
+       */
+      /**
+       * How wide to actually draw the thread.
+       *
+       * A thread's nominal 0.4 mm is its diameter relaxed; laid under tension
+       * it flattens and spreads to cover the gap to its neighbour, which is
+       * why a real satin column reads as a solid mass with fine striations
+       * rather than as a picket fence. Drawing the nominal width leaves the
+       * fabric showing through between strands whenever the density is set
+       * looser than the thread is thick.
+       *
+       * So the width follows the MEASURED spacing of this block's own
+       * stitches — median, not mean, because the first and last stitch of
+       * every run are irregular and a mean lets them drag the whole column.
+       */
+      const gaps: number[] = []
+      for (let i = 1; i < segs.length; i++) {
+        const [ax, ay, bx, by] = segs[i - 1]
+        const [cx, cy, dx2, dy2] = segs[i]
+        gaps.push(Math.hypot((cx + dx2) / 2 - (ax + bx) / 2, (cy + dy2) / 2 - (ay + by) / 2))
+      }
+      gaps.sort((a, b) => a - b)
+      const spacing = gaps.length ? gaps[gaps.length >> 1] : 0
+      const lay = Math.max(threadPx, Math.min(spacing * 1.35, threadPx * 4))
+
+      // BUTT caps, not round. A round cap on a stroke widened to cover the
+      // stitch spacing puts a dark semicircle at every stitch end, and a
+      // column of those reads as a fringe of tentacles. Real stitch ends are
+      // flat where the needle went in.
+      ctx.lineCap = 'butt'
+
+      const pass = (colour: string, width: number, span: number, alpha: number) => {
         ctx.strokeStyle = colour
-        ctx.lineWidth = Math.max(0.5, width)
+        ctx.lineWidth = Math.max(0.4, width)
         ctx.globalAlpha = alpha
         ctx.beginPath()
         for (const [x0, y0, x1, y1] of segs) {
-          let nx = -(y1 - y0), ny = x1 - x0
-          const len = Math.hypot(nx, ny)
-          if (len < 1e-6) continue
-          nx /= len; ny /= len
-          // Point the normal at the light so every stitch is lit from the
-          // same side, whatever direction it was sewn in. Without this the
-          // highlight flips with the zigzag and the column looks striped.
-          if (nx * LIGHT.x + ny * LIGHT.y < 0) { nx = -nx; ny = -ny }
-          const dx = nx * off, dy = ny * off
-          ctx.moveTo(x0 + dx, y0 + dy)
-          ctx.lineTo(x1 + dx, y1 + dy)
+          const mx = (x0 + x1) / 2, my = (y0 + y1) / 2
+          const hx = ((x1 - x0) / 2) * span, hy = ((y1 - y0) / 2) * span
+          ctx.moveTo(mx - hx, my - hy)
+          ctx.lineTo(mx + hx, my + hy)
         }
         ctx.stroke()
       }
 
-      pass(shade(b.color, -0.45), threadPx * 1.0, -threadPx * 0.20, 0.85) // shaded side
-      pass(b.color, threadPx * 0.92, 0, 1)                                 // body
-      pass(shade(b.color, 0.5), threadPx * 0.34, threadPx * 0.24, 0.7)     // lit edge
+      pass(shade(b.color, -0.3), lay * 1.02, 1, 1)            // the ends, sunk into cloth
+      pass(b.color, lay * 0.98, BODY_SPAN, 1)                 // the body lying proud
+      pass(shade(b.color, 0.26), lay * 0.72, CROWN_SPAN, 0.4) // the lit crown
       ctx.globalAlpha = 1
+      ctx.lineCap = 'round'
     }
 
     if (opt.showJumps) {
