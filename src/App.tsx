@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM } from './satin'
+import { writeExp } from './exp'
+import { writeJef } from './jef'
 import { FILL_STYLE_DEFAULTS, MIN_MOTIF_MM, MOTIFS } from './decorative'
 import {
   BOOL_LABEL, BOOL_OPS, booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap,
@@ -1256,6 +1258,53 @@ export default function App() {
     setNote('Exported the .dst only — no colour information travels with a DST')
   }
 
+  /**
+   * Machine formats beyond DST.
+   *
+   * Each is a real encoder checked against pyembroidery — a separate
+   * implementation by other authors — on every fixture, needle for needle.
+   * Renaming a .dst would be quicker and would produce a file no machine
+   * could read.
+   */
+  const exportFormat = (fmt: 'exp' | 'jef') => {
+    if (!total) return
+    const centered = centerPlan(plan)
+    if (fmt === 'exp') {
+      download(`${base()}.exp`, writeExp(centered))
+      setNote('Exported .exp — Melco. Carries no colours; keep the .col beside it.')
+    } else {
+      download(`${base()}.jef`, writeJef(centered))
+      setNote(
+        'Exported .jef — Janome. JEF stores a thread INDEX, not a colour, '
+        + 'so the colours are snapped to the nearest of Janome’s 78.')
+    }
+  }
+
+  /**
+   * Everything at once: every machine format, both colour sidecars, the 1:1
+   * template, any appliqué cut file, and the run sheet.
+   *
+   * The reason this is one button rather than six presses is that the files
+   * MUST come from one stitch plan. Exporting a DST, changing something, then
+   * exporting a JEF gives a shop two files that look like the same design and
+   * sew differently — and nothing in either file says which is which.
+   */
+  const exportEverything = () => {
+    if (!total) return
+    const centered = centerPlan(plan)
+    const n = base()
+    download(`${n}.dst`, writeDst(centered, n))
+    download(`${n}.exp`, writeExp(centered))
+    download(`${n}.jef`, writeJef(centered))
+    download(`${n}.col`, writeCol(centered), 'text/plain')
+    download(`${n}.edr`, writeEdr(centered))
+    download(`${n}-template.svg`, placementTemplateSvg(doc, centered), 'image/svg+xml')
+    const cut = appliqueCutSvg(doc)
+    if (cut) download(`${n}-applique-cut.svg`, cut, 'image/svg+xml')
+    download(`${n}-runsheet.html`, runSheetHtml(doc, stats, machine), 'text/html')
+    setNote(`Exported ${n} in 3 machine formats + sidecars, template and run sheet — all from one plan`)
+  }
+
   const saveProject = () => {
     download(projectFilename(doc), serialize(doc, true), 'application/json')
     setNote(`Saved ${projectFilename(doc)}`)
@@ -1956,6 +2005,18 @@ export default function App() {
           <button className="primary" onClick={exportPackage} disabled={!total}>Export package</button>
           <button onClick={exportDstOnly} disabled={!total} title="Machine file only — no colours travel with a DST">
             .dst only
+          </button>
+          <button onClick={() => exportFormat('exp')} disabled={!total}
+            title="Melco EXP. Verified against pyembroidery needle for needle; carries no colours.">
+            .exp
+          </button>
+          <button onClick={() => exportFormat('jef')} disabled={!total}
+            title="Janome JEF. Verified against pyembroidery; colours are snapped to Janome's built-in 78-thread table.">
+            .jef
+          </button>
+          <button onClick={exportEverything} disabled={!total}
+            title="Every format and sidecar at once, all from ONE stitch plan — so two files of the same design cannot disagree">
+            All formats
           </button>
         </div>
 

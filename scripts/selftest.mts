@@ -2,6 +2,9 @@
 //   npx tsx scripts/selftest.mts
 
 import { readDst, writeDst } from '../src/dst'
+import { writeExp } from '../src/exp'
+import { JEF_PALETTE, nearestJefColor, writeJef } from '../src/jef'
+import { planToMoves, splitMove } from '../src/machine'
 import { appliquePhases, centerPlan, digitize, orientToEntryExit, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
 import { insideRegion, tatamiFill } from '../src/fill'
 import { dist, isClosed, resample, ringArea, toRegions } from '../src/geometry'
@@ -3324,6 +3327,105 @@ console.log('\n# travel planning')
     const inMiddle = pts.filter((p) =>
       p.x > 15 && p.x < 25 && p.y > 15 && p.y < 25).length
     ok(inMiddle === 0, 'the hole in a filled ring stays empty', `${inMiddle} stitches in it`)
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# machine formats beyond DST')
+{
+  const build = () => {
+    const d = emptyDoc()
+    d.objects = [
+      newObject({ name: 'A', color: '#c0392b', type: 'fill',
+        paths: [[...rect(0, 0, 20, 20), { x: 0, y: 0 }]] }),
+      newObject({ name: 'B', color: '#1f6feb', type: 'run',
+        paths: [[{ x: 30, y: 0 }, { x: 50, y: 20 }]] }),
+    ]
+    return digitize(d).plan
+  }
+  const plan = build()
+
+  // --- the shared flattening
+  {
+    const moves = planToMoves(plan)
+    ok(moves.length > 10, 'a plan flattens to machine moves', `${moves.length}`)
+    ok(moves[0].kind === 'jump', 'the approach is needle-UP', moves[0].kind)
+    ok(moves.some((m) => m.kind === 'color'), 'and a two-colour plan has a colour change')
+    // Y is flipped exactly once: the document is +Y down, machines are +Y up.
+    const firstStitch = plan.blocks[0].stitches.find((s) => !s.jump)!
+    const match = moves.find((m) => Math.abs(m.x - Math.round(firstStitch.x * 10)) < 1)
+    ok(!!match && Math.abs(match.y + Math.round(firstStitch.y * 10)) < 1,
+      'and +Y is flipped once, not twice',
+      `${match?.y} vs ${-Math.round(firstStitch.y * 10)}`)
+  }
+
+  // --- long moves are SPLIT, never truncated
+  {
+    // A signed byte reaches 127 units; a 40 mm move is 400.
+    const hops = splitMove(0, 0, 400, 0, 127)
+    ok(hops.length === 4, 'a 40 mm move becomes four hops', `${hops.length}`)
+    ok(hops[hops.length - 1].x === 400, 'and it arrives exactly where it was going')
+    ok(hops.every((h, i) => Math.abs(h.x - (hops[i - 1]?.x ?? 0)) <= 127),
+      'with no hop over the limit')
+    // Interpolated from the START, so rounding cannot accumulate.
+    const odd = splitMove(0, 0, 301, 0, 127)
+    ok(odd[odd.length - 1].x === 301, 'an awkward distance still lands exactly')
+  }
+
+  // --- the encoders produce bytes, and the same bytes twice
+  {
+    const exp = writeExp(plan)
+    ok(exp.length > 40, 'EXP writes a file', `${exp.length} bytes`)
+    ok(exp.length % 2 === 0, 'of whole records')
+    ok(Buffer.compare(Buffer.from(writeExp(plan)), Buffer.from(exp)) === 0,
+      'and the same plan twice gives identical bytes')
+
+    const when = new Date(Date.UTC(2026, 0, 1, 12, 0, 0))
+    const jef = writeJef(plan, when)
+    ok(jef.length > 0x80, 'JEF writes a file', `${jef.length} bytes`)
+    ok(Buffer.compare(Buffer.from(writeJef(plan, when)), Buffer.from(jef)) === 0,
+      'and is deterministic given a date')
+    // The date is injectable precisely so this is true; left to a clock,
+    // two exports of one design differ and "the file changed" means nothing.
+    const later = writeJef(plan, new Date(Date.UTC(2027, 5, 6, 7, 8, 9)))
+    ok(Buffer.compare(Buffer.from(later), Buffer.from(jef)) !== 0,
+      'the stamped date really is in the file')
+
+    // The header must point past itself to the stitch data.
+    const u32 = (b: Uint8Array, i: number) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24)
+    const offset = u32(jef, 0)
+    const colorCount = u32(jef, 24)
+    ok(offset === 0x74 + colorCount * 8, 'the JEF stitch offset matches its colour count',
+      `${offset} vs ${0x74 + colorCount * 8}`)
+    ok(offset < jef.length, 'and points inside the file')
+    ok(colorCount === plan.blocks.length, 'with one palette entry per colour block',
+      `${colorCount} vs ${plan.blocks.length}`)
+    ok(jef[jef.length - 2] === 0x80 && jef[jef.length - 1] === 0x10,
+      'and the file ends with the end command')
+  }
+
+  // --- JEF's palette is an INDEX, and the mapping is nearest-colour
+  {
+    ok(nearestJefColor('#ff0000') === 10, 'pure red maps to the palette red',
+      `${nearestJefColor('#ff0000')}`)
+    ok(JEF_PALETTE[nearestJefColor('#ffffff')] === 0xffffff, 'white to white')
+    ok(nearestJefColor('#000000') === 1, 'black to black, never to index 0')
+    ok(nearestJefColor('not a colour') === 1,
+      'and an unreadable colour becomes black rather than throwing')
+    // Something with no exact match still lands somewhere sensible.
+    const near = nearestJefColor('#fe0101')
+    ok(near === 10, 'a near-red lands on the same entry as red', `${near}`)
+  }
+
+  // --- a format that cannot carry something must not pretend it can
+  {
+    // EXP has no header at all, so there is nothing to disagree with the
+    // data — and no colour, which is why the sidecars exist.
+    const exp = writeExp(plan)
+    // The very first record must be a jump: the approach is needle-up.
+    ok(exp[0] === 0x80 && exp[1] === 0x04, 'an EXP opens with a jump, not a stitch',
+      `${exp[0].toString(16)} ${exp[1].toString(16)}`)
   }
 }
 

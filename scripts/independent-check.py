@@ -123,6 +123,54 @@ for entry in json.load(open(index_path)):
               f"{','.join(got)} vs {','.join(want_colors)}")
 
     # -------------------------------------------------------------------
+    # THE OTHER MACHINE FORMATS.
+    #
+    # Written from the SAME stitch plan as the DST, so they must agree with
+    # it needle for needle. That is the whole claim being made by offering
+    # them: not "the file opens", but "the machine sews the same design".
+    #
+    # Spec section 8 is explicit that changing a filename extension does not
+    # create format support. This is what support means — a separate
+    # implementation by other authors reading the bytes back and finding the
+    # design that was intended.
+    for ext, reader in (("exp", pyembroidery.read_exp), ("jef", pyembroidery.read_jef)):
+        path = os.path.join(FIX, name + "." + ext)
+        if not os.path.exists(path):
+            check(f".{ext} present", False, "missing")
+            continue
+        pat = reader(path)
+        pts = [(x / 10.0, y / 10.0) for x, y, cmd in pat.stitches
+               if cmd == pyembroidery.STITCH]
+        check(f".{ext} penetration count", len(pts) == len(want),
+              f"{len(pts)} read / {len(want)} intended")
+        if pts and want:
+            n = min(len(pts), len(want))
+            e = max(max(abs(pts[i][0] - want[i][0]), abs(pts[i][1] - want[i][1]))
+                    for i in range(n))
+            e_flip = max(max(abs(pts[i][0] - want[i][0]), abs(-pts[i][1] - want[i][1]))
+                         for i in range(n))
+            check(f".{ext} every needle position", e <= TOL_MM,
+                  f"max deviation {e:.4f} mm")
+            # Asserted, not discovered — the same rule as for the DST. A
+            # codec that writes every design upside down round-trips
+            # perfectly through itself.
+            check(f".{ext} not vertically mirrored", e <= e_flip or e <= TOL_MM,
+                  f"upright {e:.3f} mm vs mirrored {e_flip:.3f} mm")
+            # And it must agree with the DST, not merely with the intent:
+            # two encoders can both be wrong in the same way only by
+            # accident, and this is the check that would catch it.
+            m = min(len(pts), len(stitches))
+            if m:
+                e_dst = max(max(abs(pts[i][0] - stitches[i][0]),
+                                abs(pts[i][1] - stitches[i][1])) for i in range(m))
+                check(f".{ext} agrees with the .dst", e_dst <= TOL_MM,
+                      f"max deviation {e_dst:.4f} mm")
+        chg = sum(1 for _, _, cmd in pat.stitches
+                  if cmd in (pyembroidery.COLOR_CHANGE, pyembroidery.STOP))
+        check(f".{ext} colour changes", chg == intended["colorChanges"],
+              f"{chg} read / {intended['colorChanges']} intended")
+
+    # -------------------------------------------------------------------
     # MACHINE-SAFETY GATE.
     #
     # Everything above checks that the file says what we meant. These checks

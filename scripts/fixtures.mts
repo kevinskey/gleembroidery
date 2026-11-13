@@ -11,6 +11,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { centerPlan, digitize } from '../src/digitize'
 import { writeDst } from '../src/dst'
+import { writeExp } from '../src/exp'
+import { writeJef } from '../src/jef'
 import { writeCol, writeEdr } from '../src/package'
 import { emptyDoc, newObject, type EmbObject, type Pt } from '../src/model'
 import { planBounds } from '../src/stitches'
@@ -126,6 +128,12 @@ for (const f of FIXTURES) {
   // Colour sidecars travel with the machine file: DST carries no colour.
   writeFileSync(`${OUT}${f.name}.col`, writeCol(centered))
   writeFileSync(`${OUT}${f.name}.edr`, writeEdr(centered))
+  // The other machine formats, from the SAME plan — which is the only way
+  // they can be compared against each other and against the intent.
+  writeFileSync(`${OUT}${f.name}.exp`, writeExp(centered))
+  // A fixed date, so two runs produce byte-identical files and "the file
+  // changed" keeps meaning something.
+  writeFileSync(`${OUT}${f.name}.jef`, writeJef(centered, new Date(Date.UTC(2026, 0, 1, 12, 0, 0))))
 
   const bb = planBounds(centered)!
   const penetrations = centered.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
