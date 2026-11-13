@@ -4,7 +4,10 @@ import { readDst, writeDst } from './dst'
 import { close, toRegions } from './geometry'
 import { useHistory } from './history'
 import { DEFAULT_TOLERANCE, traceRegionAt, type Raster } from './trace'
-import { DEFAULT_TEXT, SUGGESTED_FACES, textToOutlines, type TextSpec } from './text'
+import {
+  DEFAULT_TEXT, SUGGESTED_FACES, textToColumns, textToOutlines,
+  type LetterNudge, type LetterOutline, type TextSpec,
+} from './text'
 import {
   arcThrough, autoSmooth, deleteNode, flattenShape, handlesOf, insertNode, moveHandle, moveNode,
   nearestSegment, pathToShape, shapesToPaths, toggleSmooth, type PathNode, type Shape,
@@ -306,7 +309,7 @@ export default function App() {
   const [sim, setSim] = useState<number | null>(null)
   const [machine, setMachine] = useState<MachineProfile>(DEFAULT_MACHINE)
   const [note, setNote] = useState<string | null>(null)
-  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee' | 'backdrop'>>({
+  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee' | 'backdrop' | 'letterHandles'>>({
     showGrid: true, showArt: true, showStitches: true, showPoints: false, showJumps: true,
   })
 
@@ -373,6 +376,15 @@ export default function App() {
    * outline to pick a different object would lose it.
    */
   const [cmdHeld, setCmdHeld] = useState(false)
+  /**
+   * Letter boxes of the selected lettering, for its per-letter handles.
+   *
+   * Cached rather than recomputed per frame: working them out means
+   * rasterising and tracing the whole line, which is far too much to do on
+   * every mouse move.
+   */
+  const [letterBoxes, setLetterBoxes] = useState<{ id: string; letters: LetterOutline[] } | null>(null)
+  const letterDrag = useRef<{ id: string; index: number; start: Pt; from: LetterNudge } | null>(null)
   /**
    * Reference image behind the design, and the pixels the wand reads.
    *
@@ -451,8 +463,10 @@ export default function App() {
         heightMm: backdrop.raster.height / backdrop.pxPerMm,
       },
       nodeEdit: tool === 'node' && selected ? { shapes: shapesOf(selected), active: activeNode } : null,
+      letterHandles: tool === 'select' && selected?.text?.mode === 'fill' && letterBoxes?.id === selected.id
+        ? letterBoxes.letters.map((l) => l.centre) : null,
     })
-  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop])
+  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop, letterBoxes])
 
   useEffect(() => { draw() }, [draw])
 
@@ -678,6 +692,7 @@ export default function App() {
    * as the old shapes stretched to fit.
    */
   const applyText = useCallback((id: string, spec: TextSpec, at?: Pt) => {
+    if (spec.mode === 'satin') { applySatinText(id, spec, at); return }
     const out = textToOutlines(spec)
     for (const w of out.warnings) setNote(w)
     if (!out.paths.length) return
@@ -698,7 +713,62 @@ export default function App() {
         paths: paths ?? out.paths.map((r) => r.map((q) => ({ x: q.x + c.x, y: q.y + c.y }))),
       }
     }, 'text')
-  }, [])
+    // textToOutlines centres everything on the origin, so the letter centres
+    // need the SAME offset the paths just got — otherwise the handles sit at
+    // the document origin while the lettering is wherever it was placed.
+    const obj = doc.objects.find((o) => o.id === id)
+    const ob = at ? null : obj && bounds(obj.paths)
+    const off = at ?? (ob ? { x: (ob.minX + ob.maxX) / 2, y: (ob.minY + ob.maxY) / 2 } : { x: 0, y: 0 })
+    setLetterBoxes({
+      id,
+      letters: out.letters.map((l) => ({ ...l, centre: { x: l.centre.x + off.x, y: l.centre.y + off.y } })),
+    })
+  }, [doc.objects])
+
+  /**
+   * Lettering as SATIN: one two-rail column per stroke.
+   *
+   * The strokes become their own objects rather than one object holding many
+   * rail pairs, because a two-rail column is a PAIR of paths by definition —
+   * putting six strokes in one object would leave no way to say which rail
+   * goes with which. Separate objects also let a single stroke be re-angled
+   * or re-densified without touching the rest of the word.
+   */
+  const applySatinText = useCallback((id: string, spec: TextSpec, at?: Pt) => {
+    const { columns, warnings } = textToColumns(spec)
+    for (const w of warnings) setNote(w)
+    if (!columns.length) return
+    // Columns come out in canvas mm; centre them like the outline path does.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const c of columns) for (const q of [...c.left, ...c.right]) {
+      if (q.x < minX) minX = q.x; if (q.x > maxX) maxX = q.x
+      if (q.y < minY) minY = q.y; if (q.y > maxY) maxY = q.y
+    }
+    const old = doc.objects.find((o) => o.id === id)
+    const b = at ? null : old && bounds(old.paths)
+    const to = at ?? (b ? { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 } : { x: 0, y: 0 })
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2
+    const place = (p: Pt[]) => p.map((q) => ({ x: q.x - cx + to.x, y: q.y - cy + to.y }))
+
+    const made = columns.map((c, i) => newObject({
+      name: `${spec.content} ${c.ch}${i + 1}`,
+      color: old?.color ?? PALETTE[doc.objects.length % PALETTE.length],
+      type: 'satin',
+      twoRail: true,
+      // Only the FIRST carries the spec: it is one line of text, and copying
+      // the spec onto every stroke would regenerate the whole word once per
+      // stroke the next time anything changed.
+      ...(i === 0 ? { text: spec } : {}),
+      paths: [place(c.left), place(c.right)],
+    }))
+    setDoc((d) => ({
+      ...d,
+      objects: [...d.objects.filter((o) => o.id !== id && !o.name.startsWith(`${spec.content} `)), ...made],
+    }))
+    setSelectedId(made[0].id)
+    setSim(null)
+    setNote(`${columns.length} satin stroke(s)`)
+  }, [doc.objects, setDoc, setSelectedId])
 
   /** Place a new line of lettering. */
   const addText = useCallback((at: Pt) => {
@@ -717,6 +787,10 @@ export default function App() {
     setDoc((d) => ({ ...d, objects: [...d.objects, obj] }))
     setSelectedId(obj.id)
     setSim(null)
+    setLetterBoxes({
+      id: obj.id,
+      letters: out.letters.map((l) => ({ ...l, centre: { x: l.centre.x + at.x, y: l.centre.y + at.y } })),
+    })
     setNote(`${out.widthMm.toFixed(1)} × ${out.heightMm.toFixed(1)} mm — edit the words in Properties`)
   }, [doc.objects.length, setDoc, setSelectedId])
 
@@ -922,6 +996,23 @@ export default function App() {
       if (e.button !== 0) return
       const p = atMm(e)
       const snapshot = () => selectedObjs.map((o) => ({ id: o.id, paths: o.paths }))
+      // Per-letter handles take precedence over the object's own handles:
+      // they sit INSIDE the selection box, so anything else would make them
+      // unreachable.
+      if (selected?.text && selected.text.mode === 'fill' && letterBoxes?.id === selected.id) {
+        const tol = HANDLE_PX / view.scale
+        for (let i = 0; i < letterBoxes.letters.length; i++) {
+          const c = letterBoxes.letters[i].centre
+          if (Math.hypot(p.x - c.x, p.y - c.y) <= tol) {
+            history.begin()
+            letterDrag.current = {
+              id: selected.id, index: i, start: p,
+              from: selected.text.nudges?.[i] ?? { dx: 0, dy: 0, rot: 0 },
+            }
+            return
+          }
+        }
+      }
       if (selBox) {
         // The rotation grip sits off the top edge, clear of the resize
         // handles so the two can never be confused at any zoom.
@@ -1019,6 +1110,22 @@ export default function App() {
     }
     if (marquee.current) {
       setMarquee({ a: marquee.current, b: atMm(e) })
+      return
+    }
+    const ld = letterDrag.current
+    if (ld && selected?.text) {
+      const p = atMm(e)
+      applyText(ld.id, {
+        ...selected.text,
+        nudges: {
+          ...selected.text.nudges,
+          [ld.index]: {
+            ...ld.from,
+            dx: ld.from.dx + (p.x - ld.start.x),
+            dy: ld.from.dy + (p.y - ld.start.y),
+          },
+        },
+      })
       return
     }
     const x = xform.current
@@ -1178,6 +1285,7 @@ export default function App() {
       setSelectedIds((prev) => [...new Set([...prev, ...hits.map((o) => o.id)])])
       return
     }
+    if (letterDrag.current) { letterDrag.current = null; history.end(); return }
     if (xform.current) { xform.current = null; history.end(); return }
     if (nodeDrag.current) { nodeDrag.current = null; history.end(); return }
     if (tool === 'column') {
@@ -1617,6 +1725,22 @@ export default function App() {
                     onChange={(v) => applyText(selected.id, { ...selected.text!, curveTopMm: v })} />
                   <Num label="Curve bottom (mm)" value={selected.text.curveBottomMm} step={0.5} min={-60} max={60}
                     onChange={(v) => applyText(selected.id, { ...selected.text!, curveBottomMm: v })} />
+                  <div className="row wide">
+                    <label>Stitched as</label>
+                    <div className="checks">
+                      {(['fill', 'satin'] as const).map((m) => (
+                        <button
+                          key={m}
+                          className={selected.text!.mode === m ? 'primary' : undefined}
+                          title={m === 'satin'
+                            ? 'A column down each stroke — what lettering under ~20 mm wants'
+                            : 'Tatami inside the letter outline'}
+                          onClick={() => applyText(selected.id, { ...selected.text!, mode: m })}>
+                          {m === 'fill' ? 'Fill' : 'Satin'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <div className="row wide">
                     <label>Shape</label>
                     <div className="checks">

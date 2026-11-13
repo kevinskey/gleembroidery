@@ -287,6 +287,11 @@ function objectIn(v: unknown, index: number): EmbObject | null {
         slantDeg: num(v.text.slantDeg, 0),
         curveTopMm: num(v.text.curveTopMm, 0),
         curveBottomMm: num(v.text.curveBottomMm, 0),
+        mode: v.text.mode === 'satin' ? 'satin' : 'fill',
+        nudges: isObj(v.text.nudges)
+          ? Object.fromEntries(Object.entries(v.text.nudges).flatMap(([k, n]) =>
+            isObj(n) ? [[Number(k), { dx: num(n.dx, 0), dy: num(n.dy, 0), rot: num(n.rot, 0) }]] : []))
+          : undefined,
       },
     } : {}),
     run: { length: num(run.length, dRun.length) },

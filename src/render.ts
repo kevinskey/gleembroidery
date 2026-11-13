@@ -51,6 +51,8 @@ export interface RenderOptions {
   rotateOffsetPx?: number
   /** Rubber band being dragged over empty space. */
   marquee?: { a: Pt; b: Pt } | null
+  /** A grip at the centre of each letter, for nudging letters singly. */
+  letterHandles?: Pt[] | null
   /** Reference image drawn behind everything, for tracing over. */
   backdrop?: { bitmap: CanvasImageSource; origin: Pt; widthMm: number; heightMm: number } | null
 }
@@ -498,6 +500,29 @@ export function render(
         }
       }
     }
+  }
+
+  // --- per-letter grips ------------------------------------------------------
+  // Green, and square like the resize handles but a different colour: they
+  // move ONE letter rather than the whole object, and that distinction has to
+  // survive being seen out of the corner of an eye.
+  //
+  // Drawn AFTER the stitches. A grip sits in the middle of its letter, which
+  // is the densest part of the stitching — drawn before, every one of them
+  // disappeared under the thread it was meant to label.
+  if (opt.letterHandles) {
+    ctx.save()
+    ctx.fillStyle = '#22c55e'
+    ctx.strokeStyle = dark ? '#0f1216' : '#ffffff'
+    ctx.lineWidth = 1
+    for (const c of opt.letterHandles) {
+      const p = toS(c)
+      ctx.beginPath()
+      ctx.rect(p.x - 4, p.y - 4, 8, 8)
+      ctx.fill()
+      ctx.stroke()
+    }
+    ctx.restore()
   }
 
   // --- rulers -------------------------------------------------------------

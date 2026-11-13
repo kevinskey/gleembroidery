@@ -13,6 +13,7 @@ import { packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { unionSelfChecked } from '../src/boolean'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
+import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton } from '../src/skeleton'
 import { MIN_DRAW_MM, bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from '../src/draw'
 import { MIN_SIZE_MM, boxCentre, fitPaths, handlePoint, hitHandle, hitObject, movePaths, objectBox, pickObject, resizeBox, rotatePaths, rotationAngle, unionBox, type Box } from '../src/transform'
 import { COALESCE_MS, HISTORY_LIMIT, applyEdit, cancelState, initHistory, redoState, undoState } from '../src/history'
@@ -1572,6 +1573,103 @@ console.log('\n# lettering: slant and bend')
   ok(shapeOutlines([], base).length === 0, 'no outlines is not a crash')
   ok(shapeOutlines([[{ x: 5, y: 5 }]], { ...base, slantDeg: 20 }).length === 1,
     'a degenerate zero-width outline is returned rather than dividing by zero')
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# medial axis (satin lettering)')
+{
+  const box = (w: number, h: number, fill: (x: number, y: number) => boolean) => {
+    const m = new Uint8Array(w * h)
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (fill(x, y)) m[y * w + x] = 1
+    return m
+  }
+
+  // --- distance transform: the middle of a bar is half its thickness away
+  {
+    const W = 40, H = 21
+    const bar = box(W, H, (x, y) => x >= 5 && x <= 34 && y >= 6 && y <= 14) // 9 px thick
+    const d = distanceTransform(bar, W, H)
+    const mid = d[10 * W + 20]
+    // Centre row is 4 px from the edge rows above and below, +1 for the edge.
+    ok(Math.abs(mid - 5) < 0.7, 'the centre of a 9 px bar is ~half its thickness from an edge',
+      `${mid.toFixed(2)}`)
+    ok(d[6 * W + 20] < mid, 'and the edge is closer to the outside than the centre is')
+    ok(d[0] === 0, 'background is zero')
+  }
+
+  // --- thinning keeps a stroke connected and one pixel wide
+  {
+    const W = 40, H = 21
+    const bar = box(W, H, (x, y) => x >= 5 && x <= 34 && y >= 6 && y <= 14)
+    const sk = thin(bar, W, H)
+    let count = 0
+    for (let i = 0; i < sk.length; i++) if (sk[i]) count++
+    ok(count > 20 && count < 60, 'a bar thins to a line, not to nothing and not to a blob',
+      `${count} px`)
+    // Every skeleton pixel must lie inside the original shape.
+    let strays = 0
+    for (let i = 0; i < sk.length; i++) if (sk[i] && !bar[i]) strays++
+    ok(strays === 0, 'the skeleton stays inside the shape', `${strays}`)
+    // And it must be CONNECTED — one run across the bar, not fragments.
+    const lines = pruneSpurs(traceSkeleton(sk, W, H), 4)
+    ok(lines.length >= 1, 'the skeleton traces to at least one line', `${lines.length}`)
+    const longest = lines.reduce((m, l) => (l.length > m.length ? l : m), lines[0])
+    ok(longest.length > 20, 'and the longest run spans the bar', `${longest.length} pts`)
+  }
+
+  // --- a cross splits into separate strokes at its junction
+  {
+    const W = 31, H = 31
+    const cross = box(W, H, (x, y) =>
+      (x >= 12 && x <= 18 && y >= 3 && y <= 27) || (y >= 12 && y <= 18 && x >= 3 && x <= 27))
+    const lines = pruneSpurs(traceSkeleton(thin(cross, W, H), W, H), 4)
+    ok(lines.length >= 3, 'a cross breaks into separate strokes at the junction',
+      `${lines.length} branches`)
+  }
+
+  // --- spurs are dropped
+  {
+    const W = 40, H = 21
+    const bar = box(W, H, (x, y) => (x >= 5 && x <= 34 && y >= 6 && y <= 14) || (x === 20 && y === 5))
+    const all = traceSkeleton(thin(bar, W, H), W, H)
+    const kept = pruneSpurs(all, 6)
+    ok(kept.length <= all.length, 'pruning never adds branches')
+    ok(kept.every((l) => {
+      let len = 0
+      for (let i = 1; i < l.length; i++) len += Math.hypot(l[i].x - l[i - 1].x, l[i].y - l[i - 1].y)
+      return len >= 6
+    }), 'and everything kept is longer than the threshold')
+  }
+
+  // --- rails follow the stroke and carry its width
+  {
+    const W = 60, H = 31
+    // A bar that is thick on the left and thin on the right — a taper.
+    const taper = box(W, H, (x, y) => {
+      if (x < 6 || x > 53) return false
+      const half = 9 - Math.round(((x - 6) / 47) * 6)
+      return Math.abs(y - 15) <= half
+    })
+    const d = distanceTransform(taper, W, H)
+    const line = smoothLine(pruneSpurs(traceSkeleton(thin(taper, W, H), W, H), 8)
+      .reduce((m, l) => (l.length > m.length ? l : m), [{ x: 0, y: 0 }]))
+    ok(line.length > 20, 'the taper has a centreline', `${line.length}`)
+    const rails = railsAlong(line, d, W, H)
+    ok(rails.left.length === rails.right.length && rails.left.length > 10,
+      'rails come in matching pairs', `${rails.left.length}`)
+    const widthAt = (i: number) => Math.hypot(
+      rails.left[i].x - rails.right[i].x, rails.left[i].y - rails.right[i].y)
+    const first = widthAt(2), last = widthAt(rails.left.length - 3)
+    ok(first > last + 3, 'and the column is WIDER where the stroke is thicker',
+      `${first.toFixed(1)} -> ${last.toFixed(1)}`)
+    // The rails must straddle the centreline, not sit on one side.
+    const mid = Math.floor(rails.left.length / 2)
+    ok((rails.left[mid].y - line[mid].y) * (rails.right[mid].y - line[mid].y) < 0,
+      'the rails sit on opposite sides of the centre')
+  }
+
+  ok(traceSkeleton(new Uint8Array(100), 10, 10).length === 0, 'an empty mask traces nothing')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
