@@ -17,7 +17,7 @@ import { dist, resample, scanlineSpans, toRegions } from './geometry'
 import { unionSelfChecked } from './boolean'
 import { offsetPathsChecked } from './offset'
 import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
-import { OVERLOCK_LEAN, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
+import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
 export const MAX_STITCH_MM = 10
@@ -402,6 +402,14 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
         push(satinTwoRail(ra, rb, obj.satin, rung))
         break
       }
+      // A satin object can hold several unrelated strokes, so each guide
+      // belongs to the ONE nearest it. Without this, every guide would be
+      // reported as off-column for every stroke it was not drawn on.
+      const guideFor = assignGuides(obj.paths, obj.guides ?? [])
+      for (const g of guideFor.orphans) {
+        warnings.push(
+          `${obj.name}: an angle guide sits ${g.d.toFixed(1)} mm off the column and was ignored — draw it across the column`)
+      }
       for (const path of obj.paths) {
         const check = satinCheck(path, obj.satin)
         for (const w of check.warnings) warnings.push(`${obj.name}: ${w}`)
@@ -421,7 +429,10 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
           for (const w of puffCheck(sp, obj.puff).warnings) warnings.push(`${obj.name}: ${w}`)
         }
         push(satinUnderlay(path, sp))
-        push(satinColumn(path, sp))
+        // Underlay is NOT given the guides: it is structural, laid to hold the
+        // fabric and support the rails, and turning it would put it where the
+        // top stitching cannot hide it.
+        push(satinColumn(path, sp, guideFor.byPath.get(path) ?? []))
         // Caps go LAST: they are a perforation through thread and foam
         // together, so they have to be punched after the column is laid.
         if (obj.puff.enabled && obj.puff.capEnds) push(puffCaps(path, sp))

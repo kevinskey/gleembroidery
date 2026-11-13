@@ -26,8 +26,172 @@ export const MIN_RAIL_MM = 0.3
  */
 export const OVERLOCK_LEAN = 45
 
+/**
+ * How far a bar may be turned off perpendicular, degrees.
+ *
+ * Past roughly this, consecutive bars stop overlapping and the column shows
+ * fabric between them; it is also where the bar gets long enough
+ * (width / cos angle) to start snagging. Applies to the lean and to angle
+ * guides alike, because they are the same quantity.
+ */
+export const MAX_BAR_ANGLE = 70
+
 /** Arc length over which curvature is measured, mm. */
 const CURV_WINDOW_MM = 0.6
+
+// ---------------------------------------------------------------------------
+// Manual angle guides
+// ---------------------------------------------------------------------------
+//
+// By default every bar crosses the spine at a right angle, which is correct
+// for a plain column and wrong for most real lettering: on a serif, a leaf, or
+// the join of a script letter the digitizer decides which way the stitches
+// run, because the direction is what catches the light and what hides the
+// join. An angle guide is the way that decision is stated — a line drawn
+// ACROSS the column where the bars should follow it.
+//
+// Guides are stored as plain segments in document mm and attached to the
+// spine by projection, so they keep meaning when the spine is reshaped: move
+// a node and the guide still describes the same place on the column.
+//
+// THE ANGLE IS STORED RELATIVE TO THE LOCAL NORMAL, not as an absolute
+// compass direction. On a curved column an absolute angle would mean a
+// different thing at every point and the bars would fan and cross; relative
+// to the normal, "20 degrees off square" stays 20 degrees off square all the
+// way round the bend.
+
+/** A line drawn across a column stating which way the bars should run. */
+export interface AngleGuide {
+  a: Pt
+  b: Pt
+}
+
+/** A guide resolved onto a spine: where it lands, and how far off square. */
+export interface ResolvedGuide {
+  /** Arc length along the spine, mm. */
+  s: number
+  /** Angle from the local normal, radians, positive toward the tangent. */
+  rel: number
+}
+
+/** Closest point on a polyline to p, as (arc length, distance). */
+function projectOnto(pts: Pt[], cum: number[], p: Pt): { s: number; d: number; i: number; t: number } {
+  let best = { s: 0, d: Infinity, i: 1, t: 0 }
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i]
+    const dx = b.x - a.x, dy = b.y - a.y
+    const len2 = dx * dx + dy * dy
+    const t = len2 > 1e-12
+      ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2))
+      : 0
+    const qx = a.x + dx * t, qy = a.y + dy * t
+    const d = Math.hypot(p.x - qx, p.y - qy)
+    if (d < best.d) best = { s: cum[i - 1] + Math.sqrt(len2) * t, d, i, t }
+  }
+  return best
+}
+
+/**
+ * Attach guides to a spine.
+ *
+ * A guide is placed by its MIDPOINT, because that is the part of it the user
+ * put on the column; the ends are where they need to be to show the angle.
+ * Guides whose midpoint misses the column by more than `reach` are dropped and
+ * reported — a guide floating in space is a mistake, and silently snapping it
+ * to the nearest point would put the angle somewhere nobody asked for.
+ */
+export function resolveGuides(
+  spine: Pt[], guides: readonly AngleGuide[], closed: boolean, reach: number,
+  onDrop?: (g: AngleGuide, d: number) => void,
+): ResolvedGuide[] {
+  const pts = dedupe(spine)
+  if (pts.length < 2) return []
+  const cum = cumulative(pts)
+  const out: ResolvedGuide[] = []
+  for (const g of guides) {
+    const mid = { x: (g.a.x + g.b.x) / 2, y: (g.a.y + g.b.y) / 2 }
+    const hit = projectOnto(pts, cum, mid)
+    if (hit.d > reach) { onDrop?.(g, hit.d); continue }
+    const dir = unit(g.a, g.b)
+    if (!isFinite(dir.x) || !isFinite(dir.y)) continue
+    // Nearest spine sample, for the local frame.
+    const i = hit.t >= 0.5 ? hit.i : hit.i - 1
+    const t = tangentAt(pts, Math.max(0, Math.min(pts.length - 1, i)), closed)
+    const n = { x: -t.y, y: t.x }
+    // Angle from the normal toward the tangent.
+    let rel = Math.atan2(dir.x * t.x + dir.y * t.y, dir.x * n.x + dir.y * n.y)
+    // A guide has no head or tail — drawing it the other way round must mean
+    // the same angle, so fold it into the half-turn around the normal.
+    if (rel > Math.PI / 2) rel -= Math.PI
+    if (rel < -Math.PI / 2) rel += Math.PI
+    const cap = (MAX_BAR_ANGLE * Math.PI) / 180
+    out.push({ s: hit.s, rel: Math.max(-cap, Math.min(cap, rel)) })
+  }
+  return out.sort((x, y) => x.s - y.s)
+}
+
+/** How far from a column a guide may sit and still be taken as meant for it. */
+export const GUIDE_REACH_MM = 3
+
+/**
+ * Give each guide to the ONE path it was drawn across.
+ *
+ * A satin object can hold several unrelated strokes. A guide is for one of
+ * them, and handing every guide to every stroke would both turn bars nobody
+ * asked to turn and report each guide as off-column for all the strokes it
+ * was not drawn on.
+ *
+ * `reach` scales with the column so a wide one still accepts a guide drawn
+ * through it; a guide beyond every path comes back as an orphan rather than
+ * being snapped to the nearest, because snapping would silently put the angle
+ * somewhere nobody chose.
+ */
+export function assignGuides(
+  paths: readonly Pt[][], guides: readonly AngleGuide[], reach = GUIDE_REACH_MM,
+): { byPath: Map<Pt[], AngleGuide[]>; orphans: { guide: AngleGuide; d: number }[] } {
+  const byPath = new Map<Pt[], AngleGuide[]>()
+  const orphans: { guide: AngleGuide; d: number }[] = []
+  const walks = paths.map((p) => {
+    const pts = dedupe(p)
+    return pts.length >= 2 ? { path: p, pts, cum: cumulative(pts) } : null
+  })
+  for (const g of guides) {
+    const mid = { x: (g.a.x + g.b.x) / 2, y: (g.a.y + g.b.y) / 2 }
+    let best: { path: Pt[]; d: number } | null = null
+    for (const w of walks) {
+      if (!w) continue
+      const d = projectOnto(w.pts, w.cum, mid).d
+      if (!best || d < best.d) best = { path: w.path, d }
+    }
+    if (!best || best.d > reach) { orphans.push({ guide: g, d: best?.d ?? Infinity }); continue }
+    const list = byPath.get(best.path)
+    if (list) list.push(g); else byPath.set(best.path, [g])
+  }
+  return { byPath, orphans }
+}
+
+/**
+ * Bar angle at arc length `s`, interpolating between guides.
+ *
+ * Outside the outermost guides the nearest guide's angle is HELD rather than
+ * decayed back to square. A digitizer who sets one angle on a stroke means it
+ * for the stroke, and fading to perpendicular at the ends would twist exactly
+ * the part of a letter where the direction matters most.
+ */
+export function angleAt(guides: readonly ResolvedGuide[], s: number, fallback: number): number {
+  if (!guides.length) return fallback
+  if (s <= guides[0].s) return guides[0].rel
+  const last = guides[guides.length - 1]
+  if (s >= last.s) return last.rel
+  for (let i = 1; i < guides.length; i++) {
+    const a = guides[i - 1], b = guides[i]
+    if (s > b.s) continue
+    const span = b.s - a.s
+    const f = span > 1e-9 ? (s - a.s) / span : 0
+    return a.rel + (b.rel - a.rel) * f
+  }
+  return last.rel
+}
 
 /** Cumulative arc length along a polyline. */
 function cumulative(pts: Pt[]): number[] {
@@ -124,13 +288,21 @@ export function findCorners(pts: Pt[]): number[] {
  * Returns the stitches and the side the next one should start on, so a column
  * split at corners keeps alternating across the join.
  */
-function smoothColumn(pts: Pt[], p: SatinParams, closed: boolean, startSide: number):
-  { stitches: Stitch[]; side: number } {
+function smoothColumn(
+  pts: Pt[], p: SatinParams, closed: boolean, startSide: number,
+  guides: readonly ResolvedGuide[] = [], sOffset = 0,
+): { stitches: Stitch[]; side: number } {
   const half = (p.width + p.pullComp) / 2
   const density = Math.max(0.1, p.density)
   const fine = resample(pts, Math.min(0.15, density / 3))
   if (fine.length < 2) return { stitches: [], side: startSide }
   const cum = cumulative(fine)
+  // The bar's angle off square: the uniform lean by default, or whatever the
+  // guides say at this point on the column. They are the same quantity, so a
+  // guide simply overrides the lean where one has been placed.
+  const cap = (MAX_BAR_ANGLE * Math.PI) / 180
+  const leanRad = Math.max(-cap, Math.min(cap, ((p.lean || 0) * Math.PI) / 180))
+  const barAngle = (i: number) => angleAt(guides, cum[i] + sOffset, leanRad)
 
   const out: Stitch[] = []
   let side = startSide
@@ -163,11 +335,12 @@ function smoothColumn(pts: Pt[], p: SatinParams, closed: boolean, startSide: num
       carried = Math.max(0, carried - step)
     }
 
-    // Lean: shift each penetration ALONG the path, in opposite directions on
-    // the two rails, so the bar crosses at an angle instead of square on.
-    // The shift is half*tan(lean), which is exactly the offset that turns a
-    // perpendicular bar into one leaning by `lean` degrees.
-    const slide = half * Math.tan((Math.max(-70, Math.min(70, p.lean || 0)) * Math.PI) / 180) * side
+    // Turning a bar off square means sliding each penetration ALONG the path,
+    // in opposite directions on the two rails. The shift is half*tan(angle),
+    // which is exactly what turns a perpendicular bar into one at `angle` —
+    // and it lengthens the bar to half/cos(angle), so the column still spans
+    // the same width ACROSS.
+    const slide = half * Math.tan(barAngle(i)) * side
     out.push({
       x: fine[i].x + n.x * half * side + t.x * slide,
       y: fine[i].y + n.y * half * side + t.y * slide,
@@ -179,7 +352,7 @@ function smoothColumn(pts: Pt[], p: SatinParams, closed: boolean, startSide: num
   const last = fine[fine.length - 1]
   const tl = tangentAt(fine, fine.length - 1, closed)
   const nl = { x: -tl.y, y: tl.x }
-  const tailSlide = half * Math.tan((Math.max(-70, Math.min(70, p.lean || 0)) * Math.PI) / 180) * side
+  const tailSlide = half * Math.tan(barAngle(fine.length - 1)) * side
   const tail = {
     x: last.x + nl.x * half * side + tl.x * tailSlide,
     y: last.y + nl.y * half * side + tl.y * tailSlide,
@@ -274,14 +447,25 @@ function cornerFan(pts: Pt[], i: number, p: SatinParams, startSide: number):
  * are mitred. Geometry that still cannot be sewn is refused by satinCheck
  * before this is ever called.
  */
-export function satinColumn(path: Pt[], p: SatinParams): Stitch[] {
+export function satinColumn(
+  path: Pt[], p: SatinParams, guides: readonly AngleGuide[] = [],
+  onDrop?: (g: AngleGuide, d: number) => void,
+): Stitch[] {
   const pts = dedupe(path)
   if (pts.length < 2) return []
   if ((p.width + p.pullComp) / 2 <= 0) return []
   const closed = isClosed(path)
 
+  // Resolved against the WHOLE spine, once, so arc length means the same
+  // thing in every segment the corners split it into.
+  const half = (p.width + p.pullComp) / 2
+  const resolved = guides.length
+    ? resolveGuides(pts, guides, closed, Math.max(half * 2, GUIDE_REACH_MM), onDrop)
+    : []
+  const cumAll = cumulative(pts)
+
   const corners = findCorners(pts)
-  if (!corners.length) return smoothColumn(pts, p, closed, 1).stitches
+  if (!corners.length) return smoothColumn(pts, p, closed, 1, resolved, 0).stitches
 
   const out: Stitch[] = []
   let side = 1
@@ -289,7 +473,7 @@ export function satinColumn(path: Pt[], p: SatinParams): Stitch[] {
   for (const c of corners) {
     const seg = pts.slice(from, c + 1)
     if (seg.length >= 2) {
-      const r = smoothColumn(seg, p, false, side)
+      const r = smoothColumn(seg, p, false, side, resolved, cumAll[from])
       out.push(...r.stitches)
       side = r.side
     }
@@ -299,7 +483,9 @@ export function satinColumn(path: Pt[], p: SatinParams): Stitch[] {
     from = c
   }
   const tailSeg = pts.slice(from)
-  if (tailSeg.length >= 2) out.push(...smoothColumn(tailSeg, p, false, side).stitches)
+  if (tailSeg.length >= 2) {
+    out.push(...smoothColumn(tailSeg, p, false, side, resolved, cumAll[from]).stitches)
+  }
   return out
 }
 

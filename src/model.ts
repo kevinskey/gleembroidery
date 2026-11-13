@@ -13,6 +13,7 @@
 import type { Shape } from './nodes'
 import type { TextSpec } from './text'
 import type { FrozenPlan } from './stitchedit'
+import type { AngleGuide } from './satin'
 
 export interface Pt {
   x: number
@@ -248,6 +249,18 @@ export interface EmbObject {
    */
   entry?: Pt
   exit?: Pt
+  /**
+   * Lines drawn ACROSS a satin column stating which way its bars should run.
+   *
+   * Geometry, not a parameter — they live in document mm and must be carried
+   * by every transform exactly like `paths` and `shapes`, or moving an object
+   * leaves its angles behind. See satin.ts for what they mean.
+   *
+   * Only read by the SPINE satin. A two-rail column already states its
+   * directions: its rungs ARE its angle guides, so a second mechanism there
+   * would be two sources of truth for one thing.
+   */
+  guides?: AngleGuide[]
   run: RunParams
   satin: SatinParams
   fill: FillParams

@@ -17,6 +17,7 @@
 // than partially read.
 
 import type { PathNode, Shape } from './nodes'
+import type { AngleGuide } from './satin'
 import type { FrozenPlan } from './stitchedit'
 import type { Stitch } from './stitches'
 import {
@@ -84,7 +85,19 @@ function hoopOut(h: Hoop) {
   }
 }
 
-function objectOut(o: EmbObject) {
+/**
+ * The geometry keys of a saved object.
+ *
+ * Split out because the SIGNATURE folds coordinates numerically — stringifying
+ * 20k points costs ~10 ms on every render, which is a dropped frame on every
+ * mouse move of a drag. Everything NOT listed here is a setting, and settings
+ * are hashed wholesale so no new one can be forgotten. SIGNATURE_GEOMETRY_KEYS
+ * is checked against the real output by the suite, so adding a geometry field
+ * without listing it here fails a test rather than silently going unhashed.
+ */
+export const SIGNATURE_GEOMETRY_KEYS = ['paths', 'shapes', 'guides'] as const
+
+export function objectOut(o: EmbObject) {
   return {
     id: o.id,
     name: o.name,
@@ -97,6 +110,9 @@ function objectOut(o: EmbObject) {
     paths: o.paths.map((p) => p.map((q) => [q.x, q.y])),
     ...(o.entry ? { entry: [o.entry.x, o.entry.y] } : {}),
     ...(o.exit ? { exit: [o.exit.x, o.exit.y] } : {}),
+    ...(o.guides?.length
+      ? { guides: o.guides.map((g) => [g.a.x, g.a.y, g.b.x, g.b.y]) }
+      : {}),
     applique: { ...o.applique },
     puff: { ...o.puff },
     knockdown: { ...o.knockdown },
@@ -263,6 +279,24 @@ function ptIn(v: unknown): Pt | undefined {
     ? { x: v[0], y: v[1] } : undefined
 }
 
+/**
+ * Angle guides, stored flat as [ax, ay, bx, by].
+ *
+ * A guide whose numbers are not all there is DROPPED rather than repaired: a
+ * half-read guide would still turn the bars, just not where anyone put it,
+ * and a column with no guides sews correctly.
+ */
+function guidesIn(v: unknown): AngleGuide[] | undefined {
+  if (!Array.isArray(v)) return undefined
+  const out: AngleGuide[] = []
+  for (const g of v) {
+    if (!Array.isArray(g) || g.length !== 4) continue
+    if (!g.every((n) => typeof n === 'number' && isFinite(n))) continue
+    out.push({ a: { x: g[0], y: g[1] }, b: { x: g[2], y: g[3] } })
+  }
+  return out.length ? out : undefined
+}
+
 function shapesIn(v: unknown): Shape[] | undefined {
   if (!Array.isArray(v)) return undefined
   const pt = (q: unknown): Pt | undefined =>
@@ -350,6 +384,7 @@ function objectIn(v: unknown, index: number): EmbObject | null {
     shapes: shapesIn(v.shapes),
     entry: ptIn(v.entry),
     exit: ptIn(v.exit),
+    guides: guidesIn(v.guides),
     applique: {
       tackWidth: num(ap.tackWidth, dApp.tackWidth),
       tackDensity: num(ap.tackDensity, dApp.tackDensity),
@@ -483,7 +518,7 @@ export function projectFilename(doc: Doc): string {
 }
 
 /**
- * A cheap content signature for a document.
+ * A content signature for a document.
  *
  * `useStitchPlan` must re-generate when the document CHANGES, not when its
  * object identity changes. Keying a React effect on the doc object itself
@@ -492,36 +527,64 @@ export function projectFilename(doc: Doc): string {
  * spread on every render would re-trigger the effect forever, clear its own
  * debounce each pass, and never produce a plan at all.
  *
- * Every coordinate is folded in, so an edit that preserves point counts still
- * changes the signature. 20k points cost well under a millisecond.
+ * TAKEN FROM THE SAVE FORMAT, not from a hand-written list of fields.
+ *
+ * The hand-written version was wrong, and wrong in the worst available way:
+ * it covered the fields that existed when it was written, so every setting
+ * added afterwards — the bar lean, angle guides, appliqué, puff, knockdown,
+ * entry and exit — changed the document without changing its signature. The
+ * control worked, the plan did not regenerate, and the canvas showed the old
+ * stitches. That reads exactly like a setting that does nothing.
+ *
+ * `objectOut` is by definition the complete description of an object: it is
+ * what a saved file contains, and the round-trip test asserts that nothing is
+ * missing from it. Hashing that makes the signature self-maintaining — a new
+ * field is covered the moment it can be saved, with nothing to remember.
+ *
+ * `savedAt` is deliberately NOT included (it would differ on every call).
  */
 export function docSignature(doc: Doc): string {
   let h = 0x811c9dc5
+  const mixStr = (v: string) => {
+    for (let i = 0; i < v.length; i++) {
+      h ^= v.charCodeAt(i)
+      h = Math.imul(h, 0x01000193)
+    }
+  }
+  mixStr(doc.name)
+  mixStr(doc.spacing)
   const mix = (n: number) => {
     h ^= n | 0
     h = Math.imul(h, 0x01000193)
   }
-  const mixStr = (v: string) => { for (let i = 0; i < v.length; i++) mix(v.charCodeAt(i)) }
-  mixStr(doc.name)
-  mixStr(doc.spacing)
-  mix(Math.round(doc.hoop.widthMm * 100))
-  mix(Math.round(doc.hoop.heightMm * 100))
+  mixStr(JSON.stringify(hoopOut(doc.hoop)))
   for (const o of doc.objects) {
-    mixStr(o.id); mixStr(o.type); mixStr(o.color)
-    mix(o.visible ? 1 : 0)
-    mix(Math.round(o.run.length * 1000))
-    const sa = o.satin
-    mix(Math.round(sa.width * 1000)); mix(Math.round(sa.density * 1000))
-    mix(Math.round(sa.pullComp * 1000)); mixStr(sa.underlay.join('+'))
-    const f = o.fill
-    mix(Math.round(f.angle * 100)); mix(Math.round(f.spacing * 1000))
-    mix(Math.round(f.length * 1000)); mix(Math.round(f.stagger * 1000))
-    mix(Math.round(f.pullComp * 1000)); mixStr(f.underlay.join('+'))
-    mix(f.border.enabled ? 1 : 0)
-    mix(Math.round(f.border.width * 1000)); mix(Math.round(f.border.density * 1000))
+    // Settings: hashed wholesale from the save format, so a new one cannot be
+    // left out. Cheap — there are a few dozen numbers per object.
+    const saved: Record<string, unknown> = objectOut(o)
+    const settings: Record<string, unknown> = {}
+    for (const k of Object.keys(saved)) {
+      if (!(SIGNATURE_GEOMETRY_KEYS as readonly string[]).includes(k)) settings[k] = saved[k]
+    }
+    mixStr(JSON.stringify(settings))
+    // Geometry: folded numerically. Every coordinate goes in, so an edit that
+    // preserves point counts still changes the signature.
     for (const path of o.paths) {
       mix(path.length)
       for (const q of path) { mix(Math.round(q.x * 1000)); mix(Math.round(q.y * 1000)) }
+    }
+    for (const sh of o.shapes ?? []) {
+      mix(sh.nodes.length); mix(sh.closed ? 1 : 0)
+      for (const n of sh.nodes) {
+        mix(Math.round(n.x * 1000)); mix(Math.round(n.y * 1000))
+        mix(Math.round((n.hIn?.x ?? 0) * 1000)); mix(Math.round((n.hIn?.y ?? 0) * 1000))
+        mix(Math.round((n.hOut?.x ?? 0) * 1000)); mix(Math.round((n.hOut?.y ?? 0) * 1000))
+        mix(n.smooth ? 1 : 0)
+      }
+    }
+    for (const g of o.guides ?? []) {
+      mix(Math.round(g.a.x * 1000)); mix(Math.round(g.a.y * 1000))
+      mix(Math.round(g.b.x * 1000)); mix(Math.round(g.b.y * 1000))
     }
   }
   return (h >>> 0).toString(36) + ':' + doc.objects.length

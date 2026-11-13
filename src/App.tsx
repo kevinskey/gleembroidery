@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
-import { close, toRegions } from './geometry'
+import { close, segDist, toRegions } from './geometry'
 import { useHistory } from './history'
 import { CELL_MM, analyseDensity } from './density'
 import {
@@ -77,7 +77,7 @@ const ROTATE_PX = 26
 const AUTOSAVE_KEY = 'gleembroidery.autosave.v1'
 
 /** Canvas tools. 'select' picks/moves/resizes; empty space still pans. */
-type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column' | 'wand' | 'text' | 'stitch'
+type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column' | 'angle' | 'wand' | 'text' | 'stitch'
 
 const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
   {
@@ -121,6 +121,15 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
         <path d="M2 4c6-3 12 3 18 0" stroke="currentColor" strokeWidth="1.3" fill="none" />
         <path d="M2 12c6-3 12 3 18 0" stroke="currentColor" strokeWidth="1.3" fill="none" />
         <path d="M4 3.4v9.2M9 4.6v9.2M14 5.6v9.2M19 3.9v9.2" stroke="currentColor" strokeWidth="0.7" opacity="0.8" />
+      </svg>
+    ),
+  },
+  {
+    id: 'angle', label: 'Angle', hint: 'Drag a line ACROSS a satin column to set which way its bars run. Guides interpolate between each other; click one to remove it (G)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M1 4h20M1 12h20" stroke="currentColor" strokeWidth="1.1" opacity="0.55" fill="none" />
+        <path d="M4 13.2L9 2.8M12 13.2L17 2.8" stroke="currentColor" strokeWidth="1.5" fill="none" />
       </svg>
     ),
   },
@@ -414,6 +423,10 @@ export default function App() {
   const [letterBoxes, setLetterBoxes] = useState<{ id: string; letters: LetterOutline[] } | null>(null)
   const letterDrag = useRef<{ id: string; index: number; start: Pt; from: LetterNudge } | null>(null)
   const endDrag = useRef<{ id: string; which: 'entry' | 'exit' } | null>(null)
+  // The angle guide being drawn. The ref drives the gesture; the state is
+  // only so the canvas can show it while the mouse is still down.
+  const guideDraw = useRef<{ id: string; a: Pt } | null>(null)
+  const [guideDrag, setGuideDrag] = useState<{ a: Pt; b: Pt } | null>(null)
   /**
    * Reference image behind the design, and the pixels the wand reads.
    *
@@ -530,8 +543,14 @@ export default function App() {
         ? { entry: selected.entry, exit: selected.exit } : null,
       density: showDensity ? { cells: density.hotspots, cellMm: CELL_MM } : null,
       picked: tool === 'stitch' ? picked : null,
+      // Guides are shown while the Angle tool is active, and otherwise only
+      // on the selected object: left on permanently they would clutter a
+      // design that has dozens of them.
+      guides: tool === 'angle' || selected?.guides?.length
+        ? { lines: selected?.guides ?? [], draft: guideDrag }
+        : null,
     })
-  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop, letterBoxes, showDensity, density, picked])
+  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop, letterBoxes, showDensity, density, picked, guideDrag])
 
   useEffect(() => { draw() }, [draw])
 
@@ -1146,6 +1165,24 @@ export default function App() {
     }
     if (e.button !== 0) return
     const p = atMm(e)
+    if (tool === 'angle') {
+      // A guide belongs to an object, so there has to be one. Clicking with
+      // nothing selected picks whatever is under the cursor rather than
+      // silently doing nothing.
+      const target = selected ?? pickObject(doc.objects, p, PICK_PX / view.scale)
+      if (!target) { setSelectedIds([]); return }
+      if (!selected || selected.id !== target.id) setSelectedIds([target.id])
+      // A click ON an existing guide removes it; drawing a new one is a drag.
+      const tol = PICK_PX / view.scale
+      const hit = (target.guides ?? []).findIndex((g) => segDist(g.a, g.b, p) <= tol)
+      if (hit >= 0) {
+        patch(target.id, (o) => ({ ...o, guides: (o.guides ?? []).filter((_, i) => i !== hit) }))
+        return
+      }
+      guideDraw.current = { id: target.id, a: p }
+      setGuideDrag({ a: p, b: p })
+      return
+    }
     if (tool === 'text') { addText(p); return }
     if (tool === 'stitch') {
       // Shift adds to the selection; a plain click replaces it.
@@ -1244,20 +1281,21 @@ export default function App() {
         objects: d.objects.map((o) => {
           const it = x.items.find((q) => q.id === o.id)
           if (!it) return o
-          const paths = x.kind === 'move' ? movePaths(it.paths, p.x - x.start.x, p.y - x.start.y)
-            : x.kind === 'rotate' ? rotatePaths(it.paths, pivot, rad)
-            : fitPaths(it.paths, x.from, to!)
+          // ONE mapper, applied to every piece of geometry the object owns.
+          // Each of these has been forgotten here at least once; anything that
+          // lives in document mm and is not transformed stays behind when the
+          // object moves.
+          const mapPaths = (ps: Pt[][]) =>
+            x.kind === 'move' ? movePaths(ps, p.x - x.start.x, p.y - x.start.y)
+              : x.kind === 'rotate' ? rotatePaths(ps, pivot, rad)
+              : fitPaths(ps, x.from, to!)
+          const m = (q: Pt) => mapPaths([[q]])[0][0]
+          const paths = mapPaths(it.paths)
           // Shapes carry the editable outline; a transform that ignored them
           // would resurrect the pre-drag curve the next time it was flattened.
           const shapes = o.shapes?.map((sh) => ({
             ...sh,
             nodes: sh.nodes.map((n) => {
-              const m = (q: Pt) => {
-                const one = x.kind === 'move' ? movePaths([[q]], p.x - x.start.x, p.y - x.start.y)
-                  : x.kind === 'rotate' ? rotatePaths([[q]], pivot, rad)
-                  : fitPaths([[q]], x.from, to!)
-                return one[0][0]
-              }
               const at = m({ x: n.x, y: n.y })
               return {
                 ...n, x: at.x, y: at.y,
@@ -1265,7 +1303,16 @@ export default function App() {
               }
             }),
           }))
-          return { ...o, paths, ...(shapes ? { shapes } : {}) }
+          // Angle guides are geometry too — they say which way the bars run
+          // AT A PLACE on the column, so they have to travel with it.
+          const guides = o.guides?.map((g) => ({ a: m(g.a), b: m(g.b) }))
+          return {
+            ...o, paths,
+            ...(shapes ? { shapes } : {}),
+            ...(guides ? { guides } : {}),
+            ...(o.entry ? { entry: m(o.entry) } : {}),
+            ...(o.exit ? { exit: m(o.exit) } : {}),
+          }
         }),
       }))
       return
@@ -1277,6 +1324,8 @@ export default function App() {
       const h = b ? hitHandle(b, p, HANDLE_PX / view.scale) : null
       setHoverCursor(h ? handleCursor(h) : pickObject(doc.objects, p, PICK_PX / view.scale) ? 'move' : null)
     }
+    const gd = guideDraw.current
+    if (gd) { setGuideDrag({ a: gd.a, b: atMm(e) }); return }
     const pd = pickDrag.current
     if (pd && tool === 'stitch') {
       const p = atMm(e)
@@ -1412,6 +1461,21 @@ export default function App() {
           maxX: Math.max(pd.start.x, b.x), maxY: Math.max(pd.start.y, b.y),
         }))
       }
+      return
+    }
+    if (guideDraw.current) {
+      const g = guideDraw.current
+      guideDraw.current = null
+      setGuideDrag(null)
+      const b = atMm(e)
+      // A guide is a DIRECTION, so a slipped click has no angle to read.
+      // Refusing a short one is better than storing whatever noise the mouse
+      // happened to produce.
+      if (Math.hypot(b.x - g.a.x, b.y - g.a.y) * view.scale < 8) {
+        setNote('drag across the column to set an angle — a click is too short to read one')
+        return
+      }
+      patch(g.id, (o) => ({ ...o, guides: [...(o.guides ?? []), { a: g.a, b }] }))
       return
     }
     if (endDrag.current) { endDrag.current = null; history.end(); return }
@@ -1553,7 +1617,7 @@ export default function App() {
         return
       }
       const pick: Record<string, Tool> = {
-        v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column', w: 'wand', t: 'text', s: 'stitch',
+        v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column', g: 'angle', w: 'wand', t: 'text', s: 'stitch',
         r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand',
       }
       const t = pick[e.key.toLowerCase()]
@@ -1968,6 +2032,31 @@ export default function App() {
                       { id: 'zigzag', label: 'Zigzag' },
                     ]}
                     onChange={(next) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, underlay: next } }))} />
+                  <div className="row wide">
+                    <label>Angle guides</label>
+                    {selected.twoRail ? (
+                      <span className="dim">
+                        Not used on a two-rail column — its rungs already say which way
+                        the bars run.
+                      </span>
+                    ) : (
+                      <div className="checks">
+                        <button
+                          className={tool === 'angle' ? 'primary' : undefined}
+                          title="Drag a line across the column to set the bar direction there"
+                          onClick={() => setTool(tool === 'angle' ? 'select' : 'angle')}>
+                          {selected.guides?.length
+                            ? `${selected.guides.length} guide${selected.guides.length === 1 ? '' : 's'}`
+                            : 'Draw (G)'}
+                        </button>
+                        {!!selected.guides?.length && (
+                          <button onClick={() => patch(selected.id, (o) => ({ ...o, guides: undefined }))}>
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </fieldset>
               )}
 

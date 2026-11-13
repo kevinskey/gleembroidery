@@ -31,6 +31,16 @@ export function ringArea(ring: Pt[]): number {
   return a / 2
 }
 
+/** Distance from p to the SEGMENT ab — not to the infinite line through it. */
+export function segDist(a: Pt, b: Pt, p: Pt): number {
+  const dx = b.x - a.x, dy = b.y - a.y
+  const len2 = dx * dx + dy * dy
+  const t = len2 > 1e-12
+    ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2))
+    : 0
+  return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t))
+}
+
 export function pointInPoly(poly: Pt[], p: Pt): boolean {
   let inside = false
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {

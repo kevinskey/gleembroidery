@@ -6,14 +6,14 @@ import { appliquePhases, centerPlan, digitize, orientToEntryExit, MAX_STITCH_MM,
 import { tatamiFill } from '../src/fill'
 import { dist, resample, toRegions } from '../src/geometry'
 import { DEFAULT_APPLIQUE, DEFAULT_FILL, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, emptyDoc, newObject, orderedUnderlay, type Pt } from '../src/model'
-import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths } from '../src/satin'
+import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths , angleAt, assignGuides, resolveGuides } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
-import { SCHEMA_VERSION, ProjectError, deserialize, docSignature, serialize } from '../src/project'
+import { SCHEMA_VERSION, SIGNATURE_GEOMETRY_KEYS, ProjectError, deserialize, docSignature, objectOut, serialize } from '../src/project'
 import { clonePlan, deleteStitches, freeze, freezeState, moveStitches, penetrationCount, pickStitch, pickStitchesIn } from '../src/stitchedit'
 import { appliqueCutSvg, packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { NOMINAL_PER_MM2, SEVERE_RATIO, WARN_RATIO, analyseDensity, densityColour } from '../src/density'
-import { OVERLOCK_LEAN, PUFF_MAX_MM, PUFF_MIN_MM, puffCaps, puffCheck } from '../src/satin'
-import { DEFAULT_KNOCKDOWN, DEFAULT_PUFF } from '../src/model'
+import { GUIDE_REACH_MM, MAX_BAR_ANGLE, OVERLOCK_LEAN, PUFF_MAX_MM, PUFF_MIN_MM, puffCaps, puffCheck } from '../src/satin'
+import { DEFAULT_KNOCKDOWN, DEFAULT_PUFF, type Doc } from '../src/model'
 import { unionSelfChecked } from '../src/boolean'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
@@ -460,6 +460,10 @@ console.log('\n# project save / reopen')
   // either.
   doc.objects[0].entry = { x: -11, y: 7 }
   doc.objects[0].exit = { x: 13, y: -4 }
+  doc.objects[1].guides = [
+    { a: { x: -6, y: 22 }, b: { x: -4, y: 26 } },
+    { a: { x: 9, y: 22 }, b: { x: 12, y: 26 } },
+  ]
   doc.objects[1].applique = {
     tackWidth: 1.9, tackDensity: 0.55, borderWidth: 3.1,
     borderDensity: 0.37, borderPullComp: 0.25, border: false, borderStyle: 'overlock',
@@ -484,6 +488,17 @@ console.log('\n# project save / reopen')
   ok(back.objects[1].applique.borderStyle === 'overlock', 'including a faux overlock edge')
   ok(back.objects[1].satin.lean === 18, 'the satin bar lean survives')
   ok(back.objects[0].knockdown.margin === 2.1, 'the knockdown recipe survives')
+  ok(back.objects[1].guides?.length === 2 && back.objects[1].guides[1].b.x === 12,
+    'angle guides survive')
+  // A guide missing a number would still turn the bars, just somewhere nobody
+  // put it — so it is dropped, not repaired.
+  {
+    const bad = JSON.parse(text)
+    bad.doc.objects[1].guides = [[1, 2, 3], [4, 5, 6, 7]]
+    const r = deserialize(JSON.stringify(bad))
+    ok(r.objects[1].guides?.length === 1, 'a malformed guide is dropped, not repaired',
+      `${r.objects[1].guides?.length}`)
+  }
   ok(back.hoop.widthMm === doc.hoop.widthMm && back.spacing === doc.spacing,
     'hoop and bracket spacing survive', `${back.hoop.name} / ${back.spacing}`)
   ok(back.objects[0].thread.code === '1902', 'thread assignment survives')
@@ -2159,6 +2174,258 @@ console.log('\n# knockdown and faux overlock')
     ok(!/overlock/.test(plain[2].label), 'and an ordinary border does not')
     // Same phases either way — it is a finish, not a different sequence.
     ok(plain.length === serged.length, 'the sequence is unchanged by the edge style')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# manual satin-angle guides')
+{
+  const line: Pt[] = [{ x: 0, y: 0 }, { x: 60, y: 0 }]
+  const base = { ...DEFAULT_SATIN(), width: 4, density: 0.5, pullComp: 0, underlay: [], lean: 0 }
+
+  // Widest bar step in x over a window, which is how far off square a bar is.
+  const barDx = (st: { x: number; y: number }[], from = -Infinity, to = Infinity) => {
+    let worst = 0
+    for (let i = 1; i < st.length; i++) {
+      const a = st[i - 1], b = st[i]
+      if (a.x < from || a.x > to || b.x < from || b.x > to) continue
+      worst = Math.max(worst, Math.abs(b.x - a.x))
+    }
+    return worst
+  }
+
+  // --- a guide states the angle, and only where it was drawn
+  {
+    // A guide at x=30 leaning 45 degrees: drawn from lower-left to upper-right
+    // ACROSS the column, which runs along +x with its normal along y.
+    const g = { a: { x: 28, y: -2 }, b: { x: 32, y: 2 } }
+    const plain = satinColumn(line, base)
+    const steered = satinColumn(line, base, [g])
+    ok(barDx(plain) < 1, 'without guides the bars cross square', barDx(plain).toFixed(2))
+    ok(barDx(steered) > 2.5, 'a guide turns the bars', barDx(steered).toFixed(2))
+    ok(plain.length > 20 && steered.length > 20, 'both are full columns')
+  }
+
+  // --- ONE guide governs the WHOLE column, not just where it sits
+  {
+    const g = { a: { x: 28, y: -2 }, b: { x: 32, y: 2 } }
+    const st = satinColumn(line, base, [g])
+    const nearStart = barDx(st, 0, 12)
+    const nearEnd = barDx(st, 48, 60)
+    ok(nearStart > 2.5 && nearEnd > 2.5,
+      'a single guide is held to both ends rather than fading to square',
+      `start ${nearStart.toFixed(2)}, end ${nearEnd.toFixed(2)}`)
+  }
+
+  // --- two guides INTERPOLATE between them
+  {
+    const square = { a: { x: 5, y: -2 }, b: { x: 5, y: 2 } }      // 0 degrees
+    const slanted = { a: { x: 53, y: -2 }, b: { x: 57, y: 2 } }   // 45 degrees
+    const st = satinColumn(line, base, [square, slanted])
+    const atStart = barDx(st, 0, 10)
+    const atMid = barDx(st, 25, 35)
+    const atEnd = barDx(st, 50, 60)
+    ok(atStart < atMid && atMid < atEnd,
+      'the angle ramps between two guides',
+      `${atStart.toFixed(2)} < ${atMid.toFixed(2)} < ${atEnd.toFixed(2)}`)
+  }
+
+  // --- drawing a guide the other way round means the same thing
+  {
+    const g = { a: { x: 28, y: -2 }, b: { x: 32, y: 2 } }
+    const flipped = { a: g.b, b: g.a }
+    const one = satinColumn(line, base, [g])
+    const other = satinColumn(line, base, [flipped])
+    const same = one.length === other.length &&
+      one.every((s, i) => Math.abs(s.x - other[i].x) < 1e-6 && Math.abs(s.y - other[i].y) < 1e-6)
+    ok(same, 'a guide has no direction — drawing it backwards is identical')
+  }
+
+  // --- the column still spans the same WIDTH across
+  {
+    const g = { a: { x: 28, y: -2 }, b: { x: 32, y: 2 } }
+    const spanY = (st: { y: number }[]) =>
+      Math.max(...st.map((s) => s.y)) - Math.min(...st.map((s) => s.y))
+    ok(Math.abs(spanY(satinColumn(line, base, [g])) - spanY(satinColumn(line, base))) < 0.2,
+      'turning the bars does not change the width across')
+  }
+
+  // --- the angle is CAPPED
+  {
+    // Nearly parallel to the column: past the cap the bars stop overlapping.
+    const steep = { a: { x: 20, y: -0.2 }, b: { x: 40, y: 0.2 } }
+    const res = resolveGuides(line, [steep], false, 99)
+    ok(res.length === 1, 'a near-parallel guide still resolves')
+    ok(Math.abs(res[0].rel) <= (MAX_BAR_ANGLE * Math.PI) / 180 + 1e-9,
+      'and is clamped to the bar-angle limit',
+      `${((res[0].rel * 180) / Math.PI).toFixed(1)} deg`)
+  }
+
+  // --- a guide off in space is REFUSED, not snapped
+  {
+    const far = { a: { x: 30, y: 40 }, b: { x: 34, y: 44 } }
+    let dropped = 0
+    resolveGuides(line, [far], false, GUIDE_REACH_MM, () => dropped++)
+    ok(dropped === 1, 'a guide nowhere near the column is dropped')
+
+    const d = emptyDoc()
+    d.objects = [newObject({ name: 'S', type: 'satin', paths: [line], satin: base })]
+    d.objects[0].guides = [far]
+    ok(digitize(d).warnings.some((w) => /angle guide sits/.test(w)),
+      'and the design says so', digitize(d).warnings.find((w) => /guide/.test(w)) ?? '')
+  }
+
+  // --- each guide belongs to the ONE stroke it was drawn on
+  {
+    const strokeA: Pt[] = [{ x: 0, y: 0 }, { x: 40, y: 0 }]
+    const strokeB: Pt[] = [{ x: 0, y: 30 }, { x: 40, y: 30 }]
+    const onA = { a: { x: 18, y: -2 }, b: { x: 22, y: 2 } }
+    const onB = { a: { x: 18, y: 28 }, b: { x: 22, y: 32 } }
+    const { byPath, orphans } = assignGuides([strokeA, strokeB], [onA, onB])
+    ok(orphans.length === 0, 'both guides find a stroke')
+    ok(byPath.get(strokeA)?.length === 1 && byPath.get(strokeB)?.length === 1,
+      'and each lands on its own', `A:${byPath.get(strokeA)?.length} B:${byPath.get(strokeB)?.length}`)
+    ok(byPath.get(strokeA)?.[0] === onA, 'the right one, not just one each')
+  }
+
+  // --- angleAt holds, interpolates, and falls back
+  {
+    ok(angleAt([], 5, 0.3) === 0.3, 'no guides means the lean is used')
+    const gs = [{ s: 10, rel: 0 }, { s: 20, rel: 1 }]
+    ok(angleAt(gs, 0, 0.9) === 0, 'before the first guide its angle is held')
+    ok(angleAt(gs, 99, 0.9) === 1, 'after the last guide its angle is held')
+    ok(Math.abs(angleAt(gs, 15, 0.9) - 0.5) < 1e-9, 'and between them it interpolates')
+  }
+
+  // --- determinism (spec 5): same input, same plan
+  {
+    const g = { a: { x: 28, y: -2 }, b: { x: 32, y: 2 } }
+    const a = satinColumn(line, base, [g])
+    const b = satinColumn(line, base, [g])
+    ok(JSON.stringify(a) === JSON.stringify(b), 'guided generation is deterministic')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# the plan regenerates when the document changes')
+{
+  // THE BUG THIS EXISTS FOR. docSignature used to be a hand-written list of
+  // fields, so every setting added after it was written changed the document
+  // WITHOUT changing its signature: useStitchPlan never re-ran, and the
+  // canvas kept showing stitches from before the change. A control that does
+  // nothing is worse than one that is missing, because nothing says so.
+  const base = () => {
+    const d = emptyDoc()
+    d.objects = [newObject({
+      // A FIXED id: newObject mints a fresh one each call, so two otherwise
+      // identical documents would differ and the stability check below would
+      // be testing the id generator rather than the signature.
+      id: 'fixed',
+      name: 'S', type: 'satin',
+      paths: [[{ x: 0, y: 0 }, { x: 30, y: 0 }]],
+      shapes: [{ closed: false, nodes: [{ x: 0, y: 0 }, { x: 30, y: 0 }] }],
+    })]
+    return d
+  }
+
+  // Every setting a saved file can hold, each changed on its own.
+  const edits: [string, (d: Doc) => void][] = [
+    ['name', (d) => { d.name = 'other' }],
+    ['hoop', (d) => { d.hoop = HOOPS.find((x) => x.name.includes('5.5'))! }],
+    ['spacing', (d) => { d.spacing = 'TJ600' }],
+    ['object name', (d) => { d.objects[0].name = 'renamed' }],
+    ['colour', (d) => { d.objects[0].color = '#00ff00' }],
+    ['thread', (d) => { d.objects[0].thread = { brand: 'Isacord', code: '1902' } }],
+    ['visibility', (d) => { d.objects[0].visible = false }],
+    ['stitch type', (d) => { d.objects[0].type = 'fill' }],
+    ['two-rail flag', (d) => { d.objects[0].twoRail = true }],
+    ['run length', (d) => { d.objects[0].run.length = 3.3 }],
+    ['satin width', (d) => { d.objects[0].satin.width = 6 }],
+    ['satin density', (d) => { d.objects[0].satin.density = 0.9 }],
+    ['satin pull comp', (d) => { d.objects[0].satin.pullComp = 0.44 }],
+    ['satin underlay', (d) => { d.objects[0].satin.underlay = ['edge', 'zigzag'] }],
+    ['bar lean', (d) => { d.objects[0].satin.lean = 30 }],
+    ['fill angle', (d) => { d.objects[0].fill.angle = 12 }],
+    ['fill spacing', (d) => { d.objects[0].fill.spacing = 0.7 }],
+    ['fill length', (d) => { d.objects[0].fill.length = 2.2 }],
+    ['fill stagger', (d) => { d.objects[0].fill.stagger = 0.2 }],
+    ['fill pull comp', (d) => { d.objects[0].fill.pullComp = 0.4 }],
+    ['fill underlay', (d) => { d.objects[0].fill.underlay = [] }],
+    ['fill border', (d) => { d.objects[0].fill.border.enabled = true }],
+    ['appliqué tack width', (d) => { d.objects[0].applique.tackWidth = 2.4 }],
+    ['appliqué border', (d) => { d.objects[0].applique.border = false }],
+    ['appliqué edge style', (d) => { d.objects[0].applique.borderStyle = 'overlock' }],
+    ['puff on', (d) => { d.objects[0].puff.enabled = true }],
+    ['puff thickness', (d) => { d.objects[0].puff.thickness = 2 }],
+    ['puff density scale', (d) => { d.objects[0].puff.densityScale = 0.6 }],
+    ['puff caps', (d) => { d.objects[0].puff.capEnds = false }],
+    ['knockdown spacing', (d) => { d.objects[0].knockdown.spacing = 3.3 }],
+    ['knockdown margin', (d) => { d.objects[0].knockdown.margin = 4 }],
+    ['knockdown angle', (d) => { d.objects[0].knockdown.angle = 80 }],
+    ['knockdown length', (d) => { d.objects[0].knockdown.length = 6 }],
+    ['entry point', (d) => { d.objects[0].entry = { x: 1, y: 2 } }],
+    ['exit point', (d) => { d.objects[0].exit = { x: 3, y: 4 } }],
+    ['angle guides', (d) => { d.objects[0].guides = [{ a: { x: 14, y: -2 }, b: { x: 16, y: 2 } }] }],
+    ['path geometry', (d) => { d.objects[0].paths[0][1].x = 31 }],
+    ['node geometry', (d) => { d.objects[0].shapes![0].nodes[1].x = 31 }],
+    ['node handles', (d) => { d.objects[0].shapes![0].nodes[0].hOut = { x: 5, y: 5 } }],
+    ['node smoothness', (d) => { d.objects[0].shapes![0].nodes[0].smooth = true }],
+    ['lettering', (d) => { d.objects[0].text = { ...DEFAULT_TEXT(), words: 'hi' } }],
+    ['an added object', (d) => { d.objects.push(newObject({ paths: [[{ x: 0, y: 0 }]] })) }],
+  ]
+  const before = docSignature(base())
+  let missed: string[] = []
+  for (const [what, edit] of edits) {
+    const d = base()
+    edit(d)
+    if (docSignature(d) === before) missed.push(what)
+  }
+  ok(missed.length === 0, `all ${edits.length} saveable settings change the signature`,
+    missed.length ? `MISSED: ${missed.join(', ')}` : '')
+
+  // The same document twice must hash the same, or the plan regenerates on
+  // every render and nothing is ever stable.
+  ok(docSignature(base()) === docSignature(base()), 'and an unchanged document does not')
+
+  // The geometry split is what makes this fast; this is the guard that keeps
+  // it honest. A geometry field added to the save format but not listed is
+  // hashed by neither half, which is the original bug wearing a new hat.
+  {
+    // Probed on an object that HAS every optional field: `guides` and the
+    // rest are written only when present, so an empty object would report
+    // them as missing from the format.
+    const probe = base()
+    probe.objects[0].guides = [{ a: { x: 0, y: 0 }, b: { x: 1, y: 1 } }]
+    const saved = objectOut(probe.objects[0]) as Record<string, unknown>
+    const declared = SIGNATURE_GEOMETRY_KEYS as readonly string[]
+    const unknownDeclared = declared.filter((k) => !(k in saved))
+    ok(unknownDeclared.length === 0,
+      'every declared geometry key is really in the save format', unknownDeclared.join(', '))
+    // Anything array-of-points shaped that is NOT declared is a suspect.
+    const looksLikeGeometry = Object.keys(saved).filter((k) =>
+      !declared.includes(k) && Array.isArray(saved[k])
+      && (saved[k] as unknown[]).some((v) => Array.isArray(v) || (v && typeof v === 'object')))
+    ok(looksLikeGeometry.length === 0,
+      'and no undeclared field looks like geometry', looksLikeGeometry.join(', '))
+  }
+
+  // Speed: this runs on every render, including every frame of a drag.
+  {
+    const big = emptyDoc()
+    for (let k = 0; k < 20; k++) {
+      big.objects.push(newObject({
+        type: 'fill',
+        paths: [Array.from({ length: 1000 }, (_, i) => ({ x: Math.sin(i) * 20, y: Math.cos(i) * 20 }))],
+      }))
+    }
+    docSignature(big)
+    const t0 = performance.now()
+    for (let i = 0; i < 10; i++) docSignature(big)
+    const ms = (performance.now() - t0) / 10
+    ok(ms < 5, 'and 20k points hash fast enough not to drop a drag frame',
+      `${ms.toFixed(2)} ms`)
   }
 }
 

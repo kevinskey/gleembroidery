@@ -56,6 +56,14 @@ export interface RenderOptions {
   letterHandles?: Pt[] | null
   /** Where the selected object starts and finishes sewing. */
   endpoints?: { entry?: Pt; exit?: Pt } | null
+  /**
+   * Satin angle guides: the ones already placed, and the one being drawn.
+   *
+   * Drawn like the other overlays — AFTER the stitches. A guide lies across
+   * the densest part of a column, which is exactly where thread painted over
+   * it last time.
+   */
+  guides?: { lines: { a: Pt; b: Pt }[]; draft?: { a: Pt; b: Pt } | null } | null
   /** Stitches picked for direct editing. */
   picked?: { block: number; index: number }[] | null
   /** Over-dense cells to shade, with the grid size they were counted on. */
@@ -565,6 +573,33 @@ export function render(
     ctx.save()
     if (opt.endpoints.entry) dot(opt.endpoints.entry, '#22c55e', 'start')
     if (opt.endpoints.exit) dot(opt.endpoints.exit, '#ef4444', 'end')
+    ctx.restore()
+  }
+
+  // --- satin angle guides ---------------------------------------------------
+  // Amber, dashed, with a tick at each end: they are an INSTRUCTION about the
+  // stitching rather than part of the artwork, and must not read as another
+  // outline. The one being dragged is drawn solid so it is obvious which is
+  // live.
+  if (opt.guides && (opt.guides.lines.length || opt.guides.draft)) {
+    ctx.save()
+    ctx.lineCap = 'round'
+    const bar = (g: { a: Pt; b: Pt }, live: boolean) => {
+      const a = toS(g.a), b = toS(g.b)
+      ctx.strokeStyle = live ? '#f59e0b' : 'rgba(245,158,11,0.85)'
+      ctx.lineWidth = live ? 2 : 1.6
+      ctx.setLineDash(live ? [] : [5, 3])
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke()
+      // End ticks, so a guide reads as a bar with two ends rather than as a
+      // stray line someone drew across the design.
+      ctx.setLineDash([])
+      ctx.lineWidth = 2
+      for (const p of [a, b]) {
+        ctx.beginPath(); ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2); ctx.stroke()
+      }
+    }
+    for (const g of opt.guides.lines) bar(g, false)
+    if (opt.guides.draft) bar(opt.guides.draft, true)
     ctx.restore()
   }
 
