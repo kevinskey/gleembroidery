@@ -3,9 +3,9 @@
 
 import { readDst, writeDst } from '../src/dst'
 import { appliquePhases, centerPlan, digitize, orientToEntryExit, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
-import { tatamiFill } from '../src/fill'
+import { insideRegion, tatamiFill } from '../src/fill'
 import { dist, isClosed, resample, ringArea, toRegions } from '../src/geometry'
-import { DEFAULT_APPLIQUE, DEFAULT_FILL, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, orderedUnderlay, type Pt } from '../src/model'
+import { DEFAULT_APPLIQUE, DEFAULT_FILL, FILL_STYLES, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, orderedUnderlay, type Pt } from '../src/model'
 import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths , angleAt, assignGuides, resolveGuides } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
 import { SCHEMA_VERSION, SIGNATURE_GEOMETRY_KEYS, ProjectError, deserialize, docSignature, objectOut, serialize } from '../src/project'
@@ -16,6 +16,7 @@ import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM, GUIDE_REACH_MM, MAX_BAR_ANGLE, OVERLO
 import { DEFAULT_KNOCKDOWN, DEFAULT_PUFF, DEFAULT_TIE, type Doc } from '../src/model'
 import { unionSelfChecked } from '../src/boolean'
 import { ALIGN_EDGES, alignDeltas, distributeDeltas, mirrorPaths, mirrorPt } from '../src/arrange'
+import { MOTIFS, crossStitchFill, echoFill, motifFill, motifRun, stippleFill } from '../src/decorative'
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
@@ -450,9 +451,11 @@ console.log('\n# project save / reopen')
     newObject({ name: 'line', color: '#1f6feb', type: 'run', paths: [[{ x: -20, y: 24 }, { x: 20, y: 24 }]] }),
   )
   // Non-default parameters everywhere, so a dropped field cannot hide.
-  doc.objects[0].fill = { angle: 17, spacing: 0.37, length: 3.25, stagger: 0.3, pullComp: 0.22,
+  doc.objects[0].fill = { style: 'tatami', angle: 17, spacing: 0.37, length: 3.25, stagger: 0.3,
+    pullComp: 0.22,
     underlay: ['edge', 'zigzag'], border: { enabled: true, width: 1.8, density: 0.33 } }
-  doc.objects[1].run = { length: 1.75 }
+  doc.objects[1].run = { length: 1.75, style: 'motif' }
+  doc.objects[1].motif = { id: 'scallop', widthMm: 5.5, heightMm: 2.25, gapMm: 0.75 }
   doc.objects[1].satin = {
     width: 4.2, density: 0.31, pullComp: 0.11, underlay: ['center', 'zigzag'], lean: 18,
     split: { enabled: true, maxLength: 5.5, stagger: 0.4 },
@@ -493,6 +496,9 @@ console.log('\n# project save / reopen')
   ok(back.objects[1].satin.split.enabled === true && back.objects[1].satin.split.maxLength === 5.5,
     'the satin split recipe survives')
   ok(back.objects[0].knockdown.margin === 2.1, 'the knockdown recipe survives')
+  ok(back.objects[1].run.style === 'motif' && back.objects[1].motif.id === 'scallop'
+    && back.objects[1].motif.gapMm === 0.75, 'the motif recipe survives')
+  ok(back.objects[0].fill.style === 'tatami', 'the fill style survives')
   ok(back.objects[1].guides?.length === 2 && back.objects[1].guides[1].b.x === 12,
     'angle guides survive')
   // A guide missing a number would still turn the bars, just somewhere nobody
@@ -2357,6 +2363,12 @@ console.log('\n# the plan regenerates when the document changes')
     ['satin pull comp', (d) => { d.objects[0].satin.pullComp = 0.44 }],
     ['satin underlay', (d) => { d.objects[0].satin.underlay = ['edge', 'zigzag'] }],
     ['bar lean', (d) => { d.objects[0].satin.lean = 30 }],
+    ['fill style', (d) => { d.objects[0].fill.style = 'stipple' }],
+    ['run style', (d) => { d.objects[0].run.style = 'motif' }],
+    ['motif choice', (d) => { d.objects[0].motif.id = 'star' }],
+    ['motif width', (d) => { d.objects[0].motif.widthMm = 9 }],
+    ['motif height', (d) => { d.objects[0].motif.heightMm = 9 }],
+    ['motif gap', (d) => { d.objects[0].motif.gapMm = 2 }],
     ['fill angle', (d) => { d.objects[0].fill.angle = 12 }],
     ['fill spacing', (d) => { d.objects[0].fill.spacing = 0.7 }],
     ['fill length', (d) => { d.objects[0].fill.length = 2.2 }],
@@ -2926,6 +2938,189 @@ console.log('\n# align, distribute and mirror')
     // object's guides and markers end up somewhere else.
     const p = mirrorPt({ x: 3, y: 7 }, 5, true)
     ok(p.x === 7 && p.y === 7, 'the point mirror matches the path mirror')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# decorative stitch styles')
+{
+  const line: Pt[] = [{ x: 0, y: 0 }, { x: 60, y: 0 }]
+  const square = [...rect(0, 0, 40, 40), { x: 0, y: 0 }]
+  const region = toRegions([square])[0]
+  const fillOf = (over: Partial<ReturnType<typeof DEFAULT_FILL>>) => ({ ...DEFAULT_FILL(), ...over })
+
+  // --- every motif in the library is actually sewable
+  {
+    for (const m of MOTIFS) {
+      const st = motifRun(line, { id: m.id, widthMm: 6, heightMm: 4, gapMm: 0 }, { length: 2, style: 'motif' })
+      ok(st.length > 5, `the ${m.label} motif generates stitches`, `${st.length}`)
+      // It must stay inside its own cell, or a border overruns the line it
+      // was drawn on.
+      const offLine = Math.max(...st.map((q) => Math.abs(q.y)))
+      ok(offLine <= 4 / 2 + 0.01, `the ${m.label} stays within its height`, `${offLine.toFixed(2)} of 2`)
+      // And no stitch may exceed the run length it was given.
+      let longest = 0
+      for (let i = 1; i < st.length; i++) longest = Math.max(longest, dist(st[i - 1], st[i]))
+      ok(longest <= 2 + 0.6, `the ${m.label} has no over-long stitch`, `${longest.toFixed(2)}`)
+    }
+  }
+
+  // --- WHOLE motifs only
+  {
+    // 60 mm of path, 7 mm motifs: 8 fit, 4 mm left over.
+    const st = motifRun(line, { id: 'diamond', widthMm: 7, heightMm: 4, gapMm: 0 }, { length: 2, style: 'motif' })
+    const peaks = st.filter((q) => Math.abs(Math.abs(q.y) - 2) < 0.2).length
+    ok(peaks >= 8, 'as many whole motifs as fit are stamped', `${peaks} peaks`)
+    // The remainder runs plain rather than being left bare or stretched.
+    ok(Math.max(...st.map((q) => q.x)) > 59, 'and the leftover is covered by a plain run',
+      `${Math.max(...st.map((q) => q.x)).toFixed(1)} of 60`)
+    // The outermost motif must not run off the end of the path.
+    ok(Math.max(...st.map((q) => q.x)) <= 60.01, 'nothing overruns the path')
+  }
+
+  // --- a motif follows a CURVE rather than being pasted flat on it
+  {
+    const circle = Array.from({ length: 73 }, (_, i) => {
+      const t = (i / 72) * Math.PI * 2
+      return { x: Math.cos(t) * 20, y: Math.sin(t) * 20 }
+    })
+    const st = motifRun(circle, { id: 'zigzag', widthMm: 6, heightMm: 4, gapMm: 0 }, { length: 2, style: 'motif' })
+    // Every penetration should sit within half the motif height of the
+    // circle. Pasting a flat stamp would throw points well off it.
+    const worst = Math.max(...st.map((q) => Math.abs(Math.hypot(q.x, q.y) - 20)))
+    ok(worst <= 2 + 0.3, 'a motif bends round a curve', `${worst.toFixed(2)} mm off the circle`)
+  }
+
+  // --- a path too short for one motif is run plain, and the design says so
+  {
+    const d = emptyDoc()
+    d.objects = [newObject({
+      name: 'tiny', type: 'run', paths: [[{ x: 0, y: 0 }, { x: 3, y: 0 }]],
+      run: { length: 2, style: 'motif' },
+      motif: { id: 'star', widthMm: 8, heightMm: 4, gapMm: 0 },
+    })]
+    const r = digitize(d)
+    ok(r.warnings.some((w) => /too short for one star motif/.test(w)),
+      'a path too short for its motif is reported', r.warnings.find((w) => /motif/.test(w)) ?? '')
+    ok(r.plan.blocks.flatMap((b) => b.stitches).length > 0, 'and still sews, as a plain run')
+  }
+
+  // --- motif FILL stamps whole motifs only
+  {
+    const st = motifFill(region, fillOf({ style: 'motif', spacing: 1 }),
+      { id: 'cross', widthMm: 6, heightMm: 4, gapMm: 0 })
+    ok(st.length > 50, 'a motif fill covers the area', `${st.length}`)
+    const inside = st.filter((q) => !q.jump)
+      .every((q) => q.x >= -0.6 && q.x <= 40.6 && q.y >= -2.6 && q.y <= 42.6)
+    ok(inside, 'and stays within the shape, give or take the motif height')
+  }
+
+  // --- stipple
+  {
+    const st = stippleFill(region, fillOf({ style: 'stipple', spacing: 4, length: 2 }))
+    ok(st.length > 40, 'a stipple covers the area', `${st.length}`)
+    // Far fewer stitches than a tatami of the same shape: that is the point.
+    const tat = tatamiFill(region, fillOf({}))
+    ok(st.length < tat.length / 5, 'with a fraction of the stitches a tatami needs',
+      `${st.length} vs ${tat.length}`)
+    // Every penetration inside the shape.
+    const outside = st.filter((q) => !q.jump && !insideRegion(region, q)).length
+    ok(outside === 0, 'and every penetration lands inside the shape', `${outside} outside`)
+    // It must WANDER, or it is just a sparse tatami.
+    const ys = st.filter((q) => !q.jump).map((q) => q.y)
+    const rowY = [...new Set(ys.map((y) => Math.round(y / 4)))].length
+    ok(new Set(ys.map((y) => y.toFixed(2))).size > rowY * 3,
+      'it wanders rather than running in straight rows',
+      `${new Set(ys.map((y) => y.toFixed(2))).size} distinct y across ${rowY} rows`)
+    // DETERMINISTIC — no Math.random anywhere in it.
+    ok(JSON.stringify(stippleFill(region, fillOf({ style: 'stipple', spacing: 4, length: 2 })))
+      === JSON.stringify(st), 'and the same shape always stipples the same way')
+    // A stipple is ONE continuous line; a jump in it is a thread cut in the
+    // middle of the thing that is supposed to be unbroken.
+    ok(st.filter((q) => q.jump).length === 0, 'and it runs unbroken',
+      `${st.filter((q) => q.jump).length} jumps`)
+  }
+
+  // --- cross-stitch
+  {
+    const st = crossStitchFill(region, fillOf({ style: 'crossstitch', length: 4 }))
+    ok(st.length > 40, 'cross-stitch covers the area', `${st.length}`)
+    ok(st.length % 4 === 0 || st.filter((q) => q.jump).length > 0,
+      'in complete crosses of four points each')
+    // A cross is sewn as one continuous X, so its arms are equal and
+    // diagonal — no arm may be axis-aligned.
+    // Measured in the FILL's own frame, not in document x/y: the default
+    // fill angle is 45 degrees, which rotates the X until its arms are
+    // axis-aligned on screen. They are still diagonal across their cell.
+    const flat = crossStitchFill(region, fillOf({ style: 'crossstitch', length: 4, angle: 0 }))
+    const first = flat.filter((q) => !q.jump).slice(0, 4)
+    ok(Math.abs(Math.abs(first[1].x - first[0].x) - Math.abs(first[1].y - first[0].y)) < 1e-6,
+      'each arm runs at 45 degrees across its cell',
+      `${(first[1].x - first[0].x).toFixed(2)} by ${(first[1].y - first[0].y).toFixed(2)}`)
+    const outside = st.filter((q) => !q.jump && !insideRegion(region, q)).length
+    ok(outside === 0, 'and no cross strays outside the shape', `${outside}`)
+    // Travel between neighbouring crosses must stay sewable, not become a
+    // trim per cross.
+    ok(st.filter((q) => q.jump).length <= 2, 'with travel between them, not a jump per cross',
+      `${st.filter((q) => q.jump).length} jumps`)
+  }
+
+  // --- echo
+  {
+    const st = echoFill(region, fillOf({ style: 'echo', spacing: 2, length: 2 }))
+    ok(st.length > 50, 'echo covers the area', `${st.length}`)
+    const outside = st.filter((q) => !q.jump && !insideRegion(region, q)).length
+    ok(outside === 0, 'with every stitch inside the shape', `${outside}`)
+    // The texture must FOLLOW the shape: on a square, the rings are squares,
+    // so most stitches lie on one of the four axis directions.
+    // On a square the rings are squares, so every stitch sits a RING's
+    // distance from the nearest edge — and those distances come one spacing
+    // apart. That is the property that makes it an echo rather than a fill
+    // that happens to be sparse.
+    const depths = st.filter((q) => !q.jump)
+      .map((q) => Math.min(q.x, q.y, 40 - q.x, 40 - q.y))
+    const rings = [...new Set(depths.map((d) => Math.round(d * 4) / 4))].sort((a, b) => a - b)
+    ok(rings.length <= 12, 'stitches fall on a handful of distinct rings',
+      `${rings.length} rings: ${rings.slice(0, 6).map((r) => r.toFixed(2)).join(', ')}`)
+    const gaps = rings.slice(1).map((r, i) => r - rings[i])
+    ok(gaps.every((g) => Math.abs(g - 2) < 0.3), 'one spacing apart',
+      gaps.map((g) => g.toFixed(2)).join(','))
+    ok(Math.abs(rings[0] - 1) < 0.3, 'starting half a spacing inside the outline',
+      rings[0].toFixed(2))
+    // Tighter spacing means more rings, which is the only knob that matters.
+    // ROUTING. An offset ring starts wherever the offsetter put its first
+    // vertex, and taking the rings as they come meant flying across the
+    // shape between every pair — 39 trims for 13 rings on a 40 mm square,
+    // in a fill whose rings are 1.5 mm apart.
+    const routed = echoFill(region, fillOf({ style: 'echo', spacing: 1.5, length: 2 }))
+    ok(routed.filter((q) => q.jump).length === 0,
+      'rings are entered at the nearest point, so there are no jumps between them',
+      `${routed.filter((q) => q.jump).length} jumps`)
+
+    const tight = echoFill(region, fillOf({ style: 'echo', spacing: 1, length: 2 }))
+    ok(tight.length > st.length * 1.5, 'tighter spacing lays more rings',
+      `${st.length} -> ${tight.length}`)
+  }
+
+  // --- the styles reach the real pipeline, and underlay is refused
+  {
+    for (const style of FILL_STYLES) {
+      const d = emptyDoc()
+      d.objects = [newObject({
+        name: style, type: 'fill', paths: [square],
+        fill: fillOf({ style, spacing: style === 'tatami' ? 0.4 : 3, length: 3, underlay: [] }),
+      })]
+      const n = digitize(d).plan.blocks.flatMap((b) => b.stitches).filter((q) => !q.jump).length
+      ok(n > 20, `a ${style} fill generates through digitize()`, `${n} stitches`)
+    }
+    const d = emptyDoc()
+    d.objects = [newObject({
+      type: 'fill', paths: [square],
+      fill: fillOf({ style: 'stipple', spacing: 4, underlay: ['edge'] }),
+    })]
+    ok(digitize(d).warnings.some((w) => /underlay is not used/.test(w)),
+      'underlay under an open fill is refused and reported')
   }
 }
 

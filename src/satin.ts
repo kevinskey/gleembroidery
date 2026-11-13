@@ -827,13 +827,13 @@ export function satinTwoRailUnderlay(
   const out: Stitch[] = []
   for (const layer of layers) {
     if (layer === 'center') {
-      out.push(...runStitch(across(0.5), { length: 2.5 }))
+      out.push(...runStitch(across(0.5), { length: 2.5, style: 'plain' }))
     } else if (layer === 'edge') {
       // A fraction in from each rail rather than a fixed millimetre inset:
       // the column tapers, so a fixed inset would cross the middle wherever
       // the rails pinch and sew the underlay outside the column.
-      const left = runStitch(across(0.18), { length: 2.5 })
-      const right = runStitch(across(0.82), { length: 2.5 })
+      const left = runStitch(across(0.18), { length: 2.5, style: 'plain' })
+      const right = runStitch(across(0.82), { length: 2.5, style: 'plain' })
       out.push(...left, ...right.reverse())
     } else {
       // Sparse zigzag between the inset rails.

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM } from './satin'
+import { FILL_STYLE_DEFAULTS, MIN_MOTIF_MM, MOTIFS } from './decorative'
 import {
   BOOL_LABEL, BOOL_OPS, booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap,
   simplifyPaths, splitShapeAt,
@@ -39,12 +40,15 @@ import {
   emptyDoc,
   hoopsForSpacing,
   newObject,
+  FILL_STYLES,
+  FILL_STYLE_LABEL,
   FILL_UNDERLAY_ORDER,
   SATIN_UNDERLAY_ORDER,
   type Doc,
   type EmbObject,
   type Pt,
   type TieParams,
+  type FillStyle,
   type Spacing,
   type StitchType,
 } from './model'
@@ -2419,6 +2423,49 @@ export default function App() {
                   <legend>{selected.type === 'bean' ? 'Bean' : 'Run'}</legend>
                   <Num label="Stitch length (mm)" value={selected.run.length} min={0.5} max={12}
                     onChange={(v) => patch(selected.id, (o) => ({ ...o, run: { ...o.run, length: v } }), 'run.length')} />
+                  {/* A motif run is still a run — same path, same length, same
+                      place in the sequence — so it is a style here rather than
+                      a sixth entry in the stitch-type list. Bean is a triple
+                      pass of the line itself and has no motif form. */}
+                  {selected.type === 'run' && (
+                    <div className="row wide">
+                      <label>Style</label>
+                      <div className="checks">
+                        {([['plain', 'Plain line'], ['motif', 'Motif']] as const).map(([v, lbl]) => (
+                          <button key={v}
+                            className={selected.run.style === v ? 'primary' : undefined}
+                            onClick={() => patch(selected.id, (o) => ({ ...o, run: { ...o.run, style: v } }))}>
+                            {lbl}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </fieldset>
+              )}
+
+              {((selected.type === 'run' && selected.run.style === 'motif')
+                || (selected.type === 'fill' && selected.fill.style === 'motif')) && (
+                <fieldset>
+                  <legend>Motif</legend>
+                  <div className="row">
+                    <label>Shape</label>
+                    <select value={selected.motif.id}
+                      onChange={(e) => patch(selected.id, (o) => ({ ...o, motif: { ...o.motif, id: e.target.value } }))}>
+                      {MOTIFS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                    </select>
+                  </div>
+                  <Num label="Length along (mm)" value={selected.motif.widthMm} step={0.5} min={MIN_MOTIF_MM} max={40}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, motif: { ...o.motif, widthMm: v } }), 'motif.w')} />
+                  <Num label="Height across (mm)" value={selected.motif.heightMm} step={0.5} min={0} max={40}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, motif: { ...o.motif, heightMm: v } }), 'motif.h')} />
+                  <Num label="Gap between (mm)" value={selected.motif.gapMm} step={0.5} min={0} max={20}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, motif: { ...o.motif, gapMm: v } }), 'motif.g')} />
+                  <div className="row wide">
+                    <span className="dim">
+                      Only whole motifs are stamped; anything left over at the end runs plain.
+                    </span>
+                  </div>
                 </fieldset>
               )}
 
@@ -2614,25 +2661,81 @@ export default function App() {
               {selected.type === 'fill' && (
                 <>
                   <fieldset>
-                    <legend>Tatami fill</legend>
-                    <Num label="Angle (°)" value={selected.fill.angle} step={5} min={-180} max={180}
-                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, angle: v } }), 'fill.angle')} />
-                    <Num label="Stitch spacing (mm)" value={selected.fill.spacing} step={0.05} min={0.15} max={2}
+                    <legend>Fill</legend>
+                    <div className="row">
+                      <label>Style</label>
+                      <select value={selected.fill.style}
+                        onChange={(e) => {
+                          // Spacing and length mean something different in
+                          // each style, so they are re-based rather than
+                          // carried across. See FILL_STYLE_DEFAULTS.
+                          const style = e.target.value as FillStyle
+                          const d = FILL_STYLE_DEFAULTS[style]
+                          patch(selected.id, (o) => ({
+                            ...o, fill: { ...o.fill, style, spacing: d.spacing, length: d.length },
+                          }))
+                        }}>
+                        {FILL_STYLES.map((f) => (
+                          <option key={f} value={f}>{FILL_STYLE_LABEL[f]}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {/* Each style reads the shared controls differently, so
+                        the labels say what the number means HERE rather than
+                        leaving a generic name over a field that does
+                        something else. */}
+                    {selected.fill.style !== 'echo' && (
+                      <Num label="Angle (°)" value={selected.fill.angle} step={5} min={-180} max={180}
+                        onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, angle: v } }), 'fill.angle')} />
+                    )}
+                    <Num
+                      label={
+                        selected.fill.style === 'stipple' ? 'Meander size (mm)'
+                          : selected.fill.style === 'motif' ? 'Row gap (mm)'
+                          : selected.fill.style === 'echo' ? 'Ring spacing (mm)'
+                          : 'Stitch spacing (mm)'
+                      }
+                      value={selected.fill.spacing} step={0.05}
+                      min={selected.fill.style === 'stipple' ? 1.5 : 0.15}
+                      max={selected.fill.style === 'tatami' ? 2 : 12}
                       onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, spacing: v } }), 'fill.spacing')} />
-                    <Num label="Stitch length (mm)" value={selected.fill.length} step={0.25} min={1} max={10}
-                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, length: v } }), 'fill.length')} />
-                    <Num label="Stagger (0–1)" value={selected.fill.stagger} step={0.05} min={0} max={1}
-                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, stagger: v } }), 'fill.stagger')} />
-                    <Num label="Pull compensation (mm)" value={selected.fill.pullComp} step={0.05} min={0} max={1}
-                      onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pullComp: v } }), 'fill.pullComp')} />
-                    <UnderlayPicker
-                      value={selected.fill.underlay}
-                      order={FILL_UNDERLAY_ORDER}
-                      options={[
-                        { id: 'edge', label: 'Edge run' },
-                        { id: 'zigzag', label: 'Zigzag' },
-                      ]}
-                      onChange={(next) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, underlay: next } }))} />
+                    {selected.fill.style !== 'crossstitch' && (
+                      <Num label="Stitch length (mm)" value={selected.fill.length} step={0.25} min={1} max={10}
+                        onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, length: v } }), 'fill.length')} />
+                    )}
+                    {selected.fill.style === 'crossstitch' && (
+                      <Num label="Cross size (mm)" value={selected.fill.length} step={0.5} min={1} max={10}
+                        onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, length: v } }), 'fill.length')} />
+                    )}
+                    {selected.fill.style === 'tatami' && (
+                      <>
+                        <Num label="Stagger (0–1)" value={selected.fill.stagger} step={0.05} min={0} max={1}
+                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, stagger: v } }), 'fill.stagger')} />
+                        <Num label="Pull compensation (mm)" value={selected.fill.pullComp} step={0.05} min={0} max={1}
+                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pullComp: v } }), 'fill.pullComp')} />
+                        <UnderlayPicker
+                          value={selected.fill.underlay}
+                          order={FILL_UNDERLAY_ORDER}
+                          options={[
+                            { id: 'edge', label: 'Edge run' },
+                            { id: 'zigzag', label: 'Zigzag' },
+                          ]}
+                          onChange={(next) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, underlay: next } }))} />
+                      </>
+                    )}
+                    {selected.fill.style !== 'tatami' && (
+                      <div className="row wide">
+                        <span className="dim">
+                          {selected.fill.style === 'stipple'
+                            ? 'A loose wandering line. Deliberately open — it softens a background without stiffening it. No underlay: it would show through the gaps.'
+                            : selected.fill.style === 'crossstitch'
+                            ? 'A grid of X’s, sewn only where a whole cross fits inside the shape. The fabric showing between them is the look.'
+                            : selected.fill.style === 'echo'
+                            ? 'Contours following the shape inwards, so the silhouette becomes the texture.'
+                            : 'The motif below, stamped in rows. Only whole motifs are sewn.'}
+                        </span>
+                      </div>
+                    )}
                   </fieldset>
                   <fieldset>
                     <legend>Satin border</legend>

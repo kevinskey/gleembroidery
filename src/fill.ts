@@ -189,6 +189,7 @@ export function zigzagUnderlay(region: Pt[][], angle: number, report?: Report): 
   return tatamiFill(
     region,
     {
+      style: 'tatami',
       angle: angle + 90,
       spacing: 2.5,
       length: 4,

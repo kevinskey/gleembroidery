@@ -18,6 +18,7 @@
 
 import type { PathNode, Shape } from './nodes'
 import type { AngleGuide } from './satin'
+import { DEFAULT_MOTIF, MOTIF_IDS } from './decorative'
 import type { FrozenPlan } from './stitchedit'
 import type { Stitch } from './stitches'
 import {
@@ -28,6 +29,7 @@ import {
   DEFAULT_RUN,
   DEFAULT_SATIN,
   DEFAULT_TIE,
+  FILL_STYLES,
   HOOPS,
   SPACINGS,
   emptyDoc,
@@ -132,6 +134,7 @@ export function objectOut(o: EmbObject) {
       })),
     })),
     run: { ...o.run },
+    motif: { ...o.motif },
     satin: { ...o.satin, split: { ...o.satin.split } },
     fill: { ...o.fill, border: { ...o.fill.border } },
   }
@@ -389,6 +392,8 @@ function objectIn(v: unknown, index: number): EmbObject | null {
   const kd = isObj(v.knockdown) ? v.knockdown : {}
   const dPuff = DEFAULT_PUFF()
   const dKd = DEFAULT_KNOCKDOWN()
+  const mo = isObj(v.motif) ? v.motif : {}
+  const dMotif = DEFAULT_MOTIF()
   return {
     id: str(v.id, `o${index + 1}`),
     name: str(v.name, `Object ${index + 1}`),
@@ -450,7 +455,16 @@ function objectIn(v: unknown, index: number): EmbObject | null {
           : undefined,
       },
     } : {}),
-    run: { length: num(run.length, dRun.length) },
+    run: {
+      length: num(run.length, dRun.length),
+      style: run.style === 'motif' ? 'motif' : 'plain',
+    },
+    motif: {
+      id: oneOf(mo.id, MOTIF_IDS, dMotif.id),
+      widthMm: num(mo.widthMm, dMotif.widthMm),
+      heightMm: num(mo.heightMm, dMotif.heightMm),
+      gapMm: num(mo.gapMm, dMotif.gapMm),
+    },
     satin: {
       width: num(satin.width, dSatin.width),
       density: num(satin.density, dSatin.density),
@@ -464,6 +478,7 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       },
     },
     fill: {
+      style: oneOf(fill.style, FILL_STYLES, dFill.style),
       angle: num(fill.angle, dFill.angle),
       spacing: num(fill.spacing, dFill.spacing),
       length: num(fill.length, dFill.length),

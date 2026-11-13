@@ -13,10 +13,11 @@
 import { FILL_UNDERLAY_ORDER, NO_SPLIT, orderedUnderlay, type Doc, type EmbObject, type Pt, type TieParams } from './model'
 import { nodeFractions } from './nodes'
 import type { ColorBlock, Stitch, StitchPlan } from './stitches'
-import { dist, resample, scanlineSpans, toRegions } from './geometry'
+import { dist, pathLength, resample, scanlineSpans, toRegions } from './geometry'
 import { unionSelfChecked } from './boolean'
 import { offsetPathsChecked } from './offset'
 import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
+import { MIN_MOTIF_MM, crossStitchFill, echoFill, motifById, motifFill, motifRun, stippleFill } from './decorative'
 import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
@@ -259,7 +260,7 @@ export function appliquePhases(
 
   // 1. Placement: a plain run the operator lays the fabric against.
   const placement: Stitch[] = []
-  for (const ring of rings) placement.push(...runStitch(ring, { length: 2.5 }))
+  for (const ring of rings) placement.push(...runStitch(ring, { length: 2.5, style: 'plain' }))
   if (placement.length) out.push({ label: `${obj.name} — placement (lay fabric)`, stitches: placement })
 
   // 2. Tack-down: a narrow zigzag holding the fabric while the excess is
@@ -373,6 +374,7 @@ function stitchObject(
         // underlay for everything above it, and compensating a net that
         // nothing lines up with would just move it.
         push(tatamiFill(region, {
+          style: 'tatami',
           angle: k.angle,
           spacing: Math.max(0.8, k.spacing),
           length: Math.max(1, k.length),
@@ -392,7 +394,20 @@ function stitchObject(
       return []
 
     case 'run':
-      for (const path of obj.paths) push(runStitch(path, obj.run))
+      for (const path of obj.paths) {
+        if (obj.run.style === 'motif') {
+          // Too short for even one motif: the run comes back plain, and the
+          // operator is told rather than left wondering why the border on
+          // this one piece looks different from the others.
+          if (pathLength(path) < Math.max(MIN_MOTIF_MM, obj.motif.widthMm)) {
+            warnings.push(
+              `${obj.name}: too short for one ${motifById(obj.motif.id).label.toLowerCase()} motif — run plain`)
+          }
+          push(motifRun(path, obj.motif, obj.run))
+        } else {
+          push(runStitch(path, obj.run))
+        }
+      }
       break
 
     case 'bean':
@@ -475,6 +490,28 @@ function stitchObject(
         break
       }
       const report: (m: string) => void = (m) => warnings.push(`${obj.name}: ${m}`)
+
+      // The decorative styles are whole generators, not tatami with different
+      // numbers, so they are dispatched BEFORE the underlay/border machinery
+      // below. None of them takes underlay: stipple and cross-stitch are
+      // deliberately open, and laying a solid underlay under an open fill
+      // would show through the gaps that are the entire point.
+      if (obj.fill.style !== 'tatami') {
+        for (const region of regions) {
+          switch (obj.fill.style) {
+            case 'motif': push(motifFill(region, obj.fill, obj.motif)); break
+            case 'stipple': push(stippleFill(region, obj.fill)); break
+            case 'crossstitch': push(crossStitchFill(region, obj.fill)); break
+            case 'echo': push(echoFill(region, obj.fill, report)); break
+          }
+        }
+        if (obj.fill.underlay.length) {
+          warnings.push(
+            `${obj.name}: underlay is not used by a ${obj.fill.style} fill — it would show through the gaps`)
+        }
+        break
+      }
+
       for (const region of regions) {
         const p = obj.fill
         // Layers sew in their fixed craft order, not the order ticked.

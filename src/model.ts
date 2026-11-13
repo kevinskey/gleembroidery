@@ -14,6 +14,7 @@ import type { Shape } from './nodes'
 import type { TextSpec } from './text'
 import type { FrozenPlan } from './stitchedit'
 import type { AngleGuide } from './satin'
+import { DEFAULT_MOTIF, type MotifParams } from './decorative'
 
 export interface Pt {
   x: number
@@ -35,6 +36,34 @@ export type StitchType =
 export interface RunParams {
   /** Nominal stitch length, mm. Machines want 1–5; 2.5 is a safe default. */
   length: number
+  /**
+   * 'plain' is a line of running stitches.
+   *
+   * 'motif' stamps a drawing repeatedly along the path instead — a border of
+   * hearts, a blanket edge. A style rather than a stitch type of its own,
+   * because everything else about it is a run: same path, same length, same
+   * travel and the same place in the sewing order.
+   */
+  style: 'plain' | 'motif'
+}
+
+/**
+ * How a fill covers its ground.
+ *
+ * These are not tatami with different numbers; each is a different idea about
+ * how thread covers an area, and each is chosen for something a tatami
+ * cannot do. See decorative.ts.
+ */
+export type FillStyle = 'tatami' | 'motif' | 'stipple' | 'crossstitch' | 'echo'
+
+export const FILL_STYLES: FillStyle[] = ['tatami', 'motif', 'stipple', 'crossstitch', 'echo']
+
+export const FILL_STYLE_LABEL: Record<FillStyle, string> = {
+  tatami: 'Tatami — solid coverage',
+  motif: 'Motif — a shape, repeated',
+  stipple: 'Stipple — a loose wandering line',
+  crossstitch: 'Cross-stitch — a grid of X’s',
+  echo: 'Echo — contours following the shape',
 }
 
 export type SatinUnderlay = 'center' | 'edge' | 'zigzag'
@@ -99,6 +128,8 @@ export interface SatinSplitParams {
 }
 
 export interface FillParams {
+  /** How the area is covered. See FillStyle. */
+  style: FillStyle
   /** Stitch angle in degrees, measured CCW from the +X axis. */
   angle: number
   /** Distance between fill rows, mm. 0.4 is standard commercial density. */
@@ -284,6 +315,8 @@ export interface EmbObject {
   applique: AppliqueParams
   puff: PuffParams
   knockdown: KnockdownParams
+  /** The repeated drawing, for a motif run or a motif fill. */
+  motif: MotifParams
 }
 
 /** Machine bracket spacing. A hoop's arms must match what the machine takes. */
@@ -466,7 +499,7 @@ export interface Doc {
   objects: EmbObject[]
 }
 
-export const DEFAULT_RUN = (): RunParams => ({ length: 2.5 })
+export const DEFAULT_RUN = (): RunParams => ({ length: 2.5, style: 'plain' })
 
 export const DEFAULT_KNOCKDOWN = (): KnockdownParams => ({
   spacing: 2,
@@ -515,6 +548,7 @@ export const DEFAULT_SATIN = (): SatinParams => ({
 })
 
 export const DEFAULT_FILL = (): FillParams => ({
+  style: 'tatami',
   angle: 45,
   spacing: 0.4,
   length: 4.0,
@@ -553,6 +587,7 @@ export function newObject(partial: Partial<EmbObject> = {}): EmbObject {
     applique: DEFAULT_APPLIQUE(),
     puff: DEFAULT_PUFF(),
     knockdown: DEFAULT_KNOCKDOWN(),
+    motif: DEFAULT_MOTIF(),
     ...partial,
   }
 }
