@@ -2,6 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM } from './satin'
+import {
+  BUILT_IN_PRESETS, PRESETS_KEY, applyStyle, parsePresets, presetFrom,
+  serializePresets, type StylePreset,
+} from './presets'
 import { writeExp } from './exp'
 import { writeJef } from './jef'
 import { FILL_STYLE_DEFAULTS, MIN_MOTIF_MM, MOTIFS } from './decorative'
@@ -352,6 +356,16 @@ export default function App() {
   // first entry is the "primary" one the Properties panel edits — every
   // existing single-selection read still works through `selectedId` below.
   const [selectedIds, setSelectedIds] = useState<string[]>([])
+  /**
+   * Saved stitch styles.
+   *
+   * Read once on mount. A corrupt or missing store degrades to "no saved
+   * presets" — the built-ins always work — rather than to an exception on
+   * startup, which would take the whole application down over a stale key.
+   */
+  const [userPresets, setUserPresets] = useState<StylePreset[]>(() => {
+    try { return parsePresets(window.localStorage.getItem(PRESETS_KEY)) } catch { return [] }
+  })
   const selectedId = selectedIds[0] ?? null
   const setSelectedId = useCallback((id: string | null) => setSelectedIds(id ? [id] : []), [])
   const [view, setView] = useState<View>({ scale: 3, cx: 0, cy: 0 })
@@ -640,6 +654,38 @@ export default function App() {
   const patch = (id: string, fn: (o: EmbObject) => EmbObject, tag?: string) =>
     setDoc((d) => ({ ...d, objects: d.objects.map((o) => (o.id === id ? fn(o) : o)) }),
       tag && `${tag}:${id}`)
+
+  // --- stitch-style presets ------------------------------------------------
+  //
+  // Kept in localStorage rather than in the document: the point of a preset
+  // is that it outlives the project it was made in. A shop's cap-satin
+  // settings are a property of the shop, not of one design.
+
+  const applyPreset = (p: StylePreset) => {
+    if (!selectedObjs.length) { setNote('select an object first'); return }
+    const ids = selectedObjs.map((o) => o.id)
+    setDoc((d) => ({
+      ...d,
+      objects: d.objects.map((o) => (ids.includes(o.id) ? applyStyle(o, p) : o)),
+    }))
+    setNote(`"${p.name}" applied to ${ids.length} object${ids.length === 1 ? '' : 's'}`)
+  }
+
+  const savePreset = () => {
+    if (!selected) return
+    const name = window.prompt('Name this stitch style', `${selected.type} style`)
+    if (!name?.trim()) return
+    const next = [...userPresets, presetFrom(selected, name.trim())]
+    setUserPresets(next)
+    try { window.localStorage.setItem(PRESETS_KEY, serializePresets(next)) } catch { /* private mode */ }
+    setNote(`Saved "${name.trim()}" — it will be there in your next project too`)
+  }
+
+  const deletePreset = (id: string) => {
+    const next = userPresets.filter((p) => p.id !== id)
+    setUserPresets(next)
+    try { window.localStorage.setItem(PRESETS_KEY, serializePresets(next)) } catch { /* private mode */ }
+  }
 
   /**
    * Change a document-level tie setting.
@@ -2338,6 +2384,43 @@ export default function App() {
           )}
           {selected && (
             <>
+              {/* Presets first: reaching for a known-good recipe is quicker
+                  than setting a dozen numbers, and it is what most jobs
+                  actually want. */}
+              <fieldset>
+                <legend>Stitch style</legend>
+                <div className="row wide">
+                  <div className="checks">
+                    {[...BUILT_IN_PRESETS, ...userPresets].map((p) => (
+                      <button key={p.id} title={p.note ?? 'A saved stitch style'}
+                        onClick={() => applyPreset(p)}>
+                        {p.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="row wide">
+                  <div className="checks">
+                    <button onClick={savePreset} title="Save this object's settings as a reusable style">
+                      Save current…
+                    </button>
+                    {userPresets.map((p) => (
+                      <button key={`x${p.id}`} title={`Delete "${p.name}"`}
+                        onClick={() => deletePreset(p.id)}>
+                        ✕ {p.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="row wide">
+                  <span className="dim">
+                    A style sets how an object is sewn — never its shape, colour or
+                    thread. The built-ins are starting points: check each against a
+                    sewout on the fabric you are using.
+                  </span>
+                </div>
+              </fieldset>
+
               {/* The stitch type also lives in the toolbar, but that is a row
                   of small icons far from the panel people actually read. With
                   only the toolbar, "satin border" was visible in Properties

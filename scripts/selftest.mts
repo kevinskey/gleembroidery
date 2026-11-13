@@ -21,6 +21,9 @@ import { unionSelfChecked } from '../src/boolean'
 import { ALIGN_EDGES, alignDeltas, distributeDeltas, mirrorPaths, mirrorPt } from '../src/arrange'
 import { MOTIFS, crossStitchFill, echoFill, motifFill, motifRun, stippleFill } from '../src/decorative'
 import { chainPaths, enterRingNear, orderPaths, travelCost, travelIsHidden } from '../src/travel'
+import {
+  BUILT_IN_PRESETS, applyStyle, parsePresets, presetFrom, serializePresets,
+} from '../src/presets'
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
@@ -3102,6 +3105,20 @@ console.log('\n# decorative stitch styles')
       'rings are entered at the nearest point, so there are no jumps between them',
       `${routed.filter((q) => q.jump).length} jumps`)
 
+    // A NON-CONVEX shape is the case that would break naive contour
+    // routing: the rings have re-entrant corners and the offsetter can
+    // split them.
+    const L = toRegions([[
+      { x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 20 },
+      { x: 20, y: 20 }, { x: 20, y: 40 }, { x: 0, y: 40 }, { x: 0, y: 0 },
+    ]])[0]
+    const bent = echoFill(L, fillOf({ style: 'echo', spacing: 1.5, length: 2 }))
+    ok(bent.length > 100, 'an L-shaped echo fills', `${bent.length}`)
+    ok(bent.filter((q) => q.jump).length === 0, 'with no jumps either',
+      `${bent.filter((q) => q.jump).length}`)
+    ok(bent.filter((q) => !q.jump && !insideRegion(L, q)).length === 0,
+      'and nothing outside the bend')
+
     const tight = echoFill(region, fillOf({ style: 'echo', spacing: 1, length: 2 }))
     ok(tight.length > st.length * 1.5, 'tighter spacing lays more rings',
       `${st.length} -> ${tight.length}`)
@@ -3426,6 +3443,125 @@ console.log('\n# machine formats beyond DST')
     // The very first record must be a jump: the approach is needle-up.
     ok(exp[0] === 0x80 && exp[1] === 0x04, 'an EXP opens with a jump, not a stitch',
       `${exp[0].toString(16)} ${exp[1].toString(16)}`)
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# reusable stitch styles')
+{
+  const obj = () => newObject({
+    name: 'thing', color: '#abcdef', type: 'satin',
+    paths: [[{ x: 0, y: 0 }, { x: 20, y: 0 }]],
+    thread: { brand: 'Isacord', code: '1902' },
+  })
+
+  // --- a preset changes HOW a shape is sewn and nothing else
+  {
+    const o = obj()
+    o.entry = { x: 1, y: 2 }
+    o.guides = [{ a: { x: 9, y: -2 }, b: { x: 11, y: 2 } }]
+    const fillPreset = BUILT_IN_PRESETS.find((p) => p.id === 'builtin:logo-fill')!
+    const after = applyStyle(o, fillPreset)
+    ok(after.type === 'fill', 'applying a preset sets the stitch type')
+    ok(after.fill.spacing === fillPreset.fill.spacing, 'and its parameters')
+    ok(after.name === 'thing' && after.color === '#abcdef',
+      'but not the name or the colour')
+    ok(after.thread.code === '1902', 'nor the thread')
+    ok(after.paths === o.paths, 'nor the geometry')
+    ok(after.entry?.x === 1 && after.guides?.length === 1,
+      'nor the entry point or the angle guides')
+  }
+
+  // --- EVERY parameter block is replaced, not just the matching one
+  {
+    const o = obj()
+    o.fill.spacing = 1.23 // nothing to do with a satin preset
+    const satinPreset = BUILT_IN_PRESETS.find((p) => p.id === 'builtin:cap-satin')!
+    const after = applyStyle(o, satinPreset)
+    ok(after.fill.spacing === satinPreset.fill.spacing,
+      'a satin preset also resets the fill settings',
+      `${after.fill.spacing}`)
+    // Otherwise the result would depend on what the object was BEFORE, which
+    // is impossible to work out from the stitches that come off it.
+  }
+
+  // --- a preset taken from an object is a COPY, not a window onto it
+  {
+    const o = obj()
+    o.satin.width = 7
+    const p = presetFrom(o, 'mine')
+    o.satin.width = 1
+    ok(p.satin.width === 7, 'editing the object afterwards does not change the preset')
+    const other = applyStyle(obj(), p)
+    other.satin.underlay.push('zigzag')
+    ok(p.satin.underlay.length !== other.satin.underlay.length
+      || p.satin.underlay.join() !== other.satin.underlay.join(),
+      'and applying it twice does not share arrays between objects')
+  }
+
+  // --- a preset really changes the stitches
+  {
+    const run = (p: typeof BUILT_IN_PRESETS[number]) => {
+      const d = emptyDoc()
+      d.objects = [applyStyle(newObject({
+        name: 'x', type: 'fill', paths: [[...rect(0, 0, 30, 30), { x: 0, y: 0 }]],
+      }), p)]
+      return digitize(d).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump).length
+    }
+    const solid = run(BUILT_IN_PRESETS.find((p) => p.id === 'builtin:logo-fill')!)
+    const loose = run(BUILT_IN_PRESETS.find((p) => p.id === 'builtin:background-stipple')!)
+    ok(solid > 500, 'the logo-fill preset sews a solid fill', `${solid}`)
+    ok(loose < solid / 5, 'and the stipple preset is far lighter', `${loose} vs ${solid}`)
+  }
+
+  // --- every built-in must actually generate
+  {
+    for (const p of BUILT_IN_PRESETS) {
+      const d = emptyDoc()
+      const paths = p.type === 'satin' || p.type === 'run' || p.type === 'bean'
+        ? [[{ x: 0, y: 0 }, { x: 40, y: 0 }]]
+        : [[...rect(0, 0, 40, 40), { x: 0, y: 0 }]]
+      d.objects = [applyStyle(newObject({ name: p.name, paths }), p)]
+      const r = digitize(d)
+      const n = r.plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump).length
+      ok(n > 10, `the "${p.name}" preset sews something`, `${n} stitches`)
+      ok(!r.warnings.some((w) => /NOT STITCHED/.test(w)),
+        `and is not refused`, r.warnings.find((w) => /NOT STITCHED/.test(w)) ?? '')
+    }
+  }
+
+  // --- storage round-trips, and a corrupt store degrades to nothing
+  {
+    const mine = presetFrom(obj(), 'my satin')
+    mine.satin.density = 0.27
+    const text = serializePresets([...BUILT_IN_PRESETS, mine])
+    const back = parsePresets(text)
+    ok(back.length === 1, 'built-ins are not stored — they ship with the program',
+      `${back.length}`)
+    ok(back[0].name === 'my satin' && back[0].satin.density === 0.27,
+      'and a saved preset comes back intact')
+
+    ok(parsePresets(null).length === 0, 'no store means no presets')
+    ok(parsePresets('not json').length === 0, 'and neither does a corrupt one')
+    ok(parsePresets('{"a":1}').length === 0, 'nor one of the wrong shape')
+
+    // A missing number must not become NaN: a NaN density produces a stitch
+    // plan nobody can explain and a garment nobody can sew.
+    const holed = parsePresets('[{"id":"x","name":"x","satin":{"density":null}}]')
+    ok(holed.length === 1 && isFinite(holed[0].satin.density) && holed[0].satin.density > 0,
+      'a missing number falls back to the default rather than NaN',
+      `${holed[0]?.satin.density}`)
+    // A preset with no `type` falls back to a fill, so it is given a closed
+    // shape to fill — handing a fill an open line would be testing the
+    // geometry, not the preset.
+    ok(holed[0].type === 'fill', 'a preset with no stitch type reads as a fill')
+    const d = emptyDoc()
+    d.objects = [applyStyle(newObject({
+      paths: [[...rect(0, 0, 30, 30), { x: 0, y: 0 }]],
+    }), holed[0])]
+    const n = digitize(d).plan.blocks.flatMap((b) => b.stitches).length
+    ok(n > 10, 'and it still sews', `${n} stitches`)
   }
 }
 
