@@ -51,6 +51,8 @@ export interface RenderOptions {
   rotateOffsetPx?: number
   /** Rubber band being dragged over empty space. */
   marquee?: { a: Pt; b: Pt } | null
+  /** Reference image drawn behind everything, for tracing over. */
+  backdrop?: { bitmap: CanvasImageSource; origin: Pt; widthMm: number; heightMm: number } | null
 }
 
 const RULER = 22 // px gutter for the rulers
@@ -134,6 +136,21 @@ export function render(
   }
 
   // --- artwork outlines ---------------------------------------------------
+  // --- reference image ------------------------------------------------------
+  // Behind everything and faded: it is something to trace OVER, and at full
+  // strength it competes with the stitches that matter.
+  if (opt.backdrop) {
+    const a = toS(opt.backdrop.origin)
+    const b = toS({
+      x: opt.backdrop.origin.x + opt.backdrop.widthMm,
+      y: opt.backdrop.origin.y + opt.backdrop.heightMm,
+    })
+    ctx.save()
+    ctx.globalAlpha = 0.45
+    try { ctx.drawImage(opt.backdrop.bitmap, a.x, a.y, b.x - a.x, b.y - a.y) } catch { /* not ready */ }
+    ctx.restore()
+  }
+
   if (opt.showArt) {
     for (const obj of doc.objects) {
       if (!obj.visible || !obj.paths.length) continue

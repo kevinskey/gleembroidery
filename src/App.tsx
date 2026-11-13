@@ -3,6 +3,7 @@ import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { close, toRegions } from './geometry'
 import { useHistory } from './history'
+import { DEFAULT_TOLERANCE, traceRegionAt, type Raster } from './trace'
 import {
   arcThrough, deleteNode, flattenShape, handlesOf, insertNode, moveHandle, moveNode,
   nearestSegment, pathToShape, shapesToPaths, toggleSmooth, type PathNode, type Shape,
@@ -58,7 +59,7 @@ const ROTATE_PX = 26
 const AUTOSAVE_KEY = 'gleembroidery.autosave.v1'
 
 /** Canvas tools. 'select' picks/moves/resizes; empty space still pans. */
-type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column'
+type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column' | 'wand'
 
 const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
   {
@@ -102,6 +103,16 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
         <path d="M2 4c6-3 12 3 18 0" stroke="currentColor" strokeWidth="1.3" fill="none" />
         <path d="M2 12c6-3 12 3 18 0" stroke="currentColor" strokeWidth="1.3" fill="none" />
         <path d="M4 3.4v9.2M9 4.6v9.2M14 5.6v9.2M19 3.9v9.2" stroke="currentColor" strokeWidth="0.7" opacity="0.8" />
+      </svg>
+    ),
+  },
+  {
+    id: 'wand', label: 'Wand', hint: 'Click a colour in the backdrop image to trace it into a shape (W)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M3 14L13 4" stroke="currentColor" strokeWidth="1.6" fill="none" />
+        <path d="M15 2l.7 1.8L17.5 4.5l-1.8.7L15 7l-.7-1.8L12.5 4.5l1.8-.7z" fill="currentColor" />
+        <path d="M19 8l.5 1.2 1.2.5-1.2.5L19 11.5l-.5-1.3-1.2-.5 1.2-.5z" fill="currentColor" />
       </svg>
     ),
   },
@@ -285,7 +296,7 @@ export default function App() {
   const [sim, setSim] = useState<number | null>(null)
   const [machine, setMachine] = useState<MachineProfile>(DEFAULT_MACHINE)
   const [note, setNote] = useState<string | null>(null)
-  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee'>>({
+  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee' | 'backdrop'>>({
     showGrid: true, showArt: true, showStitches: true, showPoints: false, showJumps: true,
   })
 
@@ -328,6 +339,17 @@ export default function App() {
     } | null
   >(null)
   const [hoverCursor, setHoverCursor] = useState<string | null>(null)
+  /**
+   * Reference image behind the design, and the pixels the wand reads.
+   *
+   * The ImageData is kept beside the bitmap because tracing needs raw bytes
+   * and pulling them back off a canvas on every click would re-decode the
+   * image each time.
+   */
+  const [backdrop, setBackdrop] = useState<
+    { bitmap: HTMLImageElement; raster: Raster; pxPerMm: number; origin: Pt; name: string } | null
+  >(null)
+  const [wandTolerance, setWandTolerance] = useState(DEFAULT_TOLERANCE)
   // Shift-drag rubber band over empty space, for selecting several at once.
   const marquee = useRef<Pt | null>(null)
   const [marqueeBox, setMarquee] = useState<{ a: Pt; b: Pt } | null>(null)
@@ -389,9 +411,14 @@ export default function App() {
       selectionBox: tool === 'select' ? selBox : null,
       rotateOffsetPx: tool === 'select' && selBox ? ROTATE_PX : undefined,
       marquee: marqueeBox,
+      backdrop: backdrop && {
+        bitmap: backdrop.bitmap, origin: backdrop.origin,
+        widthMm: backdrop.raster.width / backdrop.pxPerMm,
+        heightMm: backdrop.raster.height / backdrop.pxPerMm,
+      },
       nodeEdit: tool === 'node' && selected ? { shapes: shapesOf(selected), active: activeNode } : null,
     })
-  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox])
+  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop])
 
   useEffect(() => { draw() }, [draw])
 
@@ -581,6 +608,65 @@ export default function App() {
     setSim(null)
     setNote(null)
   }, [doc.objects.length, setDoc, setSelectedId])
+
+  /**
+   * Load a reference image to trace over.
+   *
+   * Sized so its WIDTH matches the hoop by default: a logo arrives with no
+   * physical size, and the hoop is the only real dimension in the document,
+   * so it is the one sensible guess. The operator scales it afterwards.
+   */
+  const importImage = async (file: File) => {
+    try {
+      const url = URL.createObjectURL(file)
+      const bitmap = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const im = new Image()
+        im.onload = () => resolve(im)
+        im.onerror = () => reject(new Error('could not decode that image'))
+        im.src = url
+      })
+      const cv = document.createElement('canvas')
+      cv.width = bitmap.naturalWidth
+      cv.height = bitmap.naturalHeight
+      const ctx = cv.getContext('2d', { willReadFrequently: true })
+      if (!ctx) throw new Error('could not read the image')
+      ctx.drawImage(bitmap, 0, 0)
+      const id = ctx.getImageData(0, 0, cv.width, cv.height)
+      const pxPerMm = cv.width / doc.hoop.widthMm
+      const origin = { x: -doc.hoop.widthMm / 2, y: -(cv.height / pxPerMm) / 2 }
+      setBackdrop({ bitmap, raster: { data: id.data, width: cv.width, height: cv.height }, pxPerMm, origin, name: file.name })
+      setTool('wand')
+      setNote(`${file.name} loaded — click a colour with the Wand to trace it`)
+    } catch (e) {
+      alert(`Could not load that image: ${(e as Error).message}`)
+    }
+  }
+
+  /** Trace whatever colour was clicked into a new object. */
+  const wandAt = useCallback((p: Pt) => {
+    if (!backdrop) { setNote('Load a reference image first — Artwork ▸ Image'); return }
+    const px = (p.x - backdrop.origin.x) * backdrop.pxPerMm
+    const py = (p.y - backdrop.origin.y) * backdrop.pxPerMm
+    const res = traceRegionAt(backdrop.raster, px, py, {
+      tolerance: wandTolerance,
+      pxPerMm: backdrop.pxPerMm,
+      originMm: backdrop.origin,
+      simplifyMm: 0.2,
+    })
+    for (const w of res.warnings) setNote(w)
+    if (!res.paths.length) return
+    const n = doc.objects.length
+    const obj = newObject({
+      name: `Traced ${n + 1}`,
+      color: PALETTE[n % PALETTE.length],
+      type: 'fill',
+      paths: res.paths.map((ring) => [...ring, { ...ring[0] }]),
+    })
+    setDoc((d) => ({ ...d, objects: [...d.objects, obj] }))
+    setSelectedId(obj.id)
+    setSim(null)
+    if (!res.warnings.length) setNote(`Traced ${res.paths.length} contour(s) from ${backdrop.name}`)
+  }, [backdrop, wandTolerance, doc.objects.length, setDoc, setSelectedId])
 
   const importSvg = async (file: File) => {
     try {
@@ -805,6 +891,7 @@ export default function App() {
     }
     if (e.button !== 0) return
     const p = atMm(e)
+    if (tool === 'wand') { wandAt(p); return }
     if (tool === 'pen' || tool === 'column') {
       // Clicking the first node closes the path — the standard way to finish a
       // region, and the only one that does not need a separate control.
@@ -1063,7 +1150,7 @@ export default function App() {
         return
       }
       const pick: Record<string, Tool> = {
-        v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column',
+        v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column', w: 'wand',
         r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand',
       }
       const t = pick[e.key.toLowerCase()]
@@ -1092,6 +1179,8 @@ export default function App() {
           <label>Artwork</label>
           <FilePick label="Import SVG…" accept=".svg,image/svg+xml" onPick={importSvg} />
           <FilePick label="Open DST…" accept=".dst,.DST" onPick={importDstReference} />
+          <FilePick label="Image…" accept="image/png,image/jpeg,image/gif,image/webp" onPick={importImage} />
+          {backdrop && <button onClick={() => { setBackdrop(null); setNote(null) }}>Clear image</button>}
           {reference && <button onClick={() => setReference(null)}>Clear ref</button>}
         </div>
 
@@ -1148,6 +1237,20 @@ export default function App() {
           ))}
         </div>
 
+        {tool === 'wand' && (
+          <div className="group">
+            <label>Wand</label>
+            <label className="check" title="How far a colour may differ and still be included">
+              Tolerance
+              <input
+                type="range" min={2} max={80} step={1}
+                value={Math.round(wandTolerance * 100)}
+                onChange={(e) => setWandTolerance(Number(e.target.value) / 100)} />
+              <span className="dim">{Math.round(wandTolerance * 100)}%</span>
+            </label>
+          </div>
+        )}
+
         <div className="group">
           <label>Machine</label>
           <select
@@ -1201,7 +1304,12 @@ export default function App() {
           <h3>Sewing sequence</h3>
           {!doc.objects.length && (
             <div className="empty">
-              Import an SVG to begin. Each closed shape becomes an object you can assign a stitch type to.
+              {/* This used to read "Import an SVG to begin", which was true
+                  when importing was the only way in — and was the reason the
+                  drawing tools looked like they did not exist. */}
+              Draw with the tools above, import an SVG, or load a reference image and trace
+              it with the Wand. Each closed shape becomes an object you can assign a stitch
+              type to.
             </div>
           )}
           {doc.objects.map((o, i) => (

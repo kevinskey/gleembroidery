@@ -11,6 +11,7 @@ import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/st
 import { SCHEMA_VERSION, ProjectError, deserialize, serialize } from '../src/project'
 import { packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { unionSelfChecked } from '../src/boolean'
+import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { MIN_DRAW_MM, bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from '../src/draw'
 import { MIN_SIZE_MM, boxCentre, fitPaths, handlePoint, hitHandle, hitObject, movePaths, objectBox, pickObject, resizeBox, rotatePaths, rotationAngle, unionBox, type Box } from '../src/transform'
 import { COALESCE_MS, HISTORY_LIMIT, applyEdit, cancelState, initHistory, redoState, undoState } from '../src/history'
@@ -1303,6 +1304,141 @@ console.log('\n# layered underlay')
     // with no underlay is a wearable defect, not a cosmetic one.
     ok(legacy(42, 'satin').satin.underlay.length > 0, 'an unreadable value falls back to the default')
     ok(legacy([], 'satin').satin.underlay.length === 0, 'but an explicit empty list is honoured')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# auto-trace (magic wand)')
+{
+  /** Build an RGBA raster from a character map, one char per pixel. */
+  const raster = (rows: string[], palette: Record<string, [number, number, number, number]>): Raster => {
+    const h = rows.length, w = rows[0].length
+    const data = new Uint8ClampedArray(w * h * 4)
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const c = palette[rows[y][x]]
+        const i = (y * w + x) * 4
+        data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; data[i + 3] = c[3]
+      }
+    }
+    return { data, width: w, height: h }
+  }
+  const PAL: Record<string, [number, number, number, number]> = {
+    '.': [255, 255, 255, 255],
+    '#': [10, 20, 200, 255],
+    'o': [12, 22, 205, 255],   // near-identical to '#', inside tolerance
+    'r': [200, 20, 10, 255],   // clearly different
+    ' ': [0, 0, 0, 0],         // transparent
+  }
+
+  // A filled square with a hole in it.
+  const img = raster([
+    '..........',
+    '..######..',
+    '..######..',
+    '..##..##..',
+    '..##..##..',
+    '..######..',
+    '..######..',
+    '..........',
+  ], PAL)
+
+  const mask = floodMask(img, 3, 2)
+  // 6+6 + 4+4 + 6+6 = 32 filled pixels; the 2x2 hole is not among them.
+  ok(maskArea(mask) === 32, 'the flood covers the shape but not its hole', `${maskArea(mask)}`)
+  ok(mask[3 * 10 + 4] === 0, 'the hole is excluded')
+  ok(mask[0] === 0, 'and so is the background')
+
+  // Near-identical colours join; clearly different ones do not.
+  const shades = raster(['##oo', '##oo'], PAL)
+  ok(maskArea(floodMask(shades, 0, 0)) === 8, 'near-identical shades flood together')
+  const mixed = raster(['##rr', '##rr'], PAL)
+  ok(maskArea(floodMask(mixed, 0, 0)) === 4, 'a clearly different colour stops the flood',
+    `${maskArea(floodMask(mixed, 0, 0))}`)
+  // Tolerance is adjustable and monotone.
+  ok(maskArea(floodMask(mixed, 0, 0, 0.9)) === 8, 'a loose tolerance crosses it')
+
+  // Transparency is absence, not a pale colour.
+  {
+    const alpha = raster(['##  ', '##  '], PAL)
+    ok(maskArea(floodMask(alpha, 0, 0)) === 4, 'the flood does not leak into transparency',
+      `${maskArea(floodMask(alpha, 0, 0))}`)
+  }
+
+  // --- contours
+  {
+    const loops = maskContours(mask, img.width, img.height)
+    ok(loops.length === 2, 'a shape with a hole traces TWO loops — outer and hole',
+      `${loops.length}`)
+    const areas = loops.map((l) => {
+      let a2 = 0
+      for (let i = 0; i < l.length; i++) {
+        const p = l[i], q = l[(i + 1) % l.length]
+        a2 += p.x * q.y - q.x * p.y
+      }
+      return a2 / 2
+    })
+    // One loop winds one way and one the other: that sign is how an outer
+    // boundary is told from a hole downstream.
+    ok(Math.sign(areas[0]) !== Math.sign(areas[1]), 'and they wind in opposite directions',
+      areas.map((a) => a.toFixed(1)).join(' / '))
+    // The boundary runs halfway between the last filled pixel and the first
+    // empty one, so a 6x6 block encloses 36 less the four chamfered corners.
+    const outer = Math.max(...areas.map(Math.abs))
+    ok(Math.abs(outer - 36) <= 0.5, 'the outer loop encloses the true pixel area',
+      `${outer.toFixed(1)} of 36`)
+    const hole = Math.min(...areas.map(Math.abs))
+    ok(Math.abs(hole - 4) <= 0.5, 'and the hole encloses its own', `${hole.toFixed(1)} of 4`)
+    // Contours run BETWEEN pixels, not through their centres.
+    const xs = loops.flat().map((p) => p.x)
+    // Filled columns are 2..7, so the boundary sits at 1.5 and 7.5 — half a
+    // pixel outside the last filled centre, which is where the edge IS.
+    ok(Math.min(...xs) === 1.5 && Math.max(...xs) === 7.5,
+      'the boundary sits on the half-grid between pixels',
+      `${Math.min(...xs)}..${Math.max(...xs)}`)
+  }
+
+  // --- the whole trace, in millimetres
+  {
+    const res = traceRegionAt(img, 3, 2, { pxPerMm: 2, originMm: { x: 100, y: 50 }, minAreaPx: 1 })
+    ok(res.paths.length === 2, 'the trace returns outer and hole', `${res.paths.length}`)
+    ok(res.area === 32, 'and reports the pixels it covered', `${res.area}`)
+    const all = res.paths.flat()
+    // x=1.5 px at 2 px/mm is 0.75 mm, offset to the image origin at 100 mm.
+    ok(Math.min(...all.map((p) => p.x)) === 100.75,
+      'scaled by px/mm and offset to the image origin',
+      `${Math.min(...all.map((p) => p.x))}`)
+    ok(res.paths.every((p) => p.length >= 3), 'every contour is a usable ring')
+    // toRegions must nest them, or the hole would sew solid.
+    const regions = toRegions(res.paths)
+    ok(regions.length === 1 && regions[0].length === 2,
+      'and they nest into ONE region with ONE hole',
+      `${regions.length} region(s), ${regions[0]?.length} ring(s)`)
+  }
+
+  // --- refusals and noise
+  {
+    const miss = traceRegionAt(img, -5, -5, {})
+    ok(miss.paths.length === 0 && miss.warnings.length > 0, 'clicking outside the image is reported')
+    const speck = raster(['....', '.#..', '....'], PAL)
+    const tiny = traceRegionAt(speck, 1, 1, { minAreaPx: 12 })
+    ok(tiny.paths.length === 0, 'a single-pixel speck is not turned into an object')
+    ok(tiny.warnings.join(' ').includes('small'), 'and the reason is given', tiny.warnings[0] ?? '')
+  }
+
+  // --- simplification keeps the outline where it was
+  {
+    const big = raster(Array.from({ length: 40 }, (_, y) =>
+      Array.from({ length: 40 }, (_, x) => (Math.hypot(x - 20, y - 20) < 15 ? '#' : '.')).join('')), PAL)
+    const res = traceRegionAt(big, 20, 20, { pxPerMm: 1, simplifyMm: 0.3, minAreaPx: 10 })
+    ok(res.paths.length === 1, 'a disc traces one contour', `${res.paths.length}`)
+    const ring = res.paths[0]
+    ok(ring.length < 120, 'simplified, not one vertex per half pixel', `${ring.length} points`)
+    // Every point still sits on the disc's rim.
+    let worst = 0
+    for (const p of ring) worst = Math.max(worst, Math.abs(Math.hypot(p.x - 20, p.y - 20) - 15))
+    ok(worst < 1.2, 'and the outline still follows the edge', `${worst.toFixed(2)} px`)
   }
 }
 
