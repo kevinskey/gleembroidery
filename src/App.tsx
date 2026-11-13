@@ -191,7 +191,7 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
     ),
   },
   {
-    id: 'text', label: 'Text', hint: 'Click to set a line of lettering; edit the words, face and size in Properties (T)',
+    id: 'text', label: 'Text', hint: 'Click to set a line of lettering; edit the words, face and size in the Object tab (T)',
     icon: (
       <svg width="22" height="16" viewBox="0 0 22 16">
         <path d="M3 3.5h16M11 3.5V13" stroke="currentColor" strokeWidth="1.7" fill="none" />
@@ -1724,6 +1724,9 @@ export default function App() {
    * so it is the one sensible guess. The operator scales it afterwards.
    */
   const importImage = async (file: File) => {
+    // The menu stays open until a file actually arrives — see Menu.tsx
+    // for why closing it on the click killed the picker.
+    closeAllMenus()
     try {
       const url = URL.createObjectURL(file)
       const bitmap = await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -1866,7 +1869,7 @@ export default function App() {
 
   /** Trace whatever colour was clicked into a new object. */
   const wandAt = useCallback((p: Pt) => {
-    if (!backdrop) { setNote('Load a reference image first — Artwork ▸ Image'); return }
+    if (!backdrop) { setNote('Load a backdrop image first — File ▸ Backdrop image…'); return }
     const px = (p.x - backdrop.origin.x) * backdrop.pxPerMm
     const py = (p.y - backdrop.origin.y) * backdrop.pxPerMm
     const res = traceRegionAt(backdrop.raster, px, py, {
@@ -1891,6 +1894,9 @@ export default function App() {
   }, [backdrop, wandTolerance, doc.objects.length, setDoc, setSelectedId])
 
   const importSvg = async (file: File) => {
+    // The menu stays open until a file actually arrives — see Menu.tsx
+    // for why closing it on the click killed the picker.
+    closeAllMenus()
     try {
       const v = parseSvgToPaths(await file.text(), file.name.replace(/\.svg$/i, ''))
       addPaths(v.paths, v.name)
@@ -1904,6 +1910,9 @@ export default function App() {
   }
 
   const importDstReference = async (file: File) => {
+    // The menu stays open until a file actually arrives — see Menu.tsx
+    // for why closing it on the click killed the picker.
+    closeAllMenus()
     try {
       const bytes = new Uint8Array(await file.arrayBuffer())
       const d = readDst(bytes)
@@ -2018,6 +2027,9 @@ export default function App() {
   }
 
   const openProject = async (file: File) => {
+    // The menu stays open until a file actually arrives — see Menu.tsx
+    // for why closing it on the click killed the picker.
+    closeAllMenus()
     try {
       const loaded = deserialize(await file.text())
       history.reset(loaded)
@@ -2920,6 +2932,12 @@ export default function App() {
 
           <Menu label="View" width={210}>
             <MenuItem onClick={fit} hint="Or press the Fit button">Fit to window</MenuItem>
+            <div className="row wide">
+              <span className="dim">
+                Scroll to zoom. Hold Space and drag to pan from any tool, or drag with
+                the middle button.
+              </span>
+            </div>
             <MenuSep />
             <MenuLabel>Show</MenuLabel>
             {([

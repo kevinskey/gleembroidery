@@ -127,10 +127,19 @@ export function Menu({
           // Anything inside that does something closes the menu, so a menu
           // item does not have to remember to. Checkboxes and number fields
           // opt out with .keep-open, since you usually want several.
+          //
+          // A FILE PICKER MUST NOT CLOSE IT. The picker is a <label> wrapping
+          // an <input type=file>, and the browser opens the dialog as the
+          // label's DEFAULT ACTION — after this handler has run. Closing here
+          // unmounted the panel, the input went with it, and Chrome will not
+          // open a picker for an input that is no longer in the document. No
+          // dialog, no error, nothing: "upload a background image doesn't
+          // work". The import handlers call closeAllMenus() once a file has
+          // actually arrived.
           onClick={(e) => {
             const t = e.target as HTMLElement
-            if (t.closest('.keep-open')) return
-            if (t.closest('button, label.filepick')) close()
+            if (t.closest('.keep-open') || t.closest('.filepick')) return
+            if (t.closest('button')) close()
           }}
         >
           {children}
