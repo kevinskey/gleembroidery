@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { centerPlan } from './digitize'
 import { readDst, writeDst } from './dst'
 import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM } from './satin'
@@ -55,6 +55,7 @@ import {
   type Pt,
   type TieParams,
   type FillStyle,
+  type Group,
   type Spacing,
   type StitchType,
 } from './model'
@@ -684,6 +685,63 @@ export default function App() {
     setLetterBoxes(null)
     setNote('Converted to outlines — the shapes are editable, the words are not')
   }
+
+  // --- groups ---------------------------------------------------------------
+  //
+  // A group is a NAME, a visibility and a lock. It deliberately does not
+  // touch the sewing order: the sequence is what the machine does, and a
+  // group that dragged its members together to tidy a list would change
+  // which colour goes down first.
+
+  /** The ids of everything in the same groups as the current selection. */
+  const expandToGroups = (ids: readonly string[]): string[] => {
+    const gs = new Set(
+      doc.objects.filter((o) => ids.includes(o.id) && o.group).map((o) => o.group!))
+    if (!gs.size) return [...ids]
+    return [...new Set([
+      ...ids,
+      ...doc.objects.filter((o) => o.group && gs.has(o.group)).map((o) => o.id),
+    ])]
+  }
+
+  const groupSelection = () => {
+    if (selectedObjs.length < 2) { setNote('select two or more objects to group'); return }
+    const id = `g${Date.now().toString(36)}`
+    const ids = selectedObjs.map((o) => o.id)
+    setDoc((d) => ({
+      ...d,
+      groups: [...d.groups, { id, name: `Group ${d.groups.length + 1}` }],
+      objects: d.objects.map((o) => (ids.includes(o.id) ? { ...o, group: id } : o)),
+    }))
+    setNote(`grouped ${ids.length} objects — the sewing order is unchanged`)
+  }
+
+  const ungroupSelection = () => {
+    const gs = new Set(selectedObjs.map((o) => o.group).filter(Boolean) as string[])
+    if (!gs.size) { setNote('nothing grouped in the selection'); return }
+    setDoc((d) => ({
+      ...d,
+      // A group with no members left is removed: an empty row in the panel
+      // is something to wonder about rather than something to use.
+      groups: d.groups.filter((g) => !gs.has(g.id)),
+      objects: d.objects.map((o) => (o.group && gs.has(o.group) ? { ...o, group: undefined } : o)),
+    }))
+    setNote(`ungrouped ${gs.size} group${gs.size === 1 ? '' : 's'}`)
+  }
+
+  const patchGroup = (id: string, f: (g: Group) => Group) =>
+    setDoc((d) => ({ ...d, groups: d.groups.map((g) => (g.id === id ? f(g) : g)) }))
+
+  /** Is this object out of reach — locked, or in a hidden group? */
+  const unreachable = useCallback((o: EmbObject): boolean => {
+    if (!o.group) return false
+    const g = doc.groups.find((q) => q.id === o.group)
+    return !!g && (!!g.locked || !!g.hidden)
+  }, [doc.groups])
+
+  /** Objects a click may land on: locked and hidden groups are not among them. */
+  const pickable = useMemo(
+    () => doc.objects.filter((o) => !unreachable(o)), [doc.objects, unreachable])
 
   const applyPreset = (p: StylePreset) => {
     if (!selectedObjs.length) { setNote('select an object first'); return }
@@ -1474,7 +1532,7 @@ export default function App() {
         }
       }
       // Nothing of the current outline was hit — pick whatever is under it.
-      const hit = pickObject(doc.objects, p, PICK_PX / view.scale)
+      const hit = pickObject(pickable, p, PICK_PX / view.scale)
       setSelectedId(hit?.id ?? null)
       setActiveNode(null)
       if (!hit) panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
@@ -1489,7 +1547,7 @@ export default function App() {
       // act with a prompt on screen, and the usual 4 px is tuned for
       // telling two overlapping objects apart — not for hitting a hairline
       // curve, which is exactly what a baseline usually is.
-      const hit = pickObject(doc.objects, atMm(e), (PICK_PX * 4) / view.scale)
+      const hit = pickObject(pickable, atMm(e), (PICK_PX * 4) / view.scale)
       setPickingBaseline(false)
       if (!hit || hit.id === selected.id) {
         setNote(hit ? 'lettering cannot follow its own outline' : 'nothing there — baseline unchanged')
@@ -1554,19 +1612,24 @@ export default function App() {
           return
         }
       }
-      const hit = pickObject(doc.objects, p, PICK_PX / view.scale)
+      const hit = pickObject(pickable, p, PICK_PX / view.scale)
       if (hit) {
         // Shift toggles membership; a plain click replaces the selection,
         // unless the object is already in it — dragging a multi-selection by
         // one of its members must move all of them, not reset to that one.
+        // Clicking a member picks the whole GROUP. Alt reaches past it to
+        // the one object, which is the standard way into a group and the
+        // only way to edit one member without ungrouping first.
+        const asGroup = (id: string) => (e.altKey ? [id] : expandToGroups([id]))
         let ids: string[]
         if (e.shiftKey) {
           ids = selectedIds.includes(hit.id)
-            ? selectedIds.filter((x) => x !== hit.id)
-            : [...selectedIds, hit.id]
+            ? selectedIds.filter((x) => !asGroup(hit.id).includes(x))
+            : [...selectedIds, ...asGroup(hit.id)]
         } else {
-          ids = selectedIds.includes(hit.id) ? selectedIds : [hit.id]
+          ids = selectedIds.includes(hit.id) ? selectedIds : asGroup(hit.id)
         }
+        ids = [...new Set(ids)]
         setSelectedIds(ids)
         if (ids.length) {
           history.begin()
@@ -1593,7 +1656,7 @@ export default function App() {
       // A guide belongs to an object, so there has to be one. Clicking with
       // nothing selected picks whatever is under the cursor rather than
       // silently doing nothing.
-      const target = selected ?? pickObject(doc.objects, p, PICK_PX / view.scale)
+      const target = selected ?? pickObject(pickable, p, PICK_PX / view.scale)
       if (!target) { setSelectedIds([]); return }
       if (!selected || selected.id !== target.id) setSelectedIds([target.id])
       // A click ON an existing guide removes it; drawing a new one is a drag.
@@ -1746,7 +1809,7 @@ export default function App() {
       const p = atMm(e)
       const b = selBox
       const h = b ? hitHandle(b, p, HANDLE_PX / view.scale) : null
-      setHoverCursor(h ? handleCursor(h) : pickObject(doc.objects, p, PICK_PX / view.scale) ? 'move' : null)
+      setHoverCursor(h ? handleCursor(h) : pickObject(pickable, p, PICK_PX / view.scale) ? 'move' : null)
     }
     const gd = guideDraw.current
     if (gd) { setGuideDrag({ a: gd.a, b: atMm(e) }); return }
@@ -2201,6 +2264,12 @@ export default function App() {
             onClick={() => runMirror(false)}>Flip V</button>
           <button disabled={!selectedObjs.length} title="Duplicate (Cmd/Ctrl+D)"
             onClick={runDuplicate}>Duplicate</button>
+          <button disabled={selectedObjs.length < 2}
+            title="Name this set of objects. Grouping does NOT change the sewing order."
+            onClick={groupSelection}>Group</button>
+          <button disabled={!selectedObjs.some((o) => o.group)}
+            title="Take the selection out of its group"
+            onClick={ungroupSelection}>Ungroup</button>
         </div>
 
         {tool === 'wand' && (
@@ -2278,6 +2347,10 @@ export default function App() {
       <div className="body">
         <div className="side">
           <h3>Sewing sequence</h3>
+          {/* Group headers sit where their FIRST member sits in the sequence,
+              not at the top: the list is the running order, and a header
+              that floated above it would say a group sews before things that
+              actually sew first. */}
           {!doc.objects.length && (
             <div className="empty">
               {/* This used to read "Import an SVG to begin", which was true
@@ -2289,9 +2362,41 @@ export default function App() {
             </div>
           )}
           {doc.objects.map((o, i) => (
+            <Fragment key={o.id}>
+            {(() => {
+              const g = o.group ? doc.groups.find((q) => q.id === o.group) : null
+              const firstOfGroup = !!g
+                && doc.objects.findIndex((q) => q.group === g.id) === i
+              if (!g || !firstOfGroup) return null
+              const members = doc.objects.filter((q) => q.group === g.id)
+              return (
+                <div className="grp">
+                  <button className="eye" title={g.collapsed ? 'Show members' : 'Fold members away'}
+                    onClick={() => patchGroup(g.id, (x) => ({ ...x, collapsed: !x.collapsed }))}>
+                    {g.collapsed ? '▸' : '▾'}
+                  </button>
+                  <input
+                    className="gname" value={g.name}
+                    onChange={(e) => patchGroup(g.id, (x) => ({ ...x, name: e.target.value }))} />
+                  <span className="dim">{members.length}</span>
+                  <button className="eye" title={g.hidden ? 'Show the group' : 'Hide the group'}
+                    onClick={() => patchGroup(g.id, (x) => ({ ...x, hidden: !x.hidden }))}>
+                    {g.hidden ? '◯' : '●'}
+                  </button>
+                  <button className="eye" title={g.locked ? 'Unlock' : 'Lock — members cannot be picked on the canvas'}
+                    onClick={() => patchGroup(g.id, (x) => ({ ...x, locked: !x.locked }))}>
+                    {g.locked ? '🔒' : '🔓'}
+                  </button>
+                  <button className="eye" title="Select the whole group"
+                    onClick={() => setSelectedIds(members.map((q) => q.id))}>⤢</button>
+                </div>
+              )
+            })()}
+            {(() => {
+              const g = o.group ? doc.groups.find((q) => q.id === o.group) : null
+              return g?.collapsed ? null : (
             <div
-              key={o.id}
-              className={`obj${selectedIds.includes(o.id) ? ' sel' : ''}`}
+              className={`obj${selectedIds.includes(o.id) ? ' sel' : ''}${o.group ? ' ingrp' : ''}`}
               // The sequence list is where a multi-selection is easiest to
               // build — the objects are named and in order, and several of
               // them are often stacked on top of each other on the canvas.
@@ -2325,6 +2430,9 @@ export default function App() {
                 {o.visible ? '●' : '○'}
               </button>
             </div>
+              )
+            })()}
+            </Fragment>
           ))}
           {doc.objects.length > 0 && (
             <div style={{ marginTop: 10, display: 'flex', gap: 6 }}>

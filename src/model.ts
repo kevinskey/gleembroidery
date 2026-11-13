@@ -252,6 +252,8 @@ export interface EmbObject {
   /** Physical thread, for the run sheet. Empty until the user assigns one. */
   thread: ThreadRef
   visible: boolean
+  /** Which group this belongs to, if any. See Group. */
+  group?: string
   type: StitchType
   /**
    * Geometry in mm. For 'fill' these are read as a region (outer + holes).
@@ -432,6 +434,20 @@ export const HOOPS: Hoop[] = [
   },
 ]
 
+/**
+ * Is this object sewn at all?
+ *
+ * Its own visibility AND its group's. Two separate switches on purpose:
+ * hiding a group must not forget which of its members were individually
+ * hidden, so showing the group again puts things back as they were rather
+ * than revealing something the user had turned off.
+ */
+export function objectVisible(o: EmbObject, groups: readonly Group[]): boolean {
+  if (!o.visible) return false
+  if (!o.group) return true
+  return !groups.find((g) => g.id === o.group)?.hidden
+}
+
 /** Hoops that physically mount on a machine with the given bracket spacing. */
 export function hoopsForSpacing(spacing: Spacing): Hoop[] {
   const rank: Record<Spacing, number> = { TJ360: 0, CH400A: 1, TJ500: 2, TJ600: 3 }
@@ -480,6 +496,32 @@ export const DEFAULT_TIE = (): TieParams => ({
   stitches: 4,
 })
 
+/**
+ * A named set of objects.
+ *
+ * A group here does NOT change the sewing order, and that is the whole
+ * design decision. The document is an ordered sequence — it is what the
+ * machine does, in order, and the panel shows it — so a group that silently
+ * dragged its members next to each other would change which colour goes down
+ * first in order to tidy a list. A group is a NAME, a visibility, and a lock:
+ * everything that helps with selection and nothing that touches the
+ * sequence.
+ *
+ * Members are tagged by `EmbObject.group` rather than held in a list here,
+ * so there is one place an object's membership lives and no way for the two
+ * to disagree.
+ */
+export interface Group {
+  id: string
+  name: string
+  /** Fold the members away in the sewing-sequence panel. */
+  collapsed?: boolean
+  /** Hide every member, without changing each one's own visibility. */
+  hidden?: boolean
+  /** Members cannot be picked or dragged on the canvas. */
+  locked?: boolean
+}
+
 export interface Doc {
   /**
    * A manually edited stitch plan that has taken over from generation.
@@ -496,6 +538,8 @@ export interface Doc {
   spacing: Spacing
   /** How thread ends are anchored. See TieParams. */
   tie: TieParams
+  /** Named sets of objects. See Group — they do not affect sewing order. */
+  groups: Group[]
   objects: EmbObject[]
 }
 
@@ -598,7 +642,10 @@ export const DEFAULT_HOOP =
 export function emptyDoc(): Doc {
   // 8×9" covers left-chest and most full-front work, and mounts on every
   // bracket spacing — the hoop a shop reaches for without thinking.
-  return { name: 'untitled', hoop: DEFAULT_HOOP, spacing: 'TJ500', tie: DEFAULT_TIE(), objects: [] }
+  return {
+    name: 'untitled', hoop: DEFAULT_HOOP, spacing: 'TJ500',
+    tie: DEFAULT_TIE(), groups: [], objects: [],
+  }
 }
 
 export function bounds(paths: Pt[][]): { minX: number; minY: number; maxX: number; maxY: number } | null {

@@ -183,6 +183,20 @@ canvas.grabbable:active { cursor: grabbing; }
   border: 1px solid transparent;
 }
 .obj:hover { background: var(--panel-2); }
+/* Group header: a row ABOUT the objects rather than one of them, so it reads
+   differently — tighter, dimmer, and with the members stepped in under it. */
+.grp {
+  display: flex; align-items: center; gap: 4px;
+  padding: 3px 6px; margin: 4px 0 2px;
+  border-left: 2px solid var(--accent);
+  font-size: 11px; color: var(--muted);
+}
+.grp .gname {
+  flex: 1; min-width: 0; background: transparent; border: 0;
+  color: var(--ink); font-size: 11px; font-weight: 600; padding: 1px 2px;
+}
+.grp .gname:focus { background: var(--panel-2); outline: 1px solid var(--line); }
+.obj.ingrp { margin-left: 12px; }
 .obj.sel { background: var(--panel-2); border-color: var(--accent); }
 .obj .sw {
   width: 15px; height: 15px;

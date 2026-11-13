@@ -10,7 +10,7 @@
 //   * colour grouping, since each change is a manual re-thread — adjacent
 //     objects sharing a colour become ONE block.
 
-import { FILL_UNDERLAY_ORDER, NO_SPLIT, orderedUnderlay, type Doc, type EmbObject, type Pt, type TieParams } from './model'
+import { FILL_UNDERLAY_ORDER, NO_SPLIT, objectVisible, orderedUnderlay, type Doc, type EmbObject, type Pt, type TieParams } from './model'
 import { nodeFractions } from './nodes'
 import type { ColorBlock, Stitch, StitchPlan } from './stitches'
 import { dist, pathLength, resample, scanlineSpans, toRegions } from './geometry'
@@ -45,7 +45,7 @@ export const MIN_STITCH_MM = 0.5
 function effectiveFloor(doc: Doc): number {
   let floor = MIN_STITCH_MM
   for (const o of doc.objects) {
-    if (!o.visible || o.type === 'none') continue
+    if (!objectVisible(o, doc.groups) || o.type === 'none') continue
     if (o.type === 'fill') {
       floor = Math.min(floor, o.fill.spacing)
       if (o.fill.border.enabled) floor = Math.min(floor, o.fill.border.density)
@@ -614,7 +614,7 @@ export function digitize(doc: Doc): DigitizeResult {
       `${which} off — thread ends will pull out unless the machine places its own locks`)
   }
 
-  const sewn = doc.objects.filter((o) => o.visible && o.type !== 'none')
+  const sewn = doc.objects.filter((o) => objectVisible(o, doc.groups) && o.type !== 'none')
   sewn.forEach((o, i) => {
     if (o.type !== 'knockdown') return
     if (sewn.slice(0, i).some((p) => p.type !== 'knockdown')) {
@@ -623,7 +623,9 @@ export function digitize(doc: Doc): DigitizeResult {
   })
 
   for (const obj of doc.objects) {
-    if (!obj.visible || obj.type === 'none') continue
+    // A hidden GROUP hides its members without touching each one's own
+    // visibility, so showing the group again puts things back as they were.
+    if (!objectVisible(obj, doc.groups) || obj.type === 'none') continue
 
     // Appliqué is a SEQUENCE, not a stitch: each phase becomes its own block
     // so the machine stops between them for the operator. They are never

@@ -36,6 +36,7 @@ import {
   registerExistingIds,
   type Doc,
   type EmbObject,
+  type Group,
   type Hoop,
   type Pt,
   type FillUnderlay,
@@ -108,6 +109,7 @@ export function objectOut(o: EmbObject) {
     color: o.color,
     thread: { ...o.thread },
     visible: o.visible,
+    ...(o.group ? { group: o.group } : {}),
     type: o.type,
     // Full precision on purpose: rounding here would make a reopened project
     // generate a subtly different plan from the one that was approved.
@@ -156,6 +158,7 @@ export function serialize(doc: Doc, pretty = false): string {
       hoop: hoopOut(doc.hoop),
       spacing: doc.spacing,
       tie: { ...doc.tie },
+      groups: doc.groups.map((g) => ({ ...g })),
       objects: doc.objects.map(objectOut),
       // Manual stitch edits ARE the document once they exist. A project that
       // reopened without them would lose work with no way to get it back,
@@ -303,6 +306,28 @@ function tieIn(v: unknown): TieParams {
   }
 }
 
+/**
+ * Groups, dropping anything without an id or a name.
+ *
+ * A group with no id can never be matched to its members, so it is not a
+ * group — keeping it would put a row in the panel that nothing belongs to.
+ */
+function groupsIn(v: unknown): Group[] {
+  if (!Array.isArray(v)) return []
+  const out: Group[] = []
+  for (const g of v) {
+    if (!isObj(g) || typeof g.id !== 'string' || !g.id) continue
+    out.push({
+      id: g.id,
+      name: typeof g.name === 'string' && g.name ? g.name : 'Group',
+      ...(g.collapsed === true ? { collapsed: true } : {}),
+      ...(g.hidden === true ? { hidden: true } : {}),
+      ...(g.locked === true ? { locked: true } : {}),
+    })
+  }
+  return out
+}
+
 /** A stored [x, y] pair, or undefined when absent or malformed. */
 function ptIn(v: unknown): Pt | undefined {
   return Array.isArray(v) && v.length === 2 && typeof v[0] === 'number' && typeof v[1] === 'number'
@@ -411,6 +436,10 @@ function objectIn(v: unknown, index: number): EmbObject | null {
         }
       : {},
     visible: v.visible !== false,
+    // A membership whose group was lost is dropped rather than kept: an
+    // object tagged with a group that does not exist can never be shown,
+    // hidden or unlocked again.
+    ...(typeof v.group === 'string' && v.group ? { group: v.group } : {}),
     type: oneOf(v.type, STITCH_TYPES, 'fill'),
     paths,
     shapes: shapesIn(v.shapes),
@@ -563,6 +592,7 @@ export function deserialize(text: string): Doc {
     hoop: hoopIn(payload.hoop),
     spacing: oneOf(payload.spacing, SPACINGS, 'TJ500'),
     tie: tieIn(payload.tie),
+    groups: groupsIn(payload.groups),
     ...(frozenIn(payload.frozen) ? { frozen: frozenIn(payload.frozen)! } : {}),
     objects,
   }
@@ -619,6 +649,7 @@ export function docSignature(doc: Doc): string {
   }
   mixStr(JSON.stringify(hoopOut(doc.hoop)))
   mixStr(JSON.stringify(doc.tie))
+  mixStr(JSON.stringify(doc.groups))
   for (const o of doc.objects) {
     // Settings: hashed wholesale from the save format, so a new one cannot be
     // left out. Cheap — there are a few dozen numbers per object.

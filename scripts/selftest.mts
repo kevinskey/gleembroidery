@@ -8,7 +8,7 @@ import { planToMoves, splitMove } from '../src/machine'
 import { appliquePhases, centerPlan, digitize, orientToEntryExit, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
 import { insideRegion, tatamiFill } from '../src/fill'
 import { dist, isClosed, resample, ringArea, toRegions } from '../src/geometry'
-import { DEFAULT_APPLIQUE, DEFAULT_FILL, FILL_STYLES, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, orderedUnderlay, type Pt } from '../src/model'
+import { DEFAULT_APPLIQUE, DEFAULT_FILL, FILL_STYLES, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, objectVisible, orderedUnderlay, type Pt } from '../src/model'
 import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths , angleAt, assignGuides, resolveGuides } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
 import { SCHEMA_VERSION, SIGNATURE_GEOMETRY_KEYS, ProjectError, deserialize, docSignature, objectOut, serialize } from '../src/project'
@@ -3690,6 +3690,97 @@ console.log('\n# lettering on a baseline path')
     raw.doc.objects[0].text.path = [[1, 2]]
     ok(deserialize(JSON.stringify(raw)).objects[0].text?.path === undefined,
       'a one-point path is dropped on reading, not applied')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# groups')
+{
+  const build = () => {
+    const d = emptyDoc()
+    d.objects = [
+      newObject({ id: 'a', name: 'A', type: 'fill', paths: [[...rect(0, 0, 20, 20), { x: 0, y: 0 }]] }),
+      newObject({ id: 'b', name: 'B', type: 'fill', paths: [[...rect(40, 0, 20, 20), { x: 40, y: 0 }]] }),
+      newObject({ id: 'c', name: 'C', type: 'fill', paths: [[...rect(80, 0, 20, 20), { x: 80, y: 0 }]] }),
+    ]
+    d.groups = [{ id: 'g1', name: 'Badge' }]
+    d.objects[0].group = 'g1'
+    d.objects[2].group = 'g1'
+    return d
+  }
+  const countFor = (d: Doc) =>
+    digitize(d).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump).length
+
+  // --- GROUPING DOES NOT CHANGE THE SEWING ORDER, which is the point
+  {
+    const d = build()
+    const order = digitize(d).plan.blocks.map((b) => b.label).join(' | ')
+    ok(/A/.test(order) && /B/.test(order) && /C/.test(order), 'all three still sew', order)
+    // A sews first, B second, C third — the group did not drag C up next to A.
+    const ai = order.indexOf('A'), bi = order.indexOf('B'), ci = order.indexOf('C')
+    ok(ai < bi && bi < ci, 'in the order the document lists them, group or not',
+      `A@${ai} B@${bi} C@${ci}`)
+  }
+
+  // --- a hidden group hides its members
+  {
+    const all = countFor(build())
+    const d = build()
+    d.groups[0].hidden = true
+    const some = countFor(d)
+    ok(some > 0 && some < all, 'hiding a group removes its members from the plan',
+      `${all} -> ${some}`)
+    // And only its members: B is not in the group.
+    ok(digitize(d).plan.blocks.every((b) => !/A|C/.test(b.label)),
+      'leaving the ungrouped object alone',
+      digitize(d).plan.blocks.map((b) => b.label).join('|'))
+  }
+
+  // --- the two switches are SEPARATE, so showing a group puts things back
+  {
+    const d = build()
+    d.objects[2].visible = false // C hidden on its own
+    const beforeHide = countFor(d)
+    d.groups[0].hidden = true
+    d.groups[0].hidden = false   // hide and show the group again
+    ok(countFor(d) === beforeHide,
+      'showing a group again does not reveal a member that was hidden on its own',
+      `${beforeHide} vs ${countFor(d)}`)
+    ok(objectVisible(d.objects[2], d.groups) === false, 'C is still hidden')
+    ok(objectVisible(d.objects[0], d.groups) === true, 'and A is not')
+  }
+
+  // --- membership survives a save, and a dangling one is dropped
+  {
+    const d = build()
+    const back = deserialize(serialize(d))
+    ok(back.groups.length === 1 && back.groups[0].name === 'Badge', 'a group survives a save')
+    ok(back.objects[0].group === 'g1' && back.objects[2].group === 'g1',
+      'with its membership')
+    ok(back.objects[1].group === undefined, 'and nothing else joined it')
+
+    const flags = build()
+    flags.groups[0] = { id: 'g1', name: 'Badge', collapsed: true, hidden: true, locked: true }
+    const f = deserialize(serialize(flags)).groups[0]
+    ok(f.collapsed && f.hidden && f.locked, 'the fold, hide and lock flags survive')
+
+    // A group row with no id can never be matched to a member.
+    const raw = JSON.parse(serialize(d))
+    raw.doc.groups = [{ name: 'orphan' }, { id: 'ok', name: 'fine' }]
+    ok(deserialize(JSON.stringify(raw)).groups.length === 1,
+      'a group with no id is dropped rather than put in the panel')
+  }
+
+  // --- the signature covers groups, so hiding one regenerates the plan
+  {
+    const a = build()
+    const b = build()
+    b.groups[0].hidden = true
+    ok(docSignature(a) !== docSignature(b), 'hiding a group changes the signature')
+    const c = build()
+    c.groups[0].name = 'Crest'
+    ok(docSignature(a) !== docSignature(c), 'and so does renaming one')
   }
 }
 
