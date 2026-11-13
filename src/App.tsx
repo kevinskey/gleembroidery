@@ -4,6 +4,10 @@ import { readDst, writeDst } from './dst'
 import { close, toRegions } from './geometry'
 import { useHistory } from './history'
 import { CELL_MM, analyseDensity } from './density'
+import {
+  deleteStitches, freeze, freezeState, moveStitches, pickStitch, pickStitchesIn,
+  type StitchRef,
+} from './stitchedit'
 import { DEFAULT_TOLERANCE, traceRegionAt, type Raster } from './trace'
 import {
   DEFAULT_TEXT, SUGGESTED_FACES, textToColumns, textToOutlines,
@@ -43,7 +47,7 @@ import {
   writeEdr,
   type MachineProfile,
 } from './package'
-import { FILE_EXT, ProjectError, deserialize, projectFilename, serialize } from './project'
+import { FILE_EXT, ProjectError, deserialize, docSignature, projectFilename, serialize } from './project'
 import { fitView, render, screenToWorld, type RenderOptions, type View } from './render'
 import { countStitches, longestStitch, planBounds, type StitchPlan } from './stitches'
 import { useStitchPlan } from './useStitchPlan'
@@ -58,6 +62,14 @@ const PALETTE = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2
  *  zoomed out and absurdly fat when zoomed in. */
 const HANDLE_PX = 6
 const PICK_PX = 4
+/**
+ * Pick radius for individual stitches, screen px.
+ *
+ * Larger than PICK_PX because a stitch is the smallest target in the program
+ * — a single point, often one of thousands a fraction of a millimetre apart.
+ * At the object radius a click two pixels off a 0.4 mm thread simply misses.
+ */
+const STITCH_PICK_PX = 7
 /** How far above the selection the rotation grip sits, screen px. */
 const ROTATE_PX = 26
 
@@ -65,7 +77,7 @@ const ROTATE_PX = 26
 const AUTOSAVE_KEY = 'gleembroidery.autosave.v1'
 
 /** Canvas tools. 'select' picks/moves/resizes; empty space still pans. */
-type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column' | 'wand' | 'text'
+type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column' | 'wand' | 'text' | 'stitch'
 
 const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
   {
@@ -128,6 +140,16 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
       <svg width="22" height="16" viewBox="0 0 22 16">
         <path d="M3 3.5h16M11 3.5V13" stroke="currentColor" strokeWidth="1.7" fill="none" />
         <path d="M8 13h6" stroke="currentColor" strokeWidth="1.3" fill="none" />
+      </svg>
+    ),
+  },
+  {
+    id: 'stitch', label: 'Stitches', hint: 'Edit individual stitches. The first edit FREEZES the plan — see the banner (S)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M2 11l5-6 4 6 4-6 5 6" stroke="currentColor" strokeWidth="1.2" fill="none" />
+        <circle cx="7" cy="5" r="1.8" fill="currentColor" />
+        <circle cx="15" cy="5" r="1.8" fill="currentColor" />
       </svg>
     ),
   },
@@ -311,7 +333,7 @@ export default function App() {
   const [sim, setSim] = useState<number | null>(null)
   const [machine, setMachine] = useState<MachineProfile>(DEFAULT_MACHINE)
   const [note, setNote] = useState<string | null>(null)
-  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee' | 'backdrop' | 'letterHandles' | 'endpoints' | 'density'>>({
+  const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee' | 'backdrop' | 'letterHandles' | 'endpoints' | 'density' | 'picked'>>({
     showGrid: true, showArt: true, showStitches: true, showPoints: false, showJumps: true,
   })
 
@@ -379,6 +401,9 @@ export default function App() {
    */
   const [cmdHeld, setCmdHeld] = useState(false)
   const [showDensity, setShowDensity] = useState(false)
+  /** Stitches picked in the Stitches tool, as refs into the frozen plan. */
+  const [picked, setPicked] = useState<StitchRef[]>([])
+  const pickDrag = useRef<{ start: Pt; moved: boolean } | null>(null)
   /**
    * Letter boxes of the selected lettering, for its per-letter handles.
    *
@@ -411,6 +436,35 @@ export default function App() {
   // Computed from the SAME plan that is exported, so what is flagged is what
   // the machine will sew — not a separate estimate that could disagree.
   const density = useMemo(() => analyseDensity(plan), [plan])
+  // The signature the frozen plan is compared against — the same one the
+  // generator keys on, so "the source changed" means exactly what it says.
+  const sourceSig = useMemo(() => docSignature({ ...doc, frozen: undefined }), [doc])
+  const frozenState = freezeState(doc.frozen, sourceSig)
+
+  /**
+   * Take the current plan under manual control.
+   *
+   * Called by the first stitch edit. Everything after it edits the frozen
+   * copy, so generation never silently overwrites hand work.
+   */
+  const ensureFrozen = useCallback((): StitchPlan => {
+    if (doc.frozen) return doc.frozen.plan
+    const f = freeze(plan, sourceSig)
+    setDoc((d) => ({ ...d, frozen: f }))
+    setNote('Stitch plan frozen — source edits will ask before replacing your changes')
+    return f.plan
+  }, [doc.frozen, plan, sourceSig, setDoc])
+
+  /** Apply a manual edit to the frozen plan. */
+  const editStitches = useCallback((fn: (p: StitchPlan) => StitchPlan) => {
+    const base = ensureFrozen()
+    const next = fn(base)
+    setDoc((d) => ({
+      ...d,
+      frozen: { plan: next, signature: d.frozen?.signature ?? sourceSig, edits: (d.frozen?.edits ?? 0) + 1 },
+    }))
+    setSim(null)
+  }, [ensureFrozen, sourceSig, setDoc])
   const pb = useMemo(() => planBounds(plan), [plan])
   const total = counts.stitches + counts.jumps
   const stats = useMemo(() => packageStats(doc, plan, warnings, machine), [doc, plan, warnings, machine])
@@ -475,8 +529,9 @@ export default function App() {
       endpoints: tool === 'select' && selected && (selected.entry || selected.exit)
         ? { entry: selected.entry, exit: selected.exit } : null,
       density: showDensity ? { cells: density.hotspots, cellMm: CELL_MM } : null,
+      picked: tool === 'stitch' ? picked : null,
     })
-  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop, letterBoxes, showDensity, density])
+  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop, letterBoxes, showDensity, density, picked])
 
   useEffect(() => { draw() }, [draw])
 
@@ -1092,6 +1147,21 @@ export default function App() {
     if (e.button !== 0) return
     const p = atMm(e)
     if (tool === 'text') { addText(p); return }
+    if (tool === 'stitch') {
+      // Shift adds to the selection; a plain click replaces it.
+      const hit = pickStitch(plan, p, STITCH_PICK_PX / view.scale)
+      if (hit) {
+        setPicked((prev) => e.shiftKey
+          ? (prev.some((r) => r.block === hit.block && r.index === hit.index)
+            ? prev.filter((r) => !(r.block === hit.block && r.index === hit.index))
+            : [...prev, hit])
+          : [hit])
+      } else if (!e.shiftKey) {
+        setPicked([])
+      }
+      pickDrag.current = { start: p, moved: false }
+      return
+    }
     if (tool === 'pen' || tool === 'column') {
       // Clicking the first node closes the path — the standard way to finish a
       // region, and the only one that does not need a separate control.
@@ -1207,6 +1277,21 @@ export default function App() {
       const h = b ? hitHandle(b, p, HANDLE_PX / view.scale) : null
       setHoverCursor(h ? handleCursor(h) : pickObject(doc.objects, p, PICK_PX / view.scale) ? 'move' : null)
     }
+    const pd = pickDrag.current
+    if (pd && tool === 'stitch') {
+      const p = atMm(e)
+      if (!pd.moved && Math.hypot(p.x - pd.start.x, p.y - pd.start.y) < STITCH_PICK_PX / view.scale) return
+      pd.moved = true
+      // Dragging from empty space bands a range; dragging from a selected
+      // stitch moves the selection.
+      if (picked.length) {
+        editStitches((plan) => moveStitches(plan, picked, p.x - pd.start.x, p.y - pd.start.y))
+        pd.start = p
+      } else {
+        setMarquee({ a: pd.start, b: p })
+      }
+      return
+    }
     const nd = nodeDrag.current
     if (nd && selected) {
       const p = atMm(e)
@@ -1314,6 +1399,19 @@ export default function App() {
           && ob.minY >= box.minY && ob.maxY <= box.maxY
       })
       setSelectedIds((prev) => [...new Set([...prev, ...hits.map((o) => o.id)])])
+      return
+    }
+    if (pickDrag.current) {
+      const pd = pickDrag.current
+      pickDrag.current = null
+      if (pd.moved && !picked.length) {
+        const b = atMm(e)
+        setMarquee(null)
+        setPicked(pickStitchesIn(plan, {
+          minX: Math.min(pd.start.x, b.x), minY: Math.min(pd.start.y, b.y),
+          maxX: Math.max(pd.start.x, b.x), maxY: Math.max(pd.start.y, b.y),
+        }))
+      }
       return
     }
     if (endDrag.current) { endDrag.current = null; history.end(); return }
@@ -1432,6 +1530,14 @@ export default function App() {
         else if (tool === 'column') finishColumn()
         return
       }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'stitch' && picked.length) {
+        e.preventDefault()
+        const n = picked.length
+        editStitches((plan) => deleteStitches(plan, picked))
+        setPicked([])
+        setNote(`${n} stitch${n === 1 ? '' : 'es'} deleted`)
+        return
+      }
       if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'node' && selected && activeNode) {
         e.preventDefault()
         const shapes = [...shapesOf(selected)]
@@ -1447,7 +1553,7 @@ export default function App() {
         return
       }
       const pick: Record<string, Tool> = {
-        v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column', w: 'wand', t: 'text',
+        v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column', w: 'wand', t: 'text', s: 'stitch',
         r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand',
       }
       const t = pick[e.key.toLowerCase()]
@@ -1455,7 +1561,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [tool, finishPolygon, finishPen, finishColumn, cancelDraw, history, selected, activeNode, shapesOf, setShapes])
+  }, [tool, finishPolygon, finishPen, finishColumn, cancelDraw, history, selected, activeNode, shapesOf, setShapes, picked, editStitches])
 
   const moveObject = (index: number, delta: number) =>
     setDoc((d) => {
@@ -2001,6 +2107,39 @@ export default function App() {
         {total > 0 && <span>~<b>{stats.minutes.toFixed(1)}</b> min</span>}
         {ms > 0 && <span className="dim">{ms.toFixed(0)} ms{inline ? ' inline' : ''}</span>}
         {note && <span className="note">{note}</span>}
+        {/* The freeze banner. A stale plan is a DECISION the user has to
+            make — the spec's requirement is that hand edits are never lost
+            silently, so nothing resolves this on their behalf. */}
+        {frozenState.kind === 'frozen' && (
+          <span className="frozen">
+            ✎ {frozenState.edits} manual stitch edit{frozenState.edits === 1 ? '' : 's'} — plan frozen{' '}
+            <button className="link" onClick={() => {
+              setDoc((d) => ({ ...d, frozen: undefined }))
+              setPicked([])
+              setNote('Manual edits discarded — the plan is generated again')
+            }}>discard &amp; regenerate</button>
+          </span>
+        )}
+        {frozenState.kind === 'stale' && (
+          <span className="warn">
+            ⚠ The design changed since your {frozenState.edits} manual stitch edit
+            {frozenState.edits === 1 ? '' : 's'}. Those edits are still what will be exported.{' '}
+            <button className="link" onClick={() => {
+              setDoc((d) => ({ ...d, frozen: undefined }))
+              setPicked([])
+              setNote('Manual edits discarded — the plan now follows the design again')
+            }}>discard edits &amp; regenerate</button>
+            {' · '}
+            <button className="link" onClick={() => {
+              // Re-stamp the signature: the user has said these edits are
+              // what they want, so the design change is accepted as NOT
+              // applied rather than nagged about forever.
+              setDoc((d) => (d.frozen
+                ? { ...d, frozen: { ...d.frozen, signature: sourceSig } } : d))
+              setNote('Keeping your stitch edits — the design change was not applied')
+            }}>keep my edits</button>
+          </span>
+        )}
         {stats.warnings.map((w, i) => <span key={i} className="warn">⚠ {w}</span>)}
         {/* Density is a diagnostic, not a refusal: it tells the operator
             where the trouble is and offers to show them. */}

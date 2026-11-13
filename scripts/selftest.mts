@@ -8,7 +8,8 @@ import { dist, resample, toRegions } from '../src/geometry'
 import { DEFAULT_APPLIQUE, DEFAULT_FILL, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, emptyDoc, newObject, orderedUnderlay, type Pt } from '../src/model'
 import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
-import { SCHEMA_VERSION, ProjectError, deserialize, serialize } from '../src/project'
+import { SCHEMA_VERSION, ProjectError, deserialize, docSignature, serialize } from '../src/project'
+import { clonePlan, deleteStitches, freeze, freezeState, moveStitches, penetrationCount, pickStitch, pickStitchesIn } from '../src/stitchedit'
 import { appliqueCutSvg, packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { NOMINAL_PER_MM2, SEVERE_RATIO, WARN_RATIO, analyseDensity, densityColour } from '../src/density'
 import { PUFF_MAX_MM, PUFF_MIN_MM, puffCaps, puffCheck } from '../src/satin'
@@ -1925,6 +1926,118 @@ console.log('\n# density diagnostics')
   ok(densityColour(SEVERE_RATIO + 1) !== densityColour(WARN_RATIO + 0.1),
     'and a severe cell is coloured differently from a warm one')
   ok(NOMINAL_PER_MM2 > 0, 'nominal density is a real number')
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# manual stitch edits (the freeze model)')
+{
+  const mk = (): StitchPlan => ({ blocks: [
+    { color: '#c0392b', label: 'a', stitches: [
+      { x: 0, y: 0 }, { x: 5, y: 0 }, { x: 10, y: 0, jump: true }, { x: 15, y: 0 },
+    ] },
+    { color: '#1f6feb', label: 'b', stitches: [{ x: 0, y: 9 }, { x: 5, y: 9 }] },
+  ] })
+
+  // --- the state machine, which is the whole contract
+  ok(freezeState(undefined, 'sig').kind === 'live', 'with no edits the plan is generated')
+  const f = freeze(mk(), 'sig-1')
+  ok(freezeState(f, 'sig-1').kind === 'frozen', 'after an edit it is frozen')
+  ok(freezeState(f, 'sig-2').kind === 'stale',
+    'and a source change makes it STALE — a decision, not a silent regenerate')
+
+  // Freezing must COPY: a later edit cannot reach back into the generated plan.
+  {
+    const live = mk()
+    const frz = freeze(live, 's')
+    frz.plan.blocks[0].stitches[0].x = 999
+    ok(live.blocks[0].stitches[0].x === 0, 'freezing deep-copies the plan')
+    const c = clonePlan(live)
+    c.blocks[0].stitches[0].y = 42
+    ok(live.blocks[0].stitches[0].y === 0, 'and clonePlan does too')
+  }
+
+  // --- picking
+  {
+    const p = mk()
+    const hit = pickStitch(p, { x: 5.2, y: 0.1 }, 1)
+    ok(hit?.block === 0 && hit.index === 1, 'the nearest stitch is found',
+      `${hit?.block}:${hit?.index}`)
+    ok(pickStitch(p, { x: 50, y: 50 }, 1) === null, 'nothing is found far away')
+    // A jump is travel, not a stitch: there is nothing useful to do to one.
+    ok(pickStitch(p, { x: 10, y: 0 }, 0.5) === null, 'jumps are not pickable')
+
+    const box = pickStitchesIn(p, { minX: -1, minY: -1, maxX: 6, maxY: 10 })
+    // (0,0) (5,0) from the first block and (0,9) (5,9) from the second; the
+    // jump at (10,0) and the stitch at (15,0) are outside or skipped.
+    ok(box.length === 4, 'a box selects every real stitch inside it', `${box.length}`)
+    ok(box.every((r) => !p.blocks[r.block].stitches[r.index].jump), 'and no jumps')
+    ok(box.some((r) => r.block === 1), 'across colour blocks too')
+  }
+
+  // --- deleting
+  {
+    const p = mk()
+    const before = penetrationCount(p)
+    // Two in the same block at once — the case that breaks when indices shift.
+    const after = deleteStitches(p, [{ block: 0, index: 0 }, { block: 0, index: 1 }])
+    ok(penetrationCount(after) === before - 2, 'deleting removes exactly what was asked',
+      `${before} -> ${penetrationCount(after)}`)
+    ok(after.blocks[0].stitches[0].x === 10, 'and removes the RIGHT ones, back to front',
+      `${after.blocks[0].stitches[0].x}`)
+    ok(p.blocks[0].stitches.length === 4, 'the input plan is untouched')
+
+    // A block emptied completely is dropped: a colour change for no stitches
+    // is a thread change the operator makes for nothing.
+    const gone = deleteStitches(p, [{ block: 1, index: 0 }, { block: 1, index: 1 }])
+    ok(gone.blocks.length === 1, 'an emptied block is dropped, not left as a bare stop',
+      `${gone.blocks.length}`)
+  }
+
+  // --- moving
+  {
+    const p = mk()
+    const moved = moveStitches(p, [{ block: 0, index: 1 }], 3, -2)
+    ok(moved.blocks[0].stitches[1].x === 8 && moved.blocks[0].stitches[1].y === -2,
+      'the selected stitch moves')
+    ok(moved.blocks[0].stitches[0].x === 0, 'and nothing else does')
+    ok(p.blocks[0].stitches[1].x === 5, 'the input plan is untouched')
+  }
+
+  // --- the edits survive save and reopen, which is the point of storing them
+  {
+    const d = emptyDoc()
+    d.objects = [newObject({ type: 'fill', paths: [[...rect(0, 0, 20, 20), { x: 0, y: 0 }]] })]
+    const sig = docSignature(d)
+    d.frozen = freeze(mk(), sig)
+    d.frozen.plan = deleteStitches(d.frozen.plan, [{ block: 0, index: 0 }])
+    d.frozen.edits = 1
+
+    const back = deserialize(serialize(d))
+    ok(!!back.frozen, 'a frozen plan survives save and reopen')
+    ok(penetrationCount(back.frozen!.plan) === penetrationCount(d.frozen.plan),
+      'with the same number of stitches',
+      `${penetrationCount(back.frozen!.plan)}`)
+    ok(back.frozen!.signature === sig, 'and the signature it was taken at')
+    ok(back.frozen!.edits === 1, 'and the edit count')
+    // Flags have to survive or the reopened plan sews differently.
+    ok(back.frozen!.plan.blocks[0].stitches.some((st) => st.jump), 'jump flags survive')
+    ok(freezeState(back.frozen, sig).kind === 'frozen',
+      'and it reopens still matching its source, not stale')
+  }
+
+  // A corrupt frozen plan drops back to generating rather than sewing junk.
+  {
+    const d = emptyDoc()
+    d.objects = [newObject({ type: 'run', paths: [[{ x: 0, y: 0 }, { x: 9, y: 0 }]] })]
+    // Corrupt the frozen BLOCKS while leaving the file valid JSON — a regex
+    // over nested arrays cuts mid-structure and only proves the JSON parser
+    // works, which is not what is under test here.
+    const parsed = JSON.parse(serialize({ ...d, frozen: freeze(mk(), 'x') }))
+    parsed.doc.frozen.blocks = 'nonsense'
+    ok(deserialize(JSON.stringify(parsed)).frozen === undefined,
+      'an unreadable frozen plan falls back to generating, not to half a plan')
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

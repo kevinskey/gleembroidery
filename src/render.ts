@@ -56,6 +56,8 @@ export interface RenderOptions {
   letterHandles?: Pt[] | null
   /** Where the selected object starts and finishes sewing. */
   endpoints?: { entry?: Pt; exit?: Pt } | null
+  /** Stitches picked for direct editing. */
+  picked?: { block: number; index: number }[] | null
   /** Over-dense cells to shade, with the grid size they were counted on. */
   density?: { cells: { x: number; y: number; ratio: number }[]; cellMm: number } | null
   /** Reference image drawn behind everything, for tracing over. */
@@ -505,6 +507,24 @@ export function render(
         }
       }
     }
+  }
+
+  // --- picked stitches -------------------------------------------------------
+  if (opt.picked && opt.picked.length) {
+    ctx.save()
+    ctx.fillStyle = '#22d3ee'
+    ctx.strokeStyle = dark ? '#0f1216' : '#ffffff'
+    ctx.lineWidth = 1
+    for (const r of opt.picked) {
+      const st = plan.blocks[r.block]?.stitches[r.index]
+      if (!st) continue
+      const p = toS(st)
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.stroke()
+    }
+    ctx.restore()
   }
 
   // --- density heat ----------------------------------------------------------

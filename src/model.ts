@@ -12,6 +12,7 @@
 
 import type { Shape } from './nodes'
 import type { TextSpec } from './text'
+import type { FrozenPlan } from './stitchedit'
 
 export interface Pt {
   x: number
@@ -330,6 +331,15 @@ export function hoopsForSpacing(spacing: Spacing): Hoop[] {
 }
 
 export interface Doc {
+  /**
+   * A manually edited stitch plan that has taken over from generation.
+   *
+   * Present only once a stitch has been edited by hand. See stitchedit.ts for
+   * the rule — in short, while this exists the plan is the document's own
+   * data rather than something derived, and a source edit does not silently
+   * regenerate over it.
+   */
+  frozen?: FrozenPlan
   name: string
   hoop: Hoop
   /** The machine's bracket spacing — decides which hoops can physically mount. */

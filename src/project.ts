@@ -17,6 +17,8 @@
 // than partially read.
 
 import type { PathNode, Shape } from './nodes'
+import type { FrozenPlan } from './stitchedit'
+import type { Stitch } from './stitches'
 import {
   DEFAULT_APPLIQUE,
   DEFAULT_FILL,
@@ -126,6 +128,25 @@ export function serialize(doc: Doc, pretty = false): string {
       hoop: hoopOut(doc.hoop),
       spacing: doc.spacing,
       objects: doc.objects.map(objectOut),
+      // Manual stitch edits ARE the document once they exist. A project that
+      // reopened without them would lose work with no way to get it back,
+      // which is the exact failure the freeze model is there to prevent.
+      ...(doc.frozen ? {
+        frozen: {
+          signature: doc.frozen.signature,
+          edits: doc.frozen.edits,
+          blocks: doc.frozen.plan.blocks.map((b) => ({
+            color: b.color,
+            label: b.label,
+            // Flags are only written when set, which keeps a 40k-stitch plan
+            // from tripling in size for fields that are almost always absent.
+            stitches: b.stitches.map((st) => [
+              st.x, st.y,
+              (st.jump ? 1 : 0) | (st.trim ? 2 : 0) | (st.lock ? 4 : 0),
+            ]),
+          })),
+        },
+      } : {}),
     },
   }
   return JSON.stringify(file, null, pretty ? 1 : 0)
@@ -199,6 +220,41 @@ function hoopIn(v: unknown): Hoop {
 
 /** Read editable outlines. Anything malformed is dropped, not guessed at —
  *  the object still has its flattened `paths` and stays sewable. */
+/**
+ * Read a frozen plan.
+ *
+ * Anything malformed yields undefined, which drops the document back to
+ * generating. That is the safe direction: a design that regenerates is
+ * correct but has lost hand edits, whereas a half-read stitch list would sew.
+ */
+function frozenIn(v: unknown): FrozenPlan | undefined {
+  if (!isObj(v) || !Array.isArray(v.blocks) || typeof v.signature !== 'string') return undefined
+  const blocks = []
+  for (const b of v.blocks) {
+    if (!isObj(b) || !Array.isArray(b.stitches)) continue
+    const stitches: Stitch[] = []
+    for (const st of b.stitches) {
+      if (!Array.isArray(st) || typeof st[0] !== 'number' || typeof st[1] !== 'number') continue
+      const f = typeof st[2] === 'number' ? st[2] : 0
+      stitches.push({
+        x: st[0], y: st[1],
+        ...(f & 1 ? { jump: true } : {}),
+        ...(f & 2 ? { trim: true } : {}),
+        ...(f & 4 ? { lock: true } : {}),
+      })
+    }
+    if (stitches.length) {
+      blocks.push({
+        color: /^#[0-9a-fA-F]{6}$/.test(String(b.color)) ? String(b.color) : '#1f6feb',
+        label: str(b.label, 'block'),
+        stitches,
+      })
+    }
+  }
+  if (!blocks.length) return undefined
+  return { plan: { blocks }, signature: v.signature, edits: num(v.edits, 0) }
+}
+
 /** A stored [x, y] pair, or undefined when absent or malformed. */
 function ptIn(v: unknown): Pt | undefined {
   return Array.isArray(v) && v.length === 2 && typeof v[0] === 'number' && typeof v[1] === 'number'
@@ -400,6 +456,7 @@ export function deserialize(text: string): Doc {
     name: str(payload.name, 'untitled'),
     hoop: hoopIn(payload.hoop),
     spacing: oneOf(payload.spacing, SPACINGS, 'TJ500'),
+    ...(frozenIn(payload.frozen) ? { frozen: frozenIn(payload.frozen)! } : {}),
     objects,
   }
   // Saved ids must not collide with ids minted later in this session.

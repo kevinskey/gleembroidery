@@ -260,6 +260,8 @@ legend { font-size: 11px; color: var(--muted); text-transform: uppercase; letter
 }
 .status .dim { color: var(--muted); }
 .status .note { color: var(--accent); }
+/* Manual stitch edits are in force — the plan is no longer derived. */
+.status .frozen { color: #22d3ee; flex-basis: 100%; }
 
 .obj .seq {
   font-size: 10px;

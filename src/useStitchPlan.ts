@@ -43,6 +43,10 @@ function supportsWorker(): boolean {
 }
 
 export function useStitchPlan(doc: Doc): PlanState {
+  // A frozen plan is the document's own data, not something derived, so
+  // generation is skipped entirely while one exists. Running the engine and
+  // throwing the result away would be wasted work AND would make the busy
+  // indicator lie about what is on screen.
   const [state, setState] = useState<PlanState>({
     plan: EMPTY, warnings: [], busy: false, ms: 0, inline: false,
   })
@@ -53,13 +57,24 @@ export function useStitchPlan(doc: Doc): PlanState {
   // document itself is read through a ref. The contract is "tell me when it
   // changed" — a host that rebuilds the doc object on every render must not
   // be able to spin this hook forever.
-  const signature = docSignature(doc)
+  const signature = doc.frozen ? `frozen:${doc.frozen.signature}:${doc.frozen.edits}` : docSignature(doc)
   const latest = useRef(doc)
   latest.current = doc
 
   useEffect(() => {
     const doc = latest.current
     const rev = ++revision.current
+
+    // Frozen: the plan IS the document. Show it as-is.
+    if (doc.frozen) {
+      if (worker.current) { worker.current.terminate(); worker.current = null }
+      setState({
+        plan: doc.frozen.plan,
+        warnings: [],
+        busy: false, ms: 0, inline: false,
+      })
+      return
+    }
 
     // Whatever is running belongs to an older revision. Its result would be
     // discarded anyway, so stop paying for it.
