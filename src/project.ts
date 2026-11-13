@@ -27,6 +27,7 @@ import {
   DEFAULT_PUFF,
   DEFAULT_RUN,
   DEFAULT_SATIN,
+  DEFAULT_TIE,
   HOOPS,
   SPACINGS,
   emptyDoc,
@@ -37,6 +38,7 @@ import {
   type Pt,
   type FillUnderlay,
   type SatinUnderlay,
+  type TieParams,
   FILL_UNDERLAY_ORDER,
   SATIN_UNDERLAY_ORDER,
   orderedUnderlay,
@@ -145,6 +147,7 @@ export function serialize(doc: Doc, pretty = false): string {
       name: doc.name,
       hoop: hoopOut(doc.hoop),
       spacing: doc.spacing,
+      tie: { ...doc.tie },
       objects: doc.objects.map(objectOut),
       // Manual stitch edits ARE the document once they exist. A project that
       // reopened without them would lose work with no way to get it back,
@@ -271,6 +274,25 @@ function frozenIn(v: unknown): FrozenPlan | undefined {
   }
   if (!blocks.length) return undefined
   return { plan: { blocks }, signature: v.signature, edits: num(v.edits, 0) }
+}
+
+/**
+ * Tie settings, defaulted field by field.
+ *
+ * A file written before this existed has no `tie` at all, and the right
+ * reading of that is the default — ties ON. Taking "absent" to mean "off"
+ * would silently strip the locks out of every project saved before today.
+ */
+function tieIn(v: unknown): TieParams {
+  const d = DEFAULT_TIE()
+  if (!isObj(v)) return d
+  return {
+    tieIn: v.tieIn !== false,
+    tieOff: v.tieOff !== false,
+    style: v.style === 'backtrack' ? 'backtrack' : 'zigzag',
+    length: num(v.length, d.length),
+    stitches: num(v.stitches, d.stitches),
+  }
 }
 
 /** A stored [x, y] pair, or undefined when absent or malformed. */
@@ -508,6 +530,7 @@ export function deserialize(text: string): Doc {
     name: str(payload.name, 'untitled'),
     hoop: hoopIn(payload.hoop),
     spacing: oneOf(payload.spacing, SPACINGS, 'TJ500'),
+    tie: tieIn(payload.tie),
     ...(frozenIn(payload.frozen) ? { frozen: frozenIn(payload.frozen)! } : {}),
     objects,
   }
@@ -563,6 +586,7 @@ export function docSignature(doc: Doc): string {
     h = Math.imul(h, 0x01000193)
   }
   mixStr(JSON.stringify(hoopOut(doc.hoop)))
+  mixStr(JSON.stringify(doc.tie))
   for (const o of doc.objects) {
     // Settings: hashed wholesale from the save format, so a new one cannot be
     // left out. Cheap — there are a few dozen numbers per object.

@@ -13,7 +13,7 @@ import { clonePlan, deleteStitches, freeze, freezeState, moveStitches, penetrati
 import { appliqueCutSvg, packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { NOMINAL_PER_MM2, SEVERE_RATIO, WARN_RATIO, analyseDensity, densityColour } from '../src/density'
 import { MAX_SATIN_MM, MAX_SPLIT_SATIN_MM, GUIDE_REACH_MM, MAX_BAR_ANGLE, OVERLOCK_LEAN, PUFF_MAX_MM, PUFF_MIN_MM, puffCaps, puffCheck } from '../src/satin'
-import { DEFAULT_KNOCKDOWN, DEFAULT_PUFF, type Doc } from '../src/model'
+import { DEFAULT_KNOCKDOWN, DEFAULT_PUFF, DEFAULT_TIE, type Doc } from '../src/model'
 import { unionSelfChecked } from '../src/boolean'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
@@ -2338,6 +2338,11 @@ console.log('\n# the plan regenerates when the document changes')
     ['name', (d) => { d.name = 'other' }],
     ['hoop', (d) => { d.hoop = HOOPS.find((x) => x.name.includes('5.5'))! }],
     ['spacing', (d) => { d.spacing = 'TJ600' }],
+    ['tie-in off', (d) => { d.tie.tieIn = false }],
+    ['tie-off off', (d) => { d.tie.tieOff = false }],
+    ['tie style', (d) => { d.tie.style = 'backtrack' }],
+    ['tie length', (d) => { d.tie.length = 2 }],
+    ['tie stitches', (d) => { d.tie.stitches = 6 }],
     ['object name', (d) => { d.objects[0].name = 'renamed' }],
     ['colour', (d) => { d.objects[0].color = '#00ff00' }],
     ['thread', (d) => { d.objects[0].thread = { brand: 'Isacord', code: '1902' } }],
@@ -2536,6 +2541,117 @@ console.log('\n# satin splitting')
     const phases = appliquePhases(newObject({ name: 'A', type: 'applique', paths: [ring] }), [])
     ok(!phases.some((ph) => ph.stitches.some((s) => s.split)),
       'no appliqué phase comes back split')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# tie-in and tie-off as settings')
+{
+  const square = [...rect(0, 0, 25, 25), { x: 0, y: 0 }]
+  const far = [...rect(70, 70, 25, 25), { x: 70, y: 70 }]
+  const build = (tie: Partial<ReturnType<typeof DEFAULT_TIE>>) => {
+    const d = emptyDoc()
+    d.tie = { ...DEFAULT_TIE(), ...tie }
+    // Two objects far apart, so the design has a trim in the middle as well
+    // as a start and an end — all three places a lock belongs.
+    d.objects = [
+      newObject({ name: 'A', type: 'fill', paths: [square] }),
+      newObject({ name: 'B', type: 'fill', paths: [far] }),
+    ]
+    return d
+  }
+  const locksIn = (d: Doc) =>
+    digitize(d).plan.blocks.flatMap((b) => b.stitches).filter((s) => s.lock).length
+
+  // --- the defaults tie, and the settings really remove them
+  {
+    const on = locksIn(build({}))
+    ok(on > 0, 'a design ties by default', `${on} lock stitches`)
+    ok(locksIn(build({ tieIn: false, tieOff: false })) === 0,
+      'turning both off removes every lock')
+    const inOnly = locksIn(build({ tieOff: false }))
+    const offOnly = locksIn(build({ tieIn: false }))
+    ok(inOnly > 0 && inOnly < on, 'tie-in alone leaves fewer', `${inOnly} of ${on}`)
+    ok(offOnly > 0 && offOnly < on, 'tie-off alone leaves fewer', `${offOnly} of ${on}`)
+  }
+
+  // --- and the design SAYS so, because nothing downstream can tell the
+  //     difference between "the machine does it" and "nobody did"
+  {
+    ok(digitize(build({ tieIn: false })).warnings.some((w) => /Tie-in is off/.test(w)),
+      'turning ties off is reported')
+    ok(!digitize(build({})).warnings.some((w) => /tie/i.test(w)),
+      'and leaving them on is not nagged about')
+  }
+
+  // --- the count setting changes the lock, the length setting changes its size
+  {
+    const four = locksIn(build({ stitches: 4 }))
+    const six = locksIn(build({ stitches: 6 }))
+    ok(six > four, 'more tie stitches means more lock penetrations', `${four} -> ${six}`)
+
+    // Measured across ONE lock, not across the block: a block holds the
+    // opening lock and the locks either side of its trim, and those are
+    // centimetres apart, so a whole-block span measures the design.
+    const span = (d: Doc) => {
+      const all = digitize(d).plan.blocks[0].stitches
+      const start = all.findIndex((s) => s.lock)
+      const group = []
+      for (let i = start; i < all.length && all[i].lock; i++) group.push(all[i])
+      let worst = 0
+      for (const a of group) for (const b of group) worst = Math.max(worst, dist(a, b))
+      return worst
+    }
+    ok(span(build({ length: 2.5 })) > span(build({ length: 1.1 })) + 0.5,
+      'and a longer tie stitch makes a longer lock',
+      `${span(build({ length: 1.1 })).toFixed(2)} -> ${span(build({ length: 2.5 })).toFixed(2)}`)
+  }
+
+  // --- zigzag lifts the lock OFF the line of travel; backtrack sits on it.
+  //     Both have the same number of penetrations and the same out-and-back
+  //     shape — the whole difference is whether the holes are strung along
+  //     one line, where a short-stitch filter can treat them as one.
+  {
+    // How far the lock wanders perpendicular to its own direction of travel.
+    const sideways = (style: 'zigzag' | 'backtrack') => {
+      const all = digitize(build({ style })).plan.blocks[0].stitches
+      const start = all.findIndex((s) => s.lock)
+      const group = []
+      for (let i = start; i < all.length && all[i].lock; i++) group.push(all[i])
+      if (group.length < 3) return 0
+      // Travel direction from the first to the furthest lock point.
+      let far = group[0], d0 = 0
+      for (const g of group) { const d = dist(group[0], g); if (d > d0) { d0 = d; far = g } }
+      const ux = (far.x - group[0].x) / (d0 || 1), uy = (far.y - group[0].y) / (d0 || 1)
+      let worst = 0
+      for (const g of group) {
+        const vx = g.x - group[0].x, vy = g.y - group[0].y
+        worst = Math.max(worst, Math.abs(vx * -uy + vy * ux))
+      }
+      return worst
+    }
+    ok(sideways('backtrack') < 0.01, 'a backtrack lock stays on one line',
+      sideways('backtrack').toFixed(3))
+    ok(sideways('zigzag') > 0.2, 'a zigzag lock does not', sideways('zigzag').toFixed(3))
+  }
+
+  // --- a lock is never eaten by the short-stitch floor
+  {
+    const d = build({ length: 0.6 })
+    const locks = digitize(d).plan.blocks.flatMap((b) => b.stitches).filter((s) => s.lock)
+    ok(locks.length > 0, 'a short tie survives the short-stitch suppressor',
+      `${locks.length} lock stitches at 0.6 mm`)
+  }
+
+  // --- an old file has no tie block at all, and that must not mean "off"
+  {
+    const text = serialize(build({}))
+    const raw = JSON.parse(text)
+    delete raw.doc.tie
+    const back = deserialize(JSON.stringify(raw))
+    ok(back.tie.tieIn && back.tie.tieOff,
+      'a project saved before ties existed still ties')
   }
 }
 

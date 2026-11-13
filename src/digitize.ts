@@ -10,7 +10,7 @@
 //   * colour grouping, since each change is a manual re-thread — adjacent
 //     objects sharing a colour become ONE block.
 
-import { FILL_UNDERLAY_ORDER, NO_SPLIT, orderedUnderlay, type Doc, type EmbObject, type Pt } from './model'
+import { FILL_UNDERLAY_ORDER, NO_SPLIT, orderedUnderlay, type Doc, type EmbObject, type Pt, type TieParams } from './model'
 import { nodeFractions } from './nodes'
 import type { ColorBlock, Stitch, StitchPlan } from './stitches'
 import { dist, resample, scanlineSpans, toRegions } from './geometry'
@@ -70,24 +70,44 @@ export interface DigitizeResult {
 }
 
 /**
- * Lock stitches, as a zigzag rather than a straight back-and-forth.
+ * Lock stitches — the few penetrations that stop a thread end pulling out.
  *
- * A collinear A-B-A lock at 0.7 mm drops three penetrations into what is
- * effectively two holes, and the machine's own short-stitch filter may eat it
- * — so the thread it was supposed to anchor pulls straight out. Offsetting
- * perpendicular to the direction of travel keeps the holes distinct and gives
- * the lock something to bite on.
+ * By default these are a ZIGZAG rather than a straight back-and-forth. A
+ * collinear lock at 1 mm drops its penetrations into what is effectively two
+ * holes, and the machine's own short-stitch filter may eat it — so the thread
+ * it was supposed to anchor pulls straight out. Offsetting perpendicular to
+ * the direction of travel keeps the holes distinct and gives the lock
+ * something to bite on.
+ *
+ * 'backtrack' deliberately retraces the same holes. It is what many
+ * controllers do themselves, and what an operator who wants the tie invisible
+ * asks for; it is harder on the thread, and that trade is theirs to make.
+ *
+ * The walk is out-and-back — 0, 1, 2, 1, 2, … steps along the direction of
+ * travel — because a lock has to double back to grip. A run of stitches going
+ * one way is not a tie, it is just a run.
  */
-function lock(at: Pt, toward: Pt, reverse = false): Stitch[] {
+function lock(at: Pt, toward: Pt, tie: TieParams, reverse = false): Stitch[] {
   const d = dist(at, toward) || 1
   const ux = (toward.x - at.x) / d, uy = (toward.y - at.y) / d
   const px = -uy, py = ux // perpendicular
-  const step = 1.1
-  const off = 0.35
-  const a = { x: at.x, y: at.y }
-  const b = { x: at.x + ux * step + px * off, y: at.y + uy * step + py * off }
-  const c = { x: at.x + ux * step * 2 - px * off, y: at.y + uy * step * 2 - py * off }
-  const seq: Stitch[] = [a, b, c, b].map((q) => ({ ...q, lock: true }))
+  const step = Math.max(0.5, tie.length)
+  const n = Math.max(2, Math.min(8, Math.round(tie.stitches)))
+  // Enough to separate the holes, never so much that the lock shows as a
+  // bump beside the stitching it is hiding in.
+  const off = tie.style === 'zigzag' ? Math.min(0.5, step * 0.32) : 0
+  const seq: Stitch[] = []
+  for (let k = 0; k < n; k++) {
+    // 0, 1, 2, 1, 2, 1, … — out, then shuttling between the two far points.
+    const units = k === 0 ? 0 : k === 1 ? 1 : (k % 2 === 0 ? 2 : 1)
+    const sign = k % 2 === 1 ? 1 : -1
+    const o = k === 0 ? 0 : off * sign
+    seq.push({
+      x: at.x + ux * step * units + px * o,
+      y: at.y + uy * step * units + py * o,
+      lock: true,
+    })
+  }
   return reverse ? seq.reverse() : seq
 }
 
@@ -178,7 +198,7 @@ const POINTLESS_JUMP_MM = 1.0
  * bird's nest under the throat plate. So every travel long enough to be cut
  * is wrapped: tie off, trim, travel, tie back in.
  */
-function applyTrimsAndLocks(stitches: Stitch[], travel = TRAVEL_TRIM_MM): Stitch[] {
+function applyTrimsAndLocks(stitches: Stitch[], tie: TieParams, travel = TRAVEL_TRIM_MM): Stitch[] {
   const out: Stitch[] = []
   for (let i = 0; i < stitches.length; i++) {
     const s = stitches[i]
@@ -190,7 +210,7 @@ function applyTrimsAndLocks(stitches: Stitch[], travel = TRAVEL_TRIM_MM): Stitch
         continue
       }
       if (gap > travel) {
-        out.push(...lock(prev, out[out.length - 2] ?? s, true))
+        if (tie.tieOff) out.push(...lock(prev, out[out.length - 2] ?? s, tie, true))
         out.push({ x: s.x, y: s.y, jump: true, trim: true })
         // The tie-in must aim at a point that is genuinely DIFFERENT from the
         // landing point. The jump was synthesised from the next stitch, so
@@ -199,8 +219,8 @@ function applyTrimsAndLocks(stitches: Stitch[], travel = TRAVEL_TRIM_MM): Stitch
         // suppressShortStitches deletes the lot. The result was a machine that
         // cuts, travels, and sews into bare fabric with nothing anchoring the
         // new thread end. Scan forward for the first point that actually moves.
-        const aim = nextDistinct(stitches, i + 1, s)
-        if (aim) out.push(...lock(s, aim).slice(1))
+        const aim = tie.tieIn ? nextDistinct(stitches, i + 1, s) : null
+        if (aim) out.push(...lock(s, aim, tie).slice(1))
         continue
       }
     }
@@ -313,7 +333,9 @@ export function orientToEntryExit(stitches: Stitch[], obj: EmbObject): Stitch[] 
   return cost(tail, head) < cost(head, tail) ? [...stitches].reverse() : stitches
 }
 
-function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM): Stitch[] {
+function stitchObject(
+  obj: EmbObject, warnings: string[], tie: TieParams, floor = MIN_STITCH_MM,
+): Stitch[] {
   const out: Stitch[] = []
   const push = (parts: Stitch[]) => {
     if (!parts.length) return
@@ -499,9 +521,10 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
   // Locks top and tail, then machine-correct travel, then the two length
   // limits. Order matters: the locks must exist before the length passes run,
   // or enforceMaxStitch subdivides a travel the lock was meant to bracket.
-  const head = lock(out[0], out[1])
-  const tail = lock(out[out.length - 1], out[out.length - 2], true)
-  return suppressShortStitches(enforceMaxStitch(applyTrimsAndLocks([...head, ...out, ...tail])), floor)
+  const head = tie.tieIn ? lock(out[0], out[1], tie) : []
+  const tail = tie.tieOff ? lock(out[out.length - 1], out[out.length - 2], tie, true) : []
+  return suppressShortStitches(
+    enforceMaxStitch(applyTrimsAndLocks([...head, ...out, ...tail], tie)), floor)
 }
 
 /**
@@ -524,6 +547,16 @@ export function digitize(doc: Doc): DigitizeResult {
   // design it was meant to support has flattened nothing and merely added
   // thread on top — a fault that is invisible on screen, because the preview
   // shows the same shapes either way.
+  // Ties off is a legitimate choice — some operators let the controller place
+  // its own locks — but it is not a neutral one, and nothing downstream can
+  // tell the difference between "the machine will do it" and "nobody did".
+  if (!doc.tie.tieIn || !doc.tie.tieOff) {
+    const which = !doc.tie.tieIn && !doc.tie.tieOff ? 'Tie-in and tie-off are'
+      : !doc.tie.tieIn ? 'Tie-in is' : 'Tie-off is'
+    warnings.push(
+      `${which} off — thread ends will pull out unless the machine places its own locks`)
+  }
+
   const sewn = doc.objects.filter((o) => o.visible && o.type !== 'none')
   sewn.forEach((o, i) => {
     if (o.type !== 'knockdown') return
@@ -543,7 +576,7 @@ export function digitize(doc: Doc): DigitizeResult {
       for (const phase of appliquePhases(obj, warnings)) {
         // Same finishing the other stitch types get: locks, trims, length caps.
         const laid = suppressShortStitches(
-          enforceMaxStitch(applyTrimsAndLocks(phase.stitches)), floor)
+          enforceMaxStitch(applyTrimsAndLocks(phase.stitches, doc.tie)), floor)
         if (!laid.length) continue
         blocks.push({
           color: obj.color,
@@ -554,7 +587,7 @@ export function digitize(doc: Doc): DigitizeResult {
       continue
     }
 
-    const stitches = orientToEntryExit(stitchObject(obj, warnings, floor), obj)
+    const stitches = orientToEntryExit(stitchObject(obj, warnings, doc.tie, floor), obj)
     if (!stitches.length) continue
 
     // Merge only when the NEEDLE would not change. Keying on the screen

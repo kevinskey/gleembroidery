@@ -405,6 +405,48 @@ export function hoopsForSpacing(spacing: Spacing): Hoop[] {
   return HOOPS.filter((h) => !h.minSpacing || rank[h.minSpacing] <= rank[spacing])
 }
 
+/**
+ * Tie-in and tie-off: the few stitches that stop a thread end pulling out.
+ *
+ * These are a MACHINE-AND-FABRIC decision, not a per-shape one, so they live
+ * on the document. The engine places them where thread ends actually occur:
+ * at the start and end of every colour block, and either side of every trim.
+ * That is a property of the whole design's sequence rather than of any one
+ * object, which is why there is no per-object override — turning ties off on
+ * one shape would leave a loose end there and nowhere else, which is the kind
+ * of setting that only ever gets found on the garment.
+ */
+export interface TieParams {
+  /** Anchor the thread when a colour or a trim STARTS. */
+  tieIn: boolean
+  /** Anchor it before a trim and at the end of a colour. */
+  tieOff: boolean
+  /**
+   * 'zigzag' offsets the lock stitches to either side of the line of travel,
+   * so each lands in its own hole. It is the default because a lock whose
+   * penetrations coincide can be eaten by the machine's own short-stitch
+   * filter — and then the thread it was meant to anchor pulls straight out.
+   *
+   * 'backtrack' retraces the same holes, which is what many controllers do
+   * themselves and what an operator who wants the tie invisible asks for. It
+   * is harder on the thread; that is the trade, and it is the operator's to
+   * make.
+   */
+  style: 'zigzag' | 'backtrack'
+  /** Length of each lock stitch, mm. */
+  length: number
+  /** How many penetrations the lock takes. */
+  stitches: number
+}
+
+export const DEFAULT_TIE = (): TieParams => ({
+  tieIn: true,
+  tieOff: true,
+  style: 'zigzag',
+  length: 1.1,
+  stitches: 4,
+})
+
 export interface Doc {
   /**
    * A manually edited stitch plan that has taken over from generation.
@@ -419,6 +461,8 @@ export interface Doc {
   hoop: Hoop
   /** The machine's bracket spacing — decides which hoops can physically mount. */
   spacing: Spacing
+  /** How thread ends are anchored. See TieParams. */
+  tie: TieParams
   objects: EmbObject[]
 }
 
@@ -519,7 +563,7 @@ export const DEFAULT_HOOP =
 export function emptyDoc(): Doc {
   // 8×9" covers left-chest and most full-front work, and mounts on every
   // bracket spacing — the hoop a shop reaches for without thinking.
-  return { name: 'untitled', hoop: DEFAULT_HOOP, spacing: 'TJ500', objects: [] }
+  return { name: 'untitled', hoop: DEFAULT_HOOP, spacing: 'TJ500', tie: DEFAULT_TIE(), objects: [] }
 }
 
 export function bounds(paths: Pt[][]): { minX: number; minY: number; maxX: number; maxY: number } | null {

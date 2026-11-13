@@ -35,6 +35,7 @@ import {
   type Doc,
   type EmbObject,
   type Pt,
+  type TieParams,
   type Spacing,
   type StitchType,
 } from './model'
@@ -624,6 +625,15 @@ export default function App() {
   const patch = (id: string, fn: (o: EmbObject) => EmbObject, tag?: string) =>
     setDoc((d) => ({ ...d, objects: d.objects.map((o) => (o.id === id ? fn(o) : o)) }),
       tag && `${tag}:${id}`)
+
+  /**
+   * Change a document-level tie setting.
+   *
+   * Tagged for coalescing like any other continuous control, so dragging a
+   * number field is one undo step and not twenty.
+   */
+  const setDocTie = (next: Partial<TieParams>) =>
+    setDoc((d) => ({ ...d, tie: { ...d.tie, ...next } }), `tie:${Object.keys(next)[0]}`)
 
   const addPaths = (paths: Pt[][], label: string) => {
     // Split into regions so a letter keeps its counter as a hole of the SAME
@@ -1861,7 +1871,59 @@ export default function App() {
 
         <div className="side right">
           <h3>Properties</h3>
-          {!selected && <div className="empty">Select an object to set its stitch type and parameters.</div>}
+          {!selected && (
+            <>
+              <div className="empty">Select an object to set its stitch type and parameters.</div>
+              {/* Document settings live here rather than in the toolbar: they
+                  belong to the whole design, and this is the panel that is
+                  otherwise empty when nothing is selected. */}
+              <fieldset>
+                <legend>Tie-in and tie-off</legend>
+                <div className="row wide">
+                  <span className="dim">
+                    The few stitches that stop a thread end pulling out — placed at the start
+                    and end of every colour, and either side of every trim.
+                  </span>
+                </div>
+                <div className="row wide">
+                  <label className="check">
+                    <input type="checkbox" checked={doc.tie.tieIn}
+                      onChange={(e) => setDocTie({ tieIn: e.target.checked })} />
+                    Tie in
+                  </label>
+                  <label className="check">
+                    <input type="checkbox" checked={doc.tie.tieOff}
+                      onChange={(e) => setDocTie({ tieOff: e.target.checked })} />
+                    Tie off
+                  </label>
+                </div>
+                <div className="row wide">
+                  <label>Style</label>
+                  <div className="checks">
+                    <button
+                      className={doc.tie.style === 'zigzag' ? 'primary' : undefined}
+                      title="Each lock stitch lands in its own hole — safest, and the default"
+                      onClick={() => setDocTie({ style: 'zigzag' })}>Zigzag</button>
+                    <button
+                      className={doc.tie.style === 'backtrack' ? 'primary' : undefined}
+                      title="Retraces the same holes: invisible, but harder on the thread, and a machine's short-stitch filter can swallow it"
+                      onClick={() => setDocTie({ style: 'backtrack' })}>Backtrack</button>
+                  </div>
+                </div>
+                <Num label="Tie stitch length (mm)" value={doc.tie.length} step={0.1} min={0.5} max={4}
+                  onChange={(v) => setDocTie({ length: v })} />
+                <Num label="Tie stitches" value={doc.tie.stitches} step={1} min={2} max={8}
+                  onChange={(v) => setDocTie({ stitches: Math.round(v) })} />
+                {(!doc.tie.tieIn || !doc.tie.tieOff) && (
+                  <div className="row wide">
+                    <span className="warn">
+                      Thread ends will pull out unless the machine places its own locks.
+                    </span>
+                  </div>
+                )}
+              </fieldset>
+            </>
+          )}
           {selected && (
             <>
               {/* The stitch type also lives in the toolbar, but that is a row
