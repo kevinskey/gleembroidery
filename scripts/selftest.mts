@@ -24,6 +24,9 @@ import { chainPaths, enterRingNear, orderPaths, travelCost, travelIsHidden } fro
 import {
   BUILT_IN_PRESETS, applyStyle, parsePresets, presetFrom, serializePresets,
 } from '../src/presets'
+import {
+  normaliseGlyph, parseAlphabets, serializeAlphabets, setAlphabetText, type Alphabet,
+} from '../src/alphabets'
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines, textOnPath } from '../src/text'
@@ -3781,6 +3784,123 @@ console.log('\n# groups')
     const c = build()
     c.groups[0].name = 'Crest'
     ok(docSignature(a) !== docSignature(c), 'and so does renaming one')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# native embroidery alphabets')
+{
+  // Two letters as plain boxes: a 20 mm tall "A" and a 40 mm tall "B",
+  // captured at different sizes on purpose — that is the case normalising
+  // exists for.
+  const boxA = [[{ x: 5, y: 100 }, { x: 15, y: 100 }, { x: 15, y: 120 }, { x: 5, y: 120 }, { x: 5, y: 100 }]]
+  const boxB = [[{ x: 0, y: 0 }, { x: 30, y: 0 }, { x: 30, y: 40 }, { x: 0, y: 40 }, { x: 0, y: 0 }]]
+
+  const alphabet: Alphabet = {
+    id: 'test', name: 'Test', capHeightMm: 10,
+    glyphs: {
+      A: normaliseGlyph(boxA, 10)!,
+      B: normaliseGlyph(boxB, 10)!,
+    },
+  }
+
+  // --- normalising puts every letter on one baseline at one size
+  {
+    const a = alphabet.glyphs.A, b = alphabet.glyphs.B
+    const bb = (g: typeof a) => bounds(g.paths)!
+    ok(Math.abs(bb(a).maxY) < 1e-9 && Math.abs(bb(b).maxY) < 1e-9,
+      'both letters sit on the baseline', `${bb(a).maxY} / ${bb(b).maxY}`)
+    ok(Math.abs(bb(a).minY + 10) < 1e-9 && Math.abs(bb(b).minY + 10) < 1e-9,
+      'both are the alphabet cap height, however big they were captured',
+      `${bb(a).minY} / ${bb(b).minY}`)
+    ok(Math.abs(bb(a).minX) < 1e-9 && Math.abs(bb(b).minX) < 1e-9,
+      'and both start at x = 0')
+    // A was 10x20 so it normalises to 5 wide; B was 30x40 so 7.5 wide.
+    ok(Math.abs(bb(a).maxX - 5) < 1e-6 && Math.abs(bb(b).maxX - 7.5) < 1e-6,
+      'proportions are kept', `${bb(a).maxX} / ${bb(b).maxX}`)
+    ok(a.advanceMm > bb(a).maxX, 'with a side bearing either side')
+  }
+
+  // --- setting text lays the letters out in order, at the size asked for
+  {
+    const r = setAlphabetText(alphabet, 'AB', 20)
+    ok(r.missing.length === 0, 'both letters are present')
+    ok(r.letters.length === 2 && r.letters[0].ch === 'A', 'in order')
+    const b = bounds(r.paths)!
+    ok(Math.abs(b.minY + 20) < 1e-6, 'at the cap height asked for, not the stored one',
+      `${b.minY}`)
+    ok(Math.abs(b.maxY) < 1e-9, 'on the baseline')
+    // A ends at its advance; B starts there.
+    const aEnd = bounds(r.letters[0].paths)!.maxX
+    const bStart = bounds(r.letters[1].paths)!.minX
+    ok(bStart > aEnd, 'and they do not overlap', `${aEnd.toFixed(2)} then ${bStart.toFixed(2)}`)
+  }
+
+  // --- a MISSING character is reported and leaves a gap
+  {
+    const r = setAlphabetText(alphabet, 'AZB', 20)
+    ok(r.missing.join('') === 'Z', 'a character the alphabet lacks is reported', r.missing.join(''))
+    ok(r.letters.length === 2, 'and nothing is drawn for it')
+    // A GAP, not a close-up: a word with a hole in it is obviously wrong,
+    // while a word silently missing a letter reads as a typo and gets sewn.
+    const gapped = bounds(r.paths)!
+    const tight = bounds(setAlphabetText(alphabet, 'AB', 20).paths)!
+    ok(gapped.maxX - gapped.minX > tight.maxX - tight.minX,
+      'the missing letter leaves a gap rather than closing up',
+      `${(gapped.maxX - gapped.minX).toFixed(1)} vs ${(tight.maxX - tight.minX).toFixed(1)}`)
+  }
+
+  // --- tracking and spaces
+  {
+    const plain = bounds(setAlphabetText(alphabet, 'AB', 20).paths)!
+    const loose = bounds(setAlphabetText(alphabet, 'AB', 20, 5).paths)!
+    ok(loose.maxX - loose.minX > plain.maxX - plain.minX, 'letter spacing widens the line')
+    const spaced = setAlphabetText(alphabet, 'A B', 20)
+    ok(spaced.letters.length === 2 && spaced.widthMm > plain.maxX - plain.minX,
+      'and a space advances without drawing')
+  }
+
+  // --- it produces real stitches through the real pipeline
+  {
+    const r = setAlphabetText(alphabet, 'AB', 20)
+    const d = emptyDoc()
+    d.objects = [newObject({ name: 'word', type: 'fill', paths: r.paths })]
+    const n = digitize(d).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump).length
+    ok(n > 100, 'a word set from an alphabet sews', `${n} stitches`)
+  }
+
+  // --- storage round-trips, and a broken glyph is DROPPED not repaired
+  {
+    const back = parseAlphabets(serializeAlphabets([alphabet]))
+    ok(back.length === 1 && Object.keys(back[0].glyphs).length === 2,
+      'an alphabet survives a save', `${back.length}`)
+    ok(Math.abs(back[0].glyphs.A.advanceMm - alphabet.glyphs.A.advanceMm) < 1e-9,
+      'with its advances')
+    const r1 = setAlphabetText(back[0], 'AB', 20)
+    const r0 = setAlphabetText(alphabet, 'AB', 20)
+    ok(JSON.stringify(r1.paths) === JSON.stringify(r0.paths),
+      'and sets exactly the same word')
+
+    ok(parseAlphabets(null).length === 0, 'no store means no alphabets')
+    ok(parseAlphabets('{{{').length === 0, 'and neither does a corrupt one')
+    // An odd-length coordinate list is half a letterform.
+    const broken = '[{"id":"x","name":"x","capHeightMm":10,"glyphs":{"A":{"a":5,"p":[[0,0,1,1,2]]}}}]'
+    ok(parseAlphabets(broken).length === 0,
+      'a glyph with a broken coordinate list is dropped, and an alphabet with no glyphs is not kept')
+    // One good glyph among bad ones survives.
+    const mixed = '[{"id":"x","name":"x","capHeightMm":10,"glyphs":'
+      + '{"A":{"a":5,"p":[[0,0,1,1,2]]},"B":{"a":5,"p":[[0,0,5,0,5,-5,0,-5,0,0]]}}}]'
+    const m = parseAlphabets(mixed)
+    ok(m.length === 1 && Object.keys(m[0].glyphs).join('') === 'B',
+      'while a good glyph beside a bad one is kept', Object.keys(m[0]?.glyphs ?? {}).join(''))
+  }
+
+  // --- degenerate capture is refused rather than stored as a flat letter
+  {
+    ok(normaliseGlyph([], 10) === null, 'nothing cannot become a glyph')
+    ok(normaliseGlyph([[{ x: 0, y: 0 }, { x: 10, y: 0 }]], 10) === null,
+      'and neither can a horizontal line — it has no height to normalise by')
   }
 }
 

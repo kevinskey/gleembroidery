@@ -6,6 +6,10 @@ import {
   BUILT_IN_PRESETS, PRESETS_KEY, applyStyle, parsePresets, presetFrom,
   serializePresets, type StylePreset,
 } from './presets'
+import {
+  ALPHABETS_KEY, alphabetCoverage, normaliseGlyph, parseAlphabets, serializeAlphabets,
+  setAlphabetText, type Alphabet,
+} from './alphabets'
 import { writeExp } from './exp'
 import { writeJef } from './jef'
 import { FILL_STYLE_DEFAULTS, MIN_MOTIF_MM, MOTIFS } from './decorative'
@@ -367,6 +371,15 @@ export default function App() {
   const [userPresets, setUserPresets] = useState<StylePreset[]>(() => {
     try { return parsePresets(window.localStorage.getItem(PRESETS_KEY)) } catch { return [] }
   })
+  /** Saved embroidery alphabets. Read once, same rules as the presets. */
+  const [alphabets, setAlphabets] = useState<Alphabet[]>(() => {
+    try { return parseAlphabets(window.localStorage.getItem(ALPHABETS_KEY)) } catch { return [] }
+  })
+  const [activeAlphabet, setActiveAlphabet] = useState<string | null>(null)
+  const [glyphChar, setGlyphChar] = useState('')
+  const [newAlphabetName, setNewAlphabetName] = useState('My alphabet')
+  const [alphabetWord, setAlphabetWord] = useState('ABC')
+  const [alphabetSize, setAlphabetSize] = useState(20)
   const selectedId = selectedIds[0] ?? null
   const setSelectedId = useCallback((id: string | null) => setSelectedIds(id ? [id] : []), [])
   const [view, setView] = useState<View>({ scale: 3, cx: 0, cy: 0 })
@@ -684,6 +697,62 @@ export default function App() {
     patch(id, (q) => ({ ...q, text: undefined }))
     setLetterBoxes(null)
     setNote('Converted to outlines — the shapes are editable, the words are not')
+  }
+
+  // --- native embroidery alphabets -----------------------------------------
+  //
+  // A letter captured here is GEOMETRY, not stitches: it is set by whatever
+  // settings the object carries, so one alphabet sews as a satin at 8 mm and
+  // as a fill at 40 mm. Storing stitches would freeze the density, underlay
+  // and pull compensation into the letterform, and an alphabet captured on
+  // one fabric would be wrong on every other.
+
+  const saveAlphabets = (next: Alphabet[]) => {
+    setAlphabets(next)
+    try { window.localStorage.setItem(ALPHABETS_KEY, serializeAlphabets(next)) } catch { /* private mode */ }
+  }
+
+  /**
+   * Put the selected object's outline into an alphabet as one character.
+   *
+   * Inline rather than through a prompt: which characters an alphabet
+   * already has is the thing you need to see while adding to it, and a
+   * modal dialog is the one place that cannot show you.
+   */
+  const captureGlyph = (ch: string) => {
+    const c = ch.trim()
+    if (!selectedObjs.length || c.length !== 1) return
+    const paths = selectedObjs.flatMap((o) => o.paths)
+    const target = alphabets.find((a) => a.id === activeAlphabet) ?? alphabets[0] ?? {
+      id: `al${Date.now().toString(36)}`,
+      name: newAlphabetName.trim() || 'My alphabet',
+      capHeightMm: 10,
+      glyphs: {},
+    }
+    const g = normaliseGlyph(paths, target.capHeightMm)
+    if (!g) { setNote('that outline has no height to normalise by'); return }
+    const next: Alphabet = { ...target, glyphs: { ...target.glyphs, [c]: g } }
+    saveAlphabets([next, ...alphabets.filter((a) => a.id !== next.id)])
+    setActiveAlphabet(next.id)
+    setGlyphChar('')
+    setNote(`"${c}" added to ${next.name} — ${alphabetCoverage(next).length} character(s)`)
+  }
+
+  /** Set a word from an alphabet as a new object. */
+  const setFromAlphabet = (a: Alphabet, text: string, sizeMm: number) => {
+    if (!text) return
+    const r = setAlphabetText(a, text, Math.max(1, sizeMm))
+    if (!r.paths.length) {
+      setNote(`"${a.name}" has none of those characters — it has ${alphabetCoverage(a).join('') || 'nothing'}`)
+      return
+    }
+    addDrawn(r.paths.map((ring) => close(ring)), true, text)
+    // A missing character is REPORTED, never substituted from a system font:
+    // silently mixing a digitized A with a traced B gives a word whose
+    // letters do not match, and that is only obvious once it is sewn.
+    setNote(r.missing.length
+      ? `set "${text}" — but ${a.name} has no ${r.missing.map((c) => `"${c}"`).join(', ')}, so there are gaps`
+      : `set "${text}" from ${a.name}`)
   }
 
   // --- groups ---------------------------------------------------------------
@@ -2215,6 +2284,57 @@ export default function App() {
         {/* Shape editing: everything here changes the OUTLINE, never the
             stitch settings, and everything produces objects that can still
             be node-edited afterwards. */}
+        {/* Native alphabets: letterforms somebody digitized, reused. A
+            system font is a set of drawings for ink on paper; this is the
+            other thing. */}
+        <div className="group">
+          <label>Alphabet</label>
+          {alphabets.length > 0 && (
+            <select value={activeAlphabet ?? alphabets[0].id}
+              onChange={(e) => setActiveAlphabet(e.target.value)}>
+              {alphabets.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name} — {alphabetCoverage(a).join('') || 'empty'}
+                </option>
+              ))}
+            </select>
+          )}
+          {!alphabets.length && (
+            <input
+              type="text" value={newAlphabetName} style={{ width: 110 }}
+              title="Name for the alphabet the first captured letter will start"
+              onChange={(e) => setNewAlphabetName(e.target.value)} />
+          )}
+          <input
+            type="text" value={glyphChar} maxLength={1} placeholder="A" style={{ width: 32 }}
+            title="The character the selected outline IS"
+            onChange={(e) => setGlyphChar(e.target.value)} />
+          <button
+            disabled={!selectedObjs.length || glyphChar.trim().length !== 1}
+            title="Add the selected outline as that character. Capture CAPITALS: a letter is normalised by its own height, so a descender would come out short."
+            onClick={() => captureGlyph(glyphChar)}>Capture</button>
+          {alphabets.length > 0 && (
+            <>
+              <input
+                type="text" value={alphabetWord} style={{ width: 90 }}
+                title="The word to set"
+                onChange={(e) => setAlphabetWord(e.target.value)} />
+              <input
+                type="number" value={alphabetSize} min={1} max={200} style={{ width: 52 }}
+                title="Letter height, mm"
+                onChange={(e) => setAlphabetSize(Number(e.target.value))} />
+              <button
+                onClick={() => {
+                  const a = alphabets.find((q) => q.id === activeAlphabet) ?? alphabets[0]
+                  setFromAlphabet(a, alphabetWord, alphabetSize)
+                }}>Set word</button>
+            </>
+          )}
+          {!alphabets.length && (
+            <span className="dim">digitize a letter, select it, type the character, Capture</span>
+          )}
+        </div>
+
         <div className="group">
           <label>Shape</label>
           {BOOL_OPS.map((op) => (
