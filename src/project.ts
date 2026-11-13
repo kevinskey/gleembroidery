@@ -29,6 +29,11 @@ import {
   type EmbObject,
   type Hoop,
   type Pt,
+  type FillUnderlay,
+  type SatinUnderlay,
+  FILL_UNDERLAY_ORDER,
+  SATIN_UNDERLAY_ORDER,
+  orderedUnderlay,
 
   type StitchType,
 } from './model'
@@ -209,6 +214,40 @@ function shapesIn(v: unknown): Shape[] | undefined {
   return out.length ? out : undefined
 }
 
+/**
+ * Read an underlay selection.
+ *
+ * Projects saved before underlay became a LIST hold a single string, and the
+ * fill's "double" was already the edge+zigzag combination under another name.
+ * Migrating on read rather than bumping the schema keeps every existing file
+ * openable — and an unreadable value falls back to the default rather than to
+ * nothing, because silently sewing a column with NO underlay is a wearable
+ * defect, not a cosmetic one.
+ */
+function underlayIn<T extends string>(
+  v: unknown, order: readonly T[], legacy: Record<string, T[]>, fallback: T[],
+): T[] {
+  if (Array.isArray(v)) {
+    const want = v.filter((k): k is T => order.includes(k as T))
+    // An explicit empty list means the user chose "no underlay" — honour it.
+    return orderedUnderlay(want, order)
+  }
+  if (typeof v === 'string') {
+    if (v === 'none') return []
+    const mapped = legacy[v]
+    if (mapped) return orderedUnderlay(mapped, order)
+  }
+  return orderedUnderlay(fallback, order)
+}
+
+const LEGACY_SATIN_UNDERLAY: Record<string, SatinUnderlay[]> = {
+  center: ['center'], edge: ['edge'], zigzag: ['zigzag'],
+}
+/** "double" was edge + zigzag all along. */
+const LEGACY_FILL_UNDERLAY: Record<string, FillUnderlay[]> = {
+  edge: ['edge'], zigzag: ['zigzag'], double: ['edge', 'zigzag'],
+}
+
 function objectIn(v: unknown, index: number): EmbObject | null {
   if (!isObj(v)) return null
   const paths = pathsIn(v.paths)
@@ -238,7 +277,7 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       width: num(satin.width, dSatin.width),
       density: num(satin.density, dSatin.density),
       pullComp: num(satin.pullComp, dSatin.pullComp),
-      underlay: oneOf(satin.underlay, ['none', 'center', 'edge', 'zigzag'] as const, dSatin.underlay),
+      underlay: underlayIn(satin.underlay, SATIN_UNDERLAY_ORDER, LEGACY_SATIN_UNDERLAY, dSatin.underlay),
     },
     fill: {
       angle: num(fill.angle, dFill.angle),
@@ -246,7 +285,7 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       length: num(fill.length, dFill.length),
       stagger: num(fill.stagger, dFill.stagger),
       pullComp: num(fill.pullComp, dFill.pullComp),
-      underlay: oneOf(fill.underlay, ['none', 'edge', 'zigzag', 'double'] as const, dFill.underlay),
+      underlay: underlayIn(fill.underlay, FILL_UNDERLAY_ORDER, LEGACY_FILL_UNDERLAY, dFill.underlay),
       border: {
         enabled: border.enabled === true,
         width: num(border.width, dFill.border.width),
@@ -350,11 +389,11 @@ export function docSignature(doc: Doc): string {
     mix(Math.round(o.run.length * 1000))
     const sa = o.satin
     mix(Math.round(sa.width * 1000)); mix(Math.round(sa.density * 1000))
-    mix(Math.round(sa.pullComp * 1000)); mixStr(sa.underlay)
+    mix(Math.round(sa.pullComp * 1000)); mixStr(sa.underlay.join('+'))
     const f = o.fill
     mix(Math.round(f.angle * 100)); mix(Math.round(f.spacing * 1000))
     mix(Math.round(f.length * 1000)); mix(Math.round(f.stagger * 1000))
-    mix(Math.round(f.pullComp * 1000)); mixStr(f.underlay)
+    mix(Math.round(f.pullComp * 1000)); mixStr(f.underlay.join('+'))
     mix(f.border.enabled ? 1 : 0)
     mix(Math.round(f.border.width * 1000)); mix(Math.round(f.border.density * 1000))
     for (const path of o.paths) {

@@ -19,6 +19,8 @@ import {
   emptyDoc,
   hoopsForSpacing,
   newObject,
+  FILL_UNDERLAY_ORDER,
+  SATIN_UNDERLAY_ORDER,
   type Doc,
   type EmbObject,
   type Pt,
@@ -223,6 +225,45 @@ function FilePick({ label, accept, onPick }: {
       <input type="file" accept={accept} className="visually-hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f) onPick(f); e.target.value = '' }} />
     </label>
+  )
+}
+
+/**
+ * Underlay layer picker.
+ *
+ * Checkboxes, not a dropdown: underlay is layered in practice — a centre run
+ * to place, an edge run to support the rails, a zigzag to lift the nap — and
+ * a digitizer picks the combination the fabric needs. They sew in a fixed
+ * craft order whatever order they are ticked, so the order is stated here
+ * rather than left for the user to wonder about.
+ */
+function UnderlayPicker<T extends string>({ value, options, order, onChange }: {
+  value: readonly T[]
+  options: { id: T; label: string }[]
+  order: readonly T[]
+  onChange: (next: T[]) => void
+}) {
+  const on = (id: T) => value.includes(id)
+  return (
+    <div className="row wide">
+      <label>Underlay {value.length > 1 && <span className="dim">· sewn in order</span>}</label>
+      <div className="checks">
+        {options.map((o) => (
+          <label key={o.id} className="check">
+            <input
+              type="checkbox" checked={on(o.id)}
+              onChange={(e) => {
+                const want = e.target.checked
+                  ? [...value, o.id]
+                  : value.filter((k) => k !== o.id)
+                onChange(order.filter((k) => want.includes(k)) as T[])
+              }} />
+            {o.label}
+          </label>
+        ))}
+        {value.length === 0 && <span className="dim">none</span>}
+      </div>
+    </div>
   )
 }
 
@@ -1280,16 +1321,15 @@ export default function App() {
                     onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, density: v } }), 'satin.density')} />
                   <Num label="Pull compensation (mm)" value={selected.satin.pullComp} step={0.05} min={0} max={1}
                     onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, pullComp: v } }), 'satin.pullComp')} />
-                  <div className="row">
-                    <label>Underlay</label>
-                    <select value={selected.satin.underlay}
-                      onChange={(e) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, underlay: e.target.value as never } }))}>
-                      <option value="none">None</option>
-                      <option value="center">Centre run</option>
-                      <option value="edge">Edge runs</option>
-                      <option value="zigzag">Zigzag</option>
-                    </select>
-                  </div>
+                  <UnderlayPicker
+                    value={selected.satin.underlay}
+                    order={SATIN_UNDERLAY_ORDER}
+                    options={[
+                      { id: 'center', label: 'Centre run' },
+                      { id: 'edge', label: 'Edge runs' },
+                      { id: 'zigzag', label: 'Zigzag' },
+                    ]}
+                    onChange={(next) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, underlay: next } }))} />
                 </fieldset>
               )}
 
@@ -1307,16 +1347,14 @@ export default function App() {
                       onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, stagger: v } }), 'fill.stagger')} />
                     <Num label="Pull compensation (mm)" value={selected.fill.pullComp} step={0.05} min={0} max={1}
                       onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pullComp: v } }), 'fill.pullComp')} />
-                    <div className="row">
-                      <label>Underlay</label>
-                      <select value={selected.fill.underlay}
-                        onChange={(e) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, underlay: e.target.value as never } }))}>
-                        <option value="none">None</option>
-                        <option value="edge">Edge run</option>
-                        <option value="zigzag">Zigzag</option>
-                        <option value="double">Edge + zigzag</option>
-                      </select>
-                    </div>
+                    <UnderlayPicker
+                      value={selected.fill.underlay}
+                      order={FILL_UNDERLAY_ORDER}
+                      options={[
+                        { id: 'edge', label: 'Edge run' },
+                        { id: 'zigzag', label: 'Zigzag' },
+                      ]}
+                      onChange={(next) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, underlay: next } }))} />
                   </fieldset>
                   <fieldset>
                     <legend>Satin border</legend>

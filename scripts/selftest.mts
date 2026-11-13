@@ -5,8 +5,8 @@ import { readDst, writeDst } from '../src/dst'
 import { centerPlan, digitize, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
 import { tatamiFill } from '../src/fill'
 import { dist, resample, toRegions } from '../src/geometry'
-import { DEFAULT_FILL, DEFAULT_SATIN, HOOPS, emptyDoc, newObject, type Pt } from '../src/model'
-import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths } from '../src/satin'
+import { DEFAULT_FILL, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, emptyDoc, newObject, orderedUnderlay, type Pt } from '../src/model'
+import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
 import { SCHEMA_VERSION, ProjectError, deserialize, serialize } from '../src/project'
 import { packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
@@ -442,9 +442,9 @@ console.log('\n# project save / reopen')
   )
   // Non-default parameters everywhere, so a dropped field cannot hide.
   doc.objects[0].fill = { angle: 17, spacing: 0.37, length: 3.25, stagger: 0.3, pullComp: 0.22,
-    underlay: 'double', border: { enabled: true, width: 1.8, density: 0.33 } }
+    underlay: ['edge', 'zigzag'], border: { enabled: true, width: 1.8, density: 0.33 } }
   doc.objects[1].run = { length: 1.75 }
-  doc.objects[1].satin = { width: 4.2, density: 0.31, pullComp: 0.11, underlay: 'zigzag' }
+  doc.objects[1].satin = { width: 4.2, density: 0.31, pullComp: 0.11, underlay: ['center', 'zigzag'] }
   doc.objects[1].visible = false
 
   const text = serialize(doc, true)
@@ -1243,6 +1243,66 @@ console.log('\n# two-rail satin column')
       'and inside their ends')
     ok(satinTwoRailUnderlay(lineA, lineB, { ...P, underlay: 'none' }).length === 0,
       'underlay none means none')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# layered underlay')
+{
+  // Order is the craft order, not the order ticked.
+  ok(orderedUnderlay(['zigzag', 'center'], SATIN_UNDERLAY_ORDER).join() === 'center,zigzag',
+    'satin layers sew centre, edge, then zigzag whatever order they were picked',
+    orderedUnderlay(['zigzag', 'center'], SATIN_UNDERLAY_ORDER).join())
+  ok(orderedUnderlay(['zigzag', 'edge'], FILL_UNDERLAY_ORDER).join() === 'edge,zigzag',
+    'fill layers sew edge then zigzag')
+  ok(orderedUnderlay([], SATIN_UNDERLAY_ORDER).length === 0, 'no layers means none')
+
+  const spine: Pt[] = [{ x: 0, y: 0 }, { x: 30, y: 0 }]
+  const base = { ...DEFAULT_SATIN(), width: 4, density: 0.4, pullComp: 0 }
+  const one = satinUnderlay(spine, { ...base, underlay: ['center'] })
+  const two = satinUnderlay(spine, { ...base, underlay: ['center', 'zigzag'] })
+  const three = satinUnderlay(spine, { ...base, underlay: ['center', 'edge', 'zigzag'] })
+  ok(one.length > 0, 'one layer produces stitches', `${one.length}`)
+  ok(two.length > one.length, 'two layers produce MORE than one', `${one.length} -> ${two.length}`)
+  ok(three.length > two.length, 'and three more than two', `${two.length} -> ${three.length}`)
+  ok(satinUnderlay(spine, { ...base, underlay: [] }).length === 0, 'no layers sews nothing')
+  // The combination must START with the layer that sews first.
+  ok(Math.abs(two[0].y) < 1e-9, 'the centre run leads, since it is first in the order')
+
+  // Two-rail columns layer too, and nothing escapes the rails.
+  {
+    const ra: Pt[] = [{ x: 0, y: 0 }, { x: 30, y: 0 }]
+    const rb: Pt[] = [{ x: 0, y: 4 }, { x: 30, y: 4 }]
+    const u3 = satinTwoRailUnderlay(ra, rb, { ...base, underlay: ['center', 'edge', 'zigzag'] })
+    const u1 = satinTwoRailUnderlay(ra, rb, { ...base, underlay: ['center'] })
+    ok(u3.length > u1.length, 'a two-rail column layers its underlay too',
+      `${u1.length} -> ${u3.length}`)
+    ok(u3.every((q) => q.y >= -0.01 && q.y <= 4.01), 'and every layer stays between the rails')
+    ok(u3.every((q) => q.x > -0.01 && q.x < 30.01), 'and inside their ends')
+    ok(satinTwoRailUnderlay(ra, rb, { ...base, underlay: [] }).length === 0, 'none means none')
+  }
+
+  // --- legacy projects still open
+  {
+    const legacy = (u: unknown, kind: 'satin' | 'fill') => {
+      const d = emptyDoc()
+      const o = newObject({ type: kind === 'satin' ? 'satin' : 'fill', paths: [[{ x: 0, y: 0 }, { x: 10, y: 0 }]] })
+      if (kind === 'satin') (o.satin as unknown as Record<string, unknown>).underlay = u
+      else (o.fill as unknown as Record<string, unknown>).underlay = u
+      d.objects = [o]
+      return deserialize(serialize(d)).objects[0]
+    }
+    ok(legacy('zigzag', 'satin').satin.underlay.join() === 'zigzag', 'a legacy satin string migrates')
+    ok(legacy('none', 'satin').satin.underlay.length === 0, 'legacy "none" migrates to no layers')
+    // "double" was edge+zigzag all along — it must not silently become one.
+    ok(legacy('double', 'fill').fill.underlay.join() === 'edge,zigzag',
+      'legacy fill "double" migrates to BOTH layers', legacy('double', 'fill').fill.underlay.join())
+    ok(legacy('edge', 'fill').fill.underlay.join() === 'edge', 'legacy fill "edge" migrates')
+    // Junk falls back to the default rather than to nothing: sewing a column
+    // with no underlay is a wearable defect, not a cosmetic one.
+    ok(legacy(42, 'satin').satin.underlay.length > 0, 'an unreadable value falls back to the default')
+    ok(legacy([], 'satin').satin.underlay.length === 0, 'but an explicit empty list is honoured')
   }
 }
 

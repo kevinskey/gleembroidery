@@ -10,7 +10,7 @@
 //     OUTER rail keeps the requested density instead of the spine doing so.
 //   * Pull compensation widens the column, because satin drags its edges in.
 
-import type { Pt, RunParams, SatinParams } from './model'
+import { SATIN_UNDERLAY_ORDER, orderedUnderlay, type Pt, type RunParams, type SatinParams, type SatinUnderlay } from './model'
 import type { Stitch } from './stitches'
 import { dedupe, dist, isClosed, pathLength, resample, tangentAt } from './geometry'
 
@@ -286,16 +286,23 @@ export function satinColumn(path: Pt[], p: SatinParams): Stitch[] {
 export function satinUnderlay(path: Pt[], p: SatinParams): Stitch[] {
   const pts = dedupe(path)
   if (pts.length < 2) return []
-  switch (p.underlay) {
-    case 'none':
-      return []
+  // Layers sew in a fixed craft order, not the order they were ticked.
+  const out: Stitch[] = []
+  for (const layer of orderedUnderlay(p.underlay ?? [], SATIN_UNDERLAY_ORDER)) {
+    out.push(...satinUnderlayLayer(pts, p, layer))
+  }
+  return out
+}
+
+function satinUnderlayLayer(pts: Pt[], p: SatinParams, layer: SatinUnderlay): Stitch[] {
+  switch (layer) {
     case 'center':
       // A plain run down the middle gives the column something to sit on.
       return resample(pts, 2.0)
     case 'edge': {
       // Runs just inside each rail, there and back.
       const inset = Math.max(0.2, (p.width + p.pullComp) / 2 - 0.4)
-      const closed = isClosed(path)
+      const closed = isClosed(pts)
       const fine = resample(pts, 2.0)
       const left: Stitch[] = [], right: Stitch[] = []
       for (let i = 0; i < fine.length; i++) {
@@ -313,8 +320,10 @@ export function satinUnderlay(path: Pt[], p: SatinParams): Stitch[] {
         width: Math.max(0.6, p.width * 0.6),
         density: Math.max(1.2, p.density * 3),
         pullComp: 0,
-        underlay: 'none',
+        underlay: [],
       })
+    default:
+      return []
   }
 }
 
@@ -469,9 +478,21 @@ export function satinTwoRail(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[]
   return out
 }
 
-/** Underlay for a two-rail column: a centre run down the middle of the pair. */
+/**
+ * Underlay under a two-rail column, layered.
+ *
+ * The spine of a two-rail column is not drawn, it is IMPLIED — the midline of
+ * the pairing — and the rails are known exactly, so each layer can be built
+ * from the real geometry rather than approximated from a width:
+ *   centre  a run along the midline
+ *   edge    runs just inside each rail, there and back
+ *   zigzag  a sparse column between inset rails, to lift the nap
+ * Every layer is inset from the ends and sides so none of it can show past
+ * the satin it is meant to sit under.
+ */
 export function satinTwoRailUnderlay(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[] {
-  if (p.underlay === 'none') return []
+  const layers = orderedUnderlay(p.underlay ?? [], SATIN_UNDERLAY_ORDER)
+  if (!layers.length) return []
   const a = dedupe(railA)
   const bRaw = dedupe(railB)
   if (a.length < 2 || bRaw.length < 2) return []
@@ -480,21 +501,40 @@ export function satinTwoRailUnderlay(railA: Pt[], railB: Pt[], p: SatinParams): 
   const wa = railWalk(a, fine)
   const wb = railWalk(b, fine)
 
-  // The spine of a two-rail column is not drawn, it is implied — the midline
-  // of the pairing. Inset from the ends so the underlay never pokes out past
-  // the column it is meant to sit under.
-  const spine: Pt[] = []
-  const steps = 48
-  for (let i = 0; i <= steps; i++) {
-    const u = 0.02 + (i / steps) * 0.96
-    const pa = atFraction(wa, u), pb = atFraction(wb, u)
-    spine.push({ x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 })
+  /** Walk the pair, returning points at a fraction ACROSS the column. */
+  const across = (t: number, steps = 48): Pt[] => {
+    const out: Pt[] = []
+    for (let i = 0; i <= steps; i++) {
+      // Inset along the length so the underlay stops short of both ends.
+      const u = 0.03 + (i / steps) * 0.94
+      const pa = atFraction(wa, u), pb = atFraction(wb, u)
+      out.push({ x: pa.x + (pb.x - pa.x) * t, y: pa.y + (pb.y - pa.y) * t })
+    }
+    return out
   }
-  if (p.underlay === 'center') return runStitch(spine, { length: 2.5 })
-  // Edge and zigzag underlays both want a narrower pass inside the rails; a
-  // run down the middle is the honest approximation and is never wider than
-  // the column, which is the property that matters.
-  return runStitch(spine, { length: 2.0 })
+
+  const out: Stitch[] = []
+  for (const layer of layers) {
+    if (layer === 'center') {
+      out.push(...runStitch(across(0.5), { length: 2.5 }))
+    } else if (layer === 'edge') {
+      // A fraction in from each rail rather than a fixed millimetre inset:
+      // the column tapers, so a fixed inset would cross the middle wherever
+      // the rails pinch and sew the underlay outside the column.
+      const left = runStitch(across(0.18), { length: 2.5 })
+      const right = runStitch(across(0.82), { length: 2.5 })
+      out.push(...left, ...right.reverse())
+    } else {
+      // Sparse zigzag between the inset rails.
+      const l = across(0.2, 96), r = across(0.8, 96)
+      const step = Math.max(2, Math.round(96 / Math.max(2, Math.floor(96 / 6))))
+      for (let i = 0, side = 0; i < l.length; i += step, side ^= 1) {
+        out.push(side === 0 ? l[i] : r[i])
+      }
+      out.push(out.length % 2 === 0 ? r[r.length - 1] : l[l.length - 1])
+    }
+  }
+  return out
 }
 
 /** Width of a two-rail column at a few places along it, for checking. */

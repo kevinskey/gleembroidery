@@ -32,6 +32,18 @@ export interface RunParams {
   length: number
 }
 
+export type SatinUnderlay = 'center' | 'edge' | 'zigzag'
+export type FillUnderlay = 'edge' | 'zigzag'
+
+/** The order underlay layers are sewn in, whatever order they were chosen. */
+export const SATIN_UNDERLAY_ORDER: SatinUnderlay[] = ['center', 'edge', 'zigzag']
+export const FILL_UNDERLAY_ORDER: FillUnderlay[] = ['edge', 'zigzag']
+
+/** Layers of `want`, in sewing order. */
+export function orderedUnderlay<T extends string>(want: readonly T[], order: readonly T[]): T[] {
+  return order.filter((k) => want.includes(k))
+}
+
 export interface SatinParams {
   /** Column width, mm. Over ~10 mm the stitch is too long and snags. */
   width: number
@@ -39,7 +51,19 @@ export interface SatinParams {
   density: number
   /** Widen the column to cover the fabric pulled in by the stitch, mm. */
   pullComp: number
-  underlay: 'none' | 'center' | 'edge' | 'zigzag'
+  /**
+   * Underlay layers, applied together.
+   *
+   * A LIST, not one choice: real underlay is layered — a centre run to place
+   * and stabilise, an edge run to support the rails, a zigzag to lift the nap
+   * — and a digitizer picks the combination the fabric needs. An empty list
+   * is no underlay.
+   *
+   * Order of application is FIXED (see UNDERLAY_ORDER), not the order they
+   * were ticked: sequencing underlay is a craft convention rather than a user
+   * preference, and a fixed order keeps the stitch file deterministic.
+   */
+  underlay: SatinUnderlay[]
 }
 
 export interface FillParams {
@@ -53,7 +77,8 @@ export interface FillParams {
   stagger: number
   /** Grow the region before filling to cover pull-in, mm. */
   pullComp: number
-  underlay: 'none' | 'edge' | 'zigzag' | 'double'
+  /** Underlay layers, applied together. Empty means none. */
+  underlay: FillUnderlay[]
   /** Satin border run around the filled region after the fill. */
   border: { enabled: boolean; width: number; density: number }
 }
@@ -245,7 +270,7 @@ export const DEFAULT_SATIN = (): SatinParams => ({
   width: 2.5,
   density: 0.4,
   pullComp: 0.2,
-  underlay: 'center',
+  underlay: ['center'],
 })
 
 export const DEFAULT_FILL = (): FillParams => ({
@@ -254,7 +279,7 @@ export const DEFAULT_FILL = (): FillParams => ({
   length: 4.0,
   stagger: 0.5,
   pullComp: 0.15,
-  underlay: 'edge',
+  underlay: ['edge'],
   border: { enabled: false, width: 2.0, density: 0.4 },
 })
 

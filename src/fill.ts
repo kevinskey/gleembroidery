@@ -194,7 +194,7 @@ export function zigzagUnderlay(region: Pt[][], angle: number, report?: Report): 
       length: 4,
       stagger: 0,
       pullComp: 0,
-      underlay: 'none',
+      underlay: [],
       border: { enabled: false, width: 0, density: 0.4 },
     },
     undefined,

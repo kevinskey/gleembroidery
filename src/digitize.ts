@@ -10,7 +10,7 @@
 //   * colour grouping, since each change is a manual re-thread — adjacent
 //     objects sharing a colour become ONE block.
 
-import type { Doc, EmbObject, Pt } from './model'
+import { FILL_UNDERLAY_ORDER, orderedUnderlay, type Doc, type EmbObject, type Pt } from './model'
 import type { ColorBlock, Stitch, StitchPlan } from './stitches'
 import { dist, resample, scanlineSpans, toRegions } from './geometry'
 import { unionSelfChecked } from './boolean'
@@ -287,13 +287,15 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
       const report: (m: string) => void = (m) => warnings.push(`${obj.name}: ${m}`)
       for (const region of regions) {
         const p = obj.fill
-        if (p.underlay === 'edge' || p.underlay === 'double') {
+        // Layers sew in their fixed craft order, not the order ticked.
+        const layers = orderedUnderlay(p.underlay ?? [], FILL_UNDERLAY_ORDER)
+        if (layers.includes('edge')) {
           // The inset must not exceed a quarter of the local width, or on a
           // thin limb the underlay lands on or past the opposite edge.
           const inset = Math.min(1.0, Math.max(0.2, shortestSpan(region) * 0.25))
           push(edgeUnderlay(region, inset, 2.5, report))
         }
-        if (p.underlay === 'zigzag' || p.underlay === 'double') push(zigzagUnderlay(region, p.angle, report))
+        if (layers.includes('zigzag')) push(zigzagUnderlay(region, p.angle, report))
         push(tatamiFill(region, p, out.length ? out[out.length - 1] : undefined, report))
         if (p.border.enabled) {
           for (const ring of region) {
@@ -302,7 +304,7 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
               width: p.border.width,
               density: p.border.density,
               pullComp: 0,
-              underlay: 'none' as const,
+              underlay: [],
             }
             // The border is satin and must pass the SAME check the satin tool
             // does. It used to bypass it entirely, so the engine refused a
