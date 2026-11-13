@@ -12,6 +12,7 @@ import { SCHEMA_VERSION, ProjectError, deserialize, serialize } from '../src/pro
 import { packageStats, runSheetHtml, writeCol, writeEdr } from '../src/package'
 import { unionSelfChecked } from '../src/boolean'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
+import { DEFAULT_TEXT, shapeOutlines } from '../src/text'
 import { MIN_DRAW_MM, bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from '../src/draw'
 import { MIN_SIZE_MM, boxCentre, fitPaths, handlePoint, hitHandle, hitObject, movePaths, objectBox, pickObject, resizeBox, rotatePaths, rotationAngle, unionBox, type Box } from '../src/transform'
 import { COALESCE_MS, HISTORY_LIMIT, applyEdit, cancelState, initHistory, redoState, undoState } from '../src/history'
@@ -1493,6 +1494,84 @@ console.log('\n# auto-trace (magic wand)')
     for (const p of ring) worst = Math.max(worst, Math.abs(Math.hypot(p.x - 20, p.y - 20) - 15))
     ok(worst < 1.2, 'and the outline still follows the edge', `${worst.toFixed(2)} px`)
   }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# lettering: slant and bend')
+{
+  // A unit square standing on y=10 (baseline) with its top at y=0.
+  const box = (): Pt[][] => [[
+    { x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 10 }, { x: 0, y: 10 },
+  ]]
+  const base = DEFAULT_TEXT()
+
+  ok(shapeOutlines(box(), base)[0].every((p, i) => p.x === box()[0][i].x && p.y === box()[0][i].y),
+    'no slant and no bend leaves the outline untouched')
+
+  // --- slant shears about the BASELINE: feet stay, head leans.
+  {
+    const out = shapeOutlines(box(), { ...base, slantDeg: 45 })[0]
+    const feet = out.filter((p) => Math.abs(p.y - 10) < 1e-9)
+    const head = out.filter((p) => Math.abs(p.y) < 1e-9)
+    ok(feet.every((p) => Math.abs(p.x - (p.x === feet[0].x ? feet[0].x : p.x)) < 1e-9), 'feet exist')
+    ok(Math.min(...feet.map((p) => p.x)) === 0, 'the feet stay where they were',
+      `${Math.min(...feet.map((p) => p.x))}`)
+    // 45 degrees over a 10 mm height moves the top across by 10 mm.
+    ok(Math.abs(Math.min(...head.map((p) => p.x)) - 10) < 1e-9, 'and the head leans by height x tan',
+      `${Math.min(...head.map((p) => p.x)).toFixed(2)}`)
+    // Leaning the other way goes the other way.
+    const left = shapeOutlines(box(), { ...base, slantDeg: -45 })[0]
+    ok(Math.min(...left.map((p) => p.x)) < 0, 'a negative slant leans left')
+  }
+
+  // --- the bend is a parabola: ends pinned, middle moved
+  {
+    // A row of points along the top edge so the bow can be measured.
+    const strip: Pt[][] = [Array.from({ length: 11 }, (_, i) => ({ x: i * 2, y: 0 }))]
+    const bowed = shapeOutlines(strip, { ...base, curveTopMm: 5, curveBottomMm: 5 })[0]
+    ok(Math.abs(bowed[0].y) < 1e-9 && Math.abs(bowed[10].y) < 1e-9,
+      'both ends stay on the line they were set on')
+    ok(Math.abs(bowed[5].y + 5) < 1e-9, 'and the middle bows by the full amount',
+      `${bowed[5].y.toFixed(2)}`)
+    // Monotone rise to the middle, fall after — a bell, not a spike.
+    let rising = true
+    for (let i = 1; i <= 5; i++) if (bowed[i].y > bowed[i - 1].y) rising = false
+    ok(rising, 'the bow rises smoothly to the centre')
+    ok(shapeOutlines(strip, { ...base, curveTopMm: -5, curveBottomMm: -5 })[0][5].y > 0,
+      'a negative curve bows the other way')
+  }
+
+  // --- top and bottom move INDEPENDENTLY: that is what makes a fan
+  {
+    const out = shapeOutlines(box(), { ...base, curveTopMm: 6, curveBottomMm: 0 })[0]
+    const top = out.filter((p) => p.y < 5)
+    const bottom = out.filter((p) => p.y >= 5)
+    // The box corners are at the ENDS, where the bell is zero, so nothing
+    // moves — which is itself the proof that the bow is pinned at the ends.
+    ok(top.every((p) => Math.abs(p.y) < 1e-9), 'corners at the ends are unmoved by a bow')
+
+    // Sample the middle of each edge — but inside a shape that HAS width,
+    // or u has no span to vary across and the bell is undefined.
+    const mid: Pt[][] = [[
+      { x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 },
+      { x: 20, y: 10 }, { x: 10, y: 10 }, { x: 0, y: 10 },
+    ]]
+    const full = shapeOutlines(mid, { ...base, curveTopMm: 6, curveBottomMm: 0 })[0]
+    const m = [full[1], full[4]]
+    ok(Math.abs(m[0].y + 6) < 1e-9, 'the top edge bows by the top amount', `${m[0].y.toFixed(2)}`)
+    ok(Math.abs(m[1].y - 10) < 1e-9, 'while the bottom edge stays put', `${m[1].y.toFixed(2)}`)
+    // Equal amounts arc the whole line without changing its height.
+    const arcFull = shapeOutlines(mid, { ...base, curveTopMm: 4, curveBottomMm: 4 })[0]
+    const arc = [arcFull[1], arcFull[4]]
+    ok(Math.abs((arc[1].y - arc[0].y) - 10) < 1e-9,
+      'equal top and bottom arc the line without squashing it',
+      `${(arc[1].y - arc[0].y).toFixed(2)}`)
+  }
+
+  ok(shapeOutlines([], base).length === 0, 'no outlines is not a crash')
+  ok(shapeOutlines([[{ x: 5, y: 5 }]], { ...base, slantDeg: 20 }).length === 1,
+    'a degenerate zero-width outline is returned rather than dividing by zero')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

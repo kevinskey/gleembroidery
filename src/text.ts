@@ -36,6 +36,21 @@ export interface TextSpec {
   italic: boolean
   /** Extra space between letters, mm. Negative tightens. */
   trackingMm: number
+  /** Extra space between words, mm, on top of the tracking. */
+  wordSpacingMm: number
+  /**
+   * Shear, degrees. Positive leans right.
+   *
+   * Separate from the font's own italic: italic is a different set of
+   * drawings by the type designer, slant is a geometric lean applied to
+   * whatever face is chosen. A shop wants the second for a face that has no
+   * italic, which is most display faces.
+   */
+  slantDeg: number
+  /** How far the TOP of the lettering bows upward at its middle, mm. */
+  curveTopMm: number
+  /** How far the BOTTOM bows upward at its middle, mm. */
+  curveBottomMm: number
 }
 
 export const DEFAULT_TEXT: () => TextSpec = () => ({
@@ -45,6 +60,10 @@ export const DEFAULT_TEXT: () => TextSpec = () => ({
   bold: false,
   italic: false,
   trackingMm: 0,
+  wordSpacingMm: 0,
+  slantDeg: 0,
+  curveTopMm: 0,
+  curveBottomMm: 0,
 })
 
 /**
@@ -63,6 +82,53 @@ export const SUGGESTED_FACES = [
 ]
 
 /**
+ * Slant and bend already-flat outlines.
+ *
+ * Done AFTER rasterising rather than by transforming the canvas, because the
+ * bend is not an affine transform — the top and bottom of the lettering move
+ * by different amounts, which is what makes a fan or a taper rather than a
+ * plain arc. A canvas transform cannot express that; moving the points can.
+ *
+ * Top and bottom bow INDEPENDENTLY: equal amounts arc the whole line, while
+ * opposite amounts fan it wider at the middle. Each point is displaced by a
+ * parabola across the width — zero at both ends, full at the centre — so the
+ * lettering still starts and finishes on the baseline it was set on.
+ *
+ * Pure, so the suite covers it even though the rasteriser around it cannot be.
+ */
+export function shapeOutlines(paths: Pt[][], spec: TextSpec): Pt[][] {
+  const slant = Math.tan((Math.max(-60, Math.min(60, spec.slantDeg)) * Math.PI) / 180)
+  const bowTop = spec.curveTopMm
+  const bowBottom = spec.curveBottomMm
+  if (!slant && !bowTop && !bowBottom) return paths
+
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+  for (const ring of paths) for (const q of ring) {
+    if (q.x < minX) minX = q.x
+    if (q.x > maxX) maxX = q.x
+    if (q.y < minY) minY = q.y
+    if (q.y > maxY) maxY = q.y
+  }
+  const w = maxX - minX, h = maxY - minY
+  if (!(w > 1e-9)) return paths
+  // Shear about the BASELINE, not the middle: a slanted letter should keep
+  // its feet where they were and lean its head over, which is what the eye
+  // reads as italic.
+  const baseY = maxY
+
+  return paths.map((ring) => ring.map((q) => {
+    const x = q.x + (baseY - q.y) * slant
+    const u = (x - minX) / w
+    // Parabola: 0 at both ends, 1 in the middle.
+    const bell = 4 * u * (1 - u)
+    // v = 0 at the top of the lettering, 1 at the bottom.
+    const v = h > 1e-9 ? (q.y - minY) / h : 0
+    const bow = bowTop + (bowBottom - bowTop) * v
+    return { x, y: q.y - bow * bell }
+  }))
+}
+
+/**
  * Pixels per millimetre used while rasterising.
  *
  * The outline can only be as accurate as the bitmap it was traced from, and
@@ -74,6 +140,23 @@ const RASTER_PX_PER_MM = 10
 
 /** Margin around the rendered text, px — room for descenders and overhang. */
 const PAD = 8
+
+/**
+ * Letter and word spacing.
+ *
+ * Both are recent canvas properties and absent in older engines; where they
+ * are missing the text is simply not tracked, which is better than refusing
+ * to set the type at all.
+ */
+function applySpacing(ctx: CanvasRenderingContext2D, spec: TextSpec, scale: number): void {
+  const c = ctx as unknown as { letterSpacing: string; wordSpacing: string }
+  if (spec.trackingMm) {
+    try { c.letterSpacing = `${spec.trackingMm * RASTER_PX_PER_MM * scale}px` } catch { /* unsupported */ }
+  }
+  if (spec.wordSpacingMm) {
+    try { c.wordSpacing = `${spec.wordSpacingMm * RASTER_PX_PER_MM * scale}px` } catch { /* unsupported */ }
+  }
+}
 
 function fontString(spec: TextSpec, px: number): string {
   const style = spec.italic ? 'italic ' : ''
@@ -111,11 +194,7 @@ export function textToOutlines(spec: TextSpec): TextOutlines {
   const probe = document.createElement('canvas').getContext('2d')
   if (!probe) return { paths: [], widthMm: 0, heightMm: 0, warnings: ['could not measure text'] }
   probe.font = fontString(spec, REF)
-  if (spec.trackingMm) {
-    // letterSpacing is not in every engine; where it is missing the text is
-    // simply not tracked, which is better than refusing to set the type.
-    try { (probe as unknown as { letterSpacing: string }).letterSpacing = `${spec.trackingMm * RASTER_PX_PER_MM}px` } catch { /* unsupported */ }
-  }
+  applySpacing(probe, spec, REF / (spec.sizeMm * RASTER_PX_PER_MM || 1))
   const m = probe.measureText(content)
   const capPx = m.actualBoundingBoxAscent || REF * 0.7
   if (!(capPx > 0)) return { paths: [], widthMm: 0, heightMm: 0, warnings: ['that font produced no glyphs'] }
@@ -125,9 +204,7 @@ export function textToOutlines(spec: TextSpec): TextOutlines {
   const ctx2 = document.createElement('canvas').getContext('2d', { willReadFrequently: true })
   if (!ctx2) return { paths: [], widthMm: 0, heightMm: 0, warnings: ['could not draw text'] }
   ctx2.font = fontString(spec, px)
-  if (spec.trackingMm) {
-    try { (ctx2 as unknown as { letterSpacing: string }).letterSpacing = `${spec.trackingMm * RASTER_PX_PER_MM}px` } catch { /* unsupported */ }
-  }
+  applySpacing(ctx2, spec, 1)
   const m2 = ctx2.measureText(content)
   const left = Math.ceil(m2.actualBoundingBoxLeft) + PAD
   const right = Math.ceil(m2.actualBoundingBoxRight) + PAD
@@ -144,9 +221,7 @@ export function textToOutlines(spec: TextSpec): TextOutlines {
   cv.height = h
   // Resizing a canvas resets its context, so the font must be set again.
   ctx2.font = fontString(spec, px)
-  if (spec.trackingMm) {
-    try { (ctx2 as unknown as { letterSpacing: string }).letterSpacing = `${spec.trackingMm * RASTER_PX_PER_MM}px` } catch { /* unsupported */ }
-  }
+  applySpacing(ctx2, spec, 1)
   ctx2.textBaseline = 'alphabetic'
   ctx2.fillStyle = '#fff'
   ctx2.fillText(content, left, up)
@@ -168,17 +243,21 @@ export function textToOutlines(spec: TextSpec): TextOutlines {
     return { paths: [], widthMm: 0, heightMm: 0, warnings: ['that font produced no glyphs — check the name'] }
   }
 
+  // Slant and bend before centring, so the centring accounts for the shape
+  // that actually results.
+  const shaped = shapeOutlines(paths, spec)
+
   // Centre on the origin so the text lands where it was clicked, and so
   // resizing it later turns about its own middle.
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  for (const ring of paths) for (const q of ring) {
+  for (const ring of shaped) for (const q of ring) {
     if (q.x < minX) minX = q.x
     if (q.y < minY) minY = q.y
     if (q.x > maxX) maxX = q.x
     if (q.y > maxY) maxY = q.y
   }
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2
-  const centred = paths.map((ring) => {
+  const centred = shaped.map((ring) => {
     const shifted = ring.map((q) => ({ x: q.x - cx, y: q.y - cy }))
     // Close each ring; the fill engine reads these as regions.
     return [...shifted, { ...shifted[0] }]

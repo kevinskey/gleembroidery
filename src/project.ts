@@ -281,6 +281,12 @@ function objectIn(v: unknown, index: number): EmbObject | null {
         bold: v.text.bold === true,
         italic: v.text.italic === true,
         trackingMm: num(v.text.trackingMm, 0),
+        // Added after the first lettering shipped; absent in older files,
+        // where the honest reading is "no slant, no bend".
+        wordSpacingMm: num(v.text.wordSpacingMm, 0),
+        slantDeg: num(v.text.slantDeg, 0),
+        curveTopMm: num(v.text.curveTopMm, 0),
+        curveBottomMm: num(v.text.curveBottomMm, 0),
       },
     } : {}),
     run: { length: num(run.length, dRun.length) },

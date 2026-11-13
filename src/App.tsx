@@ -363,6 +363,17 @@ export default function App() {
    */
   const [spacePan, setSpacePan] = useState(false)
   /**
+   * Cmd (or Ctrl) is held: the pointer behaves as the Select arrow whatever
+   * tool is active — the convention in every drawing app, and what lets you
+   * nudge something without putting the tool down.
+   *
+   * EXCEPT while a path is actually being drawn, where Cmd was already
+   * established as "place a curve node". That is not a clash in practice:
+   * mid-path there is nothing to select, and interrupting a half-drawn
+   * outline to pick a different object would lose it.
+   */
+  const [cmdHeld, setCmdHeld] = useState(false)
+  /**
    * Reference image behind the design, and the pixels the wand reads.
    *
    * The ImageData is kept beside the bitmap because tracing needs raw bytes
@@ -838,6 +849,11 @@ export default function App() {
     setView({ scale, cx: view.cx + (before.x - after.x), cy: view.cy + (before.y - after.y) })
   }
 
+  /** Is an outline half-drawn right now? */
+  const drawing = () =>
+    penNodes.current.length > 0 || polyPts.current.length > 0
+    || colA.current.length > 0 || colB.current.length > 0
+
   /** Pointer position in document mm. */
   const atMm = (e: React.MouseEvent): Pt => {
     const rect = wrapRef.current!.getBoundingClientRect()
@@ -902,7 +918,7 @@ export default function App() {
       if (!hit) panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
       return
     }
-    if (tool === 'select') {
+    if (tool === 'select' || (cmdHeld && !drawing())) {
       if (e.button !== 0) return
       const p = atMm(e)
       const snapshot = () => selectedObjs.map((o) => ({ id: o.id, paths: o.paths }))
@@ -1047,7 +1063,7 @@ export default function App() {
       return
     }
     // Cursor feedback: a handle, a grabbable object, or nothing.
-    if (tool === 'select' && !panning.current) {
+    if ((tool === 'select' || (cmdHeld && !drawing())) && !panning.current) {
       const p = atMm(e)
       const b = selBox
       const h = b ? hitHandle(b, p, HANDLE_PX / view.scale) : null
@@ -1219,7 +1235,9 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    const mod = (e: KeyboardEvent) => setCmdHeld(e.metaKey || e.ctrlKey)
     const down = (e: KeyboardEvent) => {
+      mod(e)
       if (e.code !== 'Space') return
       const el = e.target as HTMLElement | null
       // Space is a legitimate keystroke in a text field, and it also scrolls
@@ -1228,10 +1246,10 @@ export default function App() {
       e.preventDefault()
       setSpacePan(true)
     }
-    const up = (e: KeyboardEvent) => { if (e.code === 'Space') setSpacePan(false) }
+    const up = (e: KeyboardEvent) => { mod(e); if (e.code === 'Space') setSpacePan(false) }
     // A window that loses focus never delivers the keyup, so the view would
     // stay stuck in pan mode until space was pressed and released again.
-    const clear = () => setSpacePan(false)
+    const clear = () => { setSpacePan(false); setCmdHeld(false) }
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
     window.addEventListener('blur', clear)
@@ -1514,8 +1532,15 @@ export default function App() {
         >
           <canvas
             ref={canvasRef}
-            className={spacePan || tool === 'wand' ? 'grabbable' : tool === 'select' ? undefined : 'drawing'}
-            style={!spacePan && tool === 'select' && hoverCursor ? { cursor: hoverCursor } : undefined}
+            className={
+              spacePan ? 'grabbable'
+                // Cmd shows the arrow, so the borrowed tool is visible before
+                // the click rather than only after it.
+                : cmdHeld && !drawing() ? 'arrow'
+                  : tool === 'wand' ? 'grabbable'
+                    : tool === 'select' ? undefined : 'drawing'
+            }
+            style={!spacePan && (tool === 'select' || cmdHeld) && hoverCursor ? { cursor: hoverCursor } : undefined}
           />
         </div>
 
@@ -1582,6 +1607,25 @@ export default function App() {
                     onChange={(v) => applyText(selected.id, { ...selected.text!, sizeMm: v })} />
                   <Num label="Letter spacing (mm)" value={selected.text.trackingMm} step={0.1} min={-5} max={20}
                     onChange={(v) => applyText(selected.id, { ...selected.text!, trackingMm: v })} />
+                  <Num label="Word spacing (mm)" value={selected.text.wordSpacingMm} step={0.5} min={-5} max={40}
+                    onChange={(v) => applyText(selected.id, { ...selected.text!, wordSpacingMm: v })} />
+                  <Num label="Slant (°)" value={selected.text.slantDeg} step={1} min={-45} max={45}
+                    onChange={(v) => applyText(selected.id, { ...selected.text!, slantDeg: v })} />
+                  {/* Top and bottom bow independently: equal values arc the
+                      whole line, opposite values fan or taper it. */}
+                  <Num label="Curve top (mm)" value={selected.text.curveTopMm} step={0.5} min={-60} max={60}
+                    onChange={(v) => applyText(selected.id, { ...selected.text!, curveTopMm: v })} />
+                  <Num label="Curve bottom (mm)" value={selected.text.curveBottomMm} step={0.5} min={-60} max={60}
+                    onChange={(v) => applyText(selected.id, { ...selected.text!, curveBottomMm: v })} />
+                  <div className="row wide">
+                    <label>Shape</label>
+                    <div className="checks">
+                      <button onClick={() => applyText(selected.id, { ...selected.text!, curveTopMm: 0, curveBottomMm: 0 })}>Flat</button>
+                      <button onClick={() => applyText(selected.id, { ...selected.text!, curveTopMm: 10, curveBottomMm: 10 })}>Arc</button>
+                      <button onClick={() => applyText(selected.id, { ...selected.text!, curveTopMm: 8, curveBottomMm: -8 })}>Fan</button>
+                      <button onClick={() => applyText(selected.id, { ...selected.text!, curveTopMm: -8, curveBottomMm: 8 })}>Pinch</button>
+                    </div>
+                  </div>
                   <div className="row wide">
                     <label>Style</label>
                     <div className="checks">
