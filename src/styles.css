@@ -161,6 +161,9 @@ canvas { display: block; width: 100%; height: 100%; cursor: grab; }
 canvas.panning { cursor: grabbing; }
 /* A drawing tool is active — crosshair, because 'grab' would promise panning. */
 canvas.drawing { cursor: crosshair; }
+/* Space held, or the wand (which never drags) — the view is draggable. */
+canvas.grabbable { cursor: grab; }
+canvas.grabbable:active { cursor: grabbing; }
 
 /* --- object list -------------------------------------------------------- */
 .obj {

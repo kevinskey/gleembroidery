@@ -340,6 +340,15 @@ export default function App() {
   >(null)
   const [hoverCursor, setHoverCursor] = useState<string | null>(null)
   /**
+   * Space is held: left-drag pans whatever tool is active.
+   *
+   * With a drawing tool selected, left-drag draws, so the only way to move
+   * the view was the middle button — which a trackpad does not have. Holding
+   * space to pan is the convention in every design tool for exactly this
+   * reason, and it works the same in all of them.
+   */
+  const [spacePan, setSpacePan] = useState(false)
+  /**
    * Reference image behind the design, and the pixels the wand reads.
    *
    * The ImageData is kept beside the bitmap because tracing needs raw bytes
@@ -785,9 +794,9 @@ export default function App() {
   }
 
   const onDown = (e: React.MouseEvent) => {
-    // Middle button always pans, whatever tool is active — otherwise picking a
-    // shape tool would strand the user with no way to move around.
-    if (e.button === 1) {
+    // Space-drag, the middle button, and the Wand (which never drags) all pan
+    // whatever tool is active — otherwise picking a tool strands the view.
+    if (e.button === 1 || spacePan || tool === 'wand') {
       panning.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }
       return
     }
@@ -891,7 +900,6 @@ export default function App() {
     }
     if (e.button !== 0) return
     const p = atMm(e)
-    if (tool === 'wand') { wandAt(p); return }
     if (tool === 'pen' || tool === 'column') {
       // Clicking the first node closes the path — the standard way to finish a
       // region, and the only one that does not need a separate control.
@@ -1041,7 +1049,15 @@ export default function App() {
   }
 
   const onUp = (e: React.MouseEvent) => {
+    const panned = panning.current
     panning.current = null
+    // The wand fires on release, and only when the pointer did not travel:
+    // that way a drag pans the view and a click still traces.
+    if (tool === 'wand' && e.button === 0 && panned) {
+      const moved = Math.hypot(e.clientX - panned.x, e.clientY - panned.y)
+      if (moved < 4 && !spacePan) wandAt(atMm(e))
+      return
+    }
     if (marquee.current) {
       const a = marquee.current
       const b = atMm(e)
@@ -1101,6 +1117,30 @@ export default function App() {
     if (railA.current) { railA.current = null; setNote(null) }
     dragging.current = null
     setDraft(null)
+  }, [])
+
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return
+      const el = e.target as HTMLElement | null
+      // Space is a legitimate keystroke in a text field, and it also scrolls
+      // the page by default — neither should become a pan.
+      if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return
+      e.preventDefault()
+      setSpacePan(true)
+    }
+    const up = (e: KeyboardEvent) => { if (e.code === 'Space') setSpacePan(false) }
+    // A window that loses focus never delivers the keyup, so the view would
+    // stay stuck in pan mode until space was pressed and released again.
+    const clear = () => setSpacePan(false)
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    window.addEventListener('blur', clear)
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+      window.removeEventListener('blur', clear)
+    }
   }, [])
 
   // Tool shortcuts, plus Enter/Esc for the polygon. Ignored while a text field
@@ -1252,6 +1292,12 @@ export default function App() {
         )}
 
         <div className="group">
+          <label title="Hold Space and drag to pan from any tool; the scroll wheel zooms">View</label>
+          <button onClick={fit} title="Fit the design to the window">Fit</button>
+          <span className="dim">Space+drag to pan</span>
+        </div>
+
+        <div className="group">
           <label>Machine</label>
           <select
             value={doc.hoop.name} title={doc.hoop.note ?? ''}
@@ -1369,8 +1415,8 @@ export default function App() {
         >
           <canvas
             ref={canvasRef}
-            className={tool === 'select' ? undefined : 'drawing'}
-            style={tool === 'select' && hoverCursor ? { cursor: hoverCursor } : undefined}
+            className={spacePan || tool === 'wand' ? 'grabbable' : tool === 'select' ? undefined : 'drawing'}
+            style={!spacePan && tool === 'select' && hoverCursor ? { cursor: hoverCursor } : undefined}
           />
         </div>
 
