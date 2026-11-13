@@ -5,7 +5,7 @@ import { close, toRegions } from './geometry'
 import { useHistory } from './history'
 import { DEFAULT_TOLERANCE, traceRegionAt, type Raster } from './trace'
 import {
-  arcThrough, deleteNode, flattenShape, handlesOf, insertNode, moveHandle, moveNode,
+  arcThrough, autoSmooth, deleteNode, flattenShape, handlesOf, insertNode, moveHandle, moveNode,
   nearestSegment, pathToShape, shapesToPaths, toggleSmooth, type PathNode, type Shape,
 } from './nodes'
 import { bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from './draw'
@@ -79,7 +79,7 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
     ),
   },
   {
-    id: 'pen', label: 'Pen', hint: 'Click for a corner, drag for a curve. Click the first node to close, Enter finishes open, Esc cancels (B)',
+    id: 'pen', label: 'Pen', hint: 'Click for a corner, Cmd-click for a curve, or drag to pull a handle. Click the first node to close, Enter finishes open (B)',
     icon: (
       <svg width="22" height="16" viewBox="0 0 22 16">
         <path d="M2 13l4-9 5 7 3-4 6 6" stroke="currentColor" strokeWidth="1.3" fill="none" />
@@ -97,7 +97,7 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
     ),
   },
   {
-    id: 'column', label: 'Column', hint: 'Two-rail satin: draw one edge and press Enter, then draw the other. Click for a corner, drag for a curve (C)',
+    id: 'column', label: 'Column', hint: 'Satin column: click alternate sides — each pair of clicks is one rung. Cmd-click for a curved edge, drag for a handle, Enter to finish (C)',
     icon: (
       <svg width="22" height="16" viewBox="0 0 22 16">
         <path d="M2 4c6-3 12 3 18 0" stroke="currentColor" strokeWidth="1.3" fill="none" />
@@ -320,8 +320,12 @@ export default function App() {
   const penDrag = useRef<PathNode | null>(null)
   // Arc: the clicks banked so far — start, then end; the third point bulges it.
   const arcPts = useRef<Pt[]>([])
-  // Two-rail satin: the first edge, banked while the second is drawn.
-  const railA = useRef<Shape | null>(null)
+  // Two-rail satin, built by clicking ALTERNATE SIDES: every pair of clicks
+  // is one rung of the ladder. That is how a digitizer works, and it also
+  // makes the pairing explicit — the engine joins the points that were
+  // clicked together rather than inferring a correspondence from arc length.
+  const colA = useRef<PathNode[]>([])
+  const colB = useRef<PathNode[]>([])
   // Node editing: which node is active (for Delete), and what is being dragged.
   const [activeNode, setActiveNode] = useState<{ s: number; i: number } | null>(null)
   const nodeDrag = useRef<{ s: number; i: number; which: 'node' | 'hIn' | 'hOut' } | null>(null)
@@ -578,35 +582,29 @@ export default function App() {
     penNodes.current = []
     penDrag.current = null
     setDraft(null)
-    if (nodes.length >= 2) addShape({ nodes, closed }, closed ? 'Shape' : 'Path')
+    if (nodes.length >= 2) addShape({ nodes: autoSmooth(nodes, closed), closed }, closed ? 'Shape' : 'Path')
   }, [addShape])
 
   /**
-   * Finish one rail of a two-rail satin column.
+   * Finish the two-rail column being clicked out.
    *
-   * The first Enter banks the edge; the second pairs them into a column. The
-   * rails are kept as `shapes` as well as flattened paths, so the column stays
-   * node-editable afterwards — reshaping an edge is most of what digitizing a
-   * serif actually is.
+   * Needs at least two complete rungs; a single rung is a line across a gap,
+   * not a column. Any trailing half-rung is dropped rather than guessed at.
    */
-  const finishRail = useCallback(() => {
-    const nodes = penNodes.current
-    penNodes.current = []
+  const finishColumn = useCallback(() => {
+    const n = Math.min(colA.current.length, colB.current.length)
+    const a = autoSmooth(colA.current.slice(0, n))
+    const b = autoSmooth(colB.current.slice(0, n))
+    colA.current = []
+    colB.current = []
     penDrag.current = null
     setDraft(null)
-    if (nodes.length < 2) return
-    const shape: Shape = { nodes, closed: false }
-    if (!railA.current) {
-      railA.current = shape
-      setNote('First edge saved — now draw the other edge and press Enter')
-      return
-    }
-    const pair = [railA.current, shape]
-    railA.current = null
-    const n = doc.objects.length
+    if (n < 2) { setNote('A column needs at least two rungs — click both sides again'); return }
+    const pair: Shape[] = [{ nodes: a, closed: false }, { nodes: b, closed: false }]
+    const i = doc.objects.length
     const obj = newObject({
-      name: `Column ${n + 1}`,
-      color: PALETTE[n % PALETTE.length],
+      name: `Column ${i + 1}`,
+      color: PALETTE[i % PALETTE.length],
       type: 'satin',
       twoRail: true,
       paths: shapesToPaths(pair),
@@ -615,7 +613,7 @@ export default function App() {
     setDoc((d) => ({ ...d, objects: [...d.objects, obj] }))
     setSelectedId(obj.id)
     setSim(null)
-    setNote(null)
+    setNote(`Column with ${n} rungs`)
   }, [doc.objects.length, setDoc, setSelectedId])
 
   /**
@@ -912,8 +910,10 @@ export default function App() {
         }
       }
       // Pressed, not yet released: a release here is a corner, a drag pulls
-      // handles out of it into a curve.
-      penDrag.current = { x: p.x, y: p.y }
+      // handles out of it into a curve. Holding Cmd/Ctrl marks it smooth, so
+      // a curve can be clicked out point by point with no dragging at all —
+      // the handles are fitted to its neighbours once they exist.
+      penDrag.current = { x: p.x, y: p.y, ...(e.metaKey || e.ctrlKey ? { smooth: true } : {}) }
       return
     }
     if (tool === 'arc') {
@@ -1002,7 +1002,34 @@ export default function App() {
       setShapes(selected.id, shapes)
       return
     }
-    if (tool === 'pen' || tool === 'column') {
+    if (tool === 'column') {
+      const p = atMm(e)
+      const d = penDrag.current
+      if (d) {
+        // Dragging off a placed point pulls its handles, same as the pen.
+        d.hOut = { x: p.x, y: p.y }
+        d.hIn = { x: 2 * d.x - p.x, y: 2 * d.y - p.y }
+        d.smooth = true
+      }
+      const nextIsA = colA.current.length <= colB.current.length
+      const a = autoSmooth([...colA.current, ...(d && nextIsA ? [d] : [])])
+      const b = autoSmooth([...colB.current, ...(d && !nextIsA ? [d] : [])])
+      const paths: Pt[][] = []
+      if (a.length >= 2) paths.push(flattenShape({ nodes: a, closed: false }))
+      if (b.length >= 2) paths.push(flattenShape({ nodes: b, closed: false }))
+      // The rungs ARE the column; drawing them is what makes the pairing
+      // visible while it is being clicked out.
+      const rungs = Math.min(a.length, b.length)
+      for (let i = 0; i < rungs; i++) paths.push([{ x: a[i].x, y: a[i].y }, { x: b[i].x, y: b[i].y }])
+      // A lone first point still needs to show, or the first click looks lost.
+      if (!paths.length && (a.length || b.length)) {
+        const only = a[0] ?? b[0]
+        paths.push([{ x: only.x, y: only.y }, { x: p.x, y: p.y }])
+      }
+      setDraft(paths.length ? { paths, closed: false } : null)
+      return
+    }
+    if (tool === 'pen') {
       const p = atMm(e)
       const d = penDrag.current
       if (d) {
@@ -1014,12 +1041,8 @@ export default function App() {
       }
       const preview = [...penNodes.current, ...(d ? [d] : [])]
       // Show the committed path plus a provisional segment to the cursor.
-      const live = d ? preview : [...preview, { x: p.x, y: p.y } as PathNode]
-      // Keep the banked rail on screen while the second is drawn — matching an
-      // edge you cannot see is guesswork.
-      const banked = railA.current ? [flattenShape(railA.current)] : []
-      const paths = live.length >= 2
-        ? [...banked, flattenShape({ nodes: live, closed: false })] : banked
+      const live = autoSmooth(d ? preview : [...preview, { x: p.x, y: p.y } as PathNode])
+      const paths = live.length >= 2 ? [flattenShape({ nodes: live, closed: false })] : []
       setDraft(paths.length ? { paths, closed: false } : null)
       return
     }
@@ -1080,7 +1103,20 @@ export default function App() {
     }
     if (xform.current) { xform.current = null; history.end(); return }
     if (nodeDrag.current) { nodeDrag.current = null; history.end(); return }
-    if (tool === 'pen' || tool === 'column') {
+    if (tool === 'column') {
+      const d = penDrag.current
+      penDrag.current = null
+      if (d) {
+        if (colA.current.length <= colB.current.length) colA.current = [...colA.current, d]
+        else colB.current = [...colB.current, d]
+        const rungs = Math.min(colA.current.length, colB.current.length)
+        setNote(colA.current.length === colB.current.length
+          ? `${rungs} rung${rungs === 1 ? '' : 's'} — Enter to finish`
+          : 'now click the other side')
+      }
+      return
+    }
+    if (tool === 'pen') {
       if (penDrag.current) { penNodes.current = [...penNodes.current, penDrag.current]; penDrag.current = null }
       return
     }
@@ -1112,9 +1148,11 @@ export default function App() {
     penNodes.current = []
     penDrag.current = null
     arcPts.current = []
-    // Abandon a half-drawn column rather than pairing the next edge with a
-    // rail the user has forgotten they started.
-    if (railA.current) { railA.current = null; setNote(null) }
+    if (colA.current.length || colB.current.length) {
+      colA.current = []
+      colB.current = []
+      setNote(null)
+    }
     dragging.current = null
     setDraft(null)
   }, [])
@@ -1172,7 +1210,7 @@ export default function App() {
       if (e.key === 'Enter') {
         if (tool === 'polygon') finishPolygon()
         else if (tool === 'pen') finishPen(false)
-        else if (tool === 'column') finishRail()
+        else if (tool === 'column') finishColumn()
         return
       }
       if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'node' && selected && activeNode) {
@@ -1198,7 +1236,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [tool, finishPolygon, finishPen, finishRail, cancelDraw, history, selected, activeNode, shapesOf, setShapes])
+  }, [tool, finishPolygon, finishPen, finishColumn, cancelDraw, history, selected, activeNode, shapesOf, setShapes])
 
   const moveObject = (index: number, delta: number) =>
     setDoc((d) => {
@@ -1393,7 +1431,7 @@ export default function App() {
           onMouseLeave={onUp} onDoubleClick={(e) => {
             if (tool === 'polygon') { finishPolygon(); return }
             if (tool === 'pen') { finishPen(false); return }
-            if (tool === 'column') { finishRail(); return }
+            if (tool === 'column') { finishColumn(); return }
             if (tool !== 'node' || !selected) return
             // Add a node where the outline was double-clicked. The split is
             // exact, so the shape does not twitch when a point appears.

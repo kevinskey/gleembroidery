@@ -411,7 +411,39 @@ function compensate(pa: Pt, pb: Pt, outward: number): [Pt, Pt] {
  * binds, the outer edge goes slightly sparser rather than the inner edge
  * being destroyed — the same trade, made for the same reason.
  */
-export function satinTwoRail(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[] {
+/**
+ * Build a reparameterisation from explicit rung anchors.
+ *
+ * Returns a function from GLOBAL t (0..1, shared by both rails) to that
+ * rail's own fraction u. With anchors, rung k sits at t = k/(n-1) on BOTH
+ * rails, so the pair the digitizer clicked stays paired no matter how
+ * differently the two edges run between rungs — which is the entire point of
+ * clicking alternate sides instead of drawing two independent curves.
+ *
+ * Without anchors it is the identity, which is the proportional-arc-length
+ * pairing used for rails that arrived separately (a trace, an import).
+ */
+function reparam(anchors?: readonly number[]): (t: number) => number {
+  if (!anchors || anchors.length < 2) return (t) => t
+  const n = anchors.length - 1
+  return (t: number) => {
+    const x = Math.max(0, Math.min(1, t)) * n
+    const k = Math.min(n - 1, Math.floor(x))
+    const f = x - k
+    return anchors[k] + (anchors[k + 1] - anchors[k]) * f
+  }
+}
+
+export interface TwoRailOptions {
+  /** Fraction along rail A of each rung anchor, ascending, 0..1. */
+  anchorsA?: readonly number[]
+  /** The matching fractions along rail B. Same length as anchorsA. */
+  anchorsB?: readonly number[]
+}
+
+export function satinTwoRail(
+  railA: Pt[], railB: Pt[], p: SatinParams, opt: TwoRailOptions = {},
+): Stitch[] {
   const a = dedupe(railA)
   const bRaw = dedupe(railB)
   if (a.length < 2 || bRaw.length < 2) return []
@@ -424,6 +456,9 @@ export function satinTwoRail(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[]
   if (wa.len <= 1e-9 && wb.len <= 1e-9) return []
   const outward = Math.max(0, p.pullComp) / 2
 
+  const toA = reparam(opt.anchorsA)
+  const toB = reparam(opt.anchorsB)
+
   const out: Stitch[] = []
   /** Which rail each emitted stitch landed on; needed to close out cleanly. */
   const sides: number[] = []
@@ -434,8 +469,8 @@ export function satinTwoRail(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[]
   // rails, not from their total lengths — a column can be wide at one end and
   // pinched at the other, and a single global step would be wrong at both.
   while (u < 1 && guard++ < 200000) {
-    const pa = atFraction(wa, u)
-    const pb = atFraction(wb, u)
+    const pa = atFraction(wa, toA(u))
+    const pb = atFraction(wb, toB(u))
     const [ca, cb] = compensate(pa, pb, outward)
     out.push(side === 0 ? { x: ca.x, y: ca.y } : { x: cb.x, y: cb.y })
     sides.push(side)
@@ -444,8 +479,8 @@ export function satinTwoRail(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[]
     // Probe a small step ahead to measure how fast each rail is moving here.
     const probe = Math.min(1 - u, Math.max(1e-6, density / Math.max(wa.len, wb.len, 1e-9)))
     if (probe <= 1e-9) break
-    const sa = dist(pa, atFraction(wa, u + probe))
-    const sb = dist(pb, atFraction(wb, u + probe))
+    const sa = dist(pa, atFraction(wa, toA(u + probe)))
+    const sb = dist(pb, atFraction(wb, toB(u + probe)))
     const fast = Math.max(sa, sb)
     const slow = Math.min(sa, sb)
     let du = fast > 1e-9 ? probe * (density / fast) : probe
@@ -465,7 +500,7 @@ export function satinTwoRail(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[]
   // dropped first: a stitch 0.1 mm from its neighbour is not a stitch, it is
   // a second strike in the same hole, and the whole point of MIN_RAIL_MM is
   // that such a pair shreds thread and breaks needles.
-  const ends = compensate(atFraction(wa, 1), atFraction(wb, 1), outward)
+  const ends = compensate(atFraction(wa, toA(1)), atFraction(wb, toB(1)), outward)
   while (out.length && dist(out[out.length - 1], ends[sides[sides.length - 1]]) < MIN_RAIL_MM) {
     out.pop()
     sides.pop()
@@ -490,7 +525,9 @@ export function satinTwoRail(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[]
  * Every layer is inset from the ends and sides so none of it can show past
  * the satin it is meant to sit under.
  */
-export function satinTwoRailUnderlay(railA: Pt[], railB: Pt[], p: SatinParams): Stitch[] {
+export function satinTwoRailUnderlay(
+  railA: Pt[], railB: Pt[], p: SatinParams, opt: TwoRailOptions = {},
+): Stitch[] {
   const layers = orderedUnderlay(p.underlay ?? [], SATIN_UNDERLAY_ORDER)
   if (!layers.length) return []
   const a = dedupe(railA)
@@ -501,13 +538,16 @@ export function satinTwoRailUnderlay(railA: Pt[], railB: Pt[], p: SatinParams): 
   const wa = railWalk(a, fine)
   const wb = railWalk(b, fine)
 
+  const toA = reparam(opt.anchorsA)
+  const toB = reparam(opt.anchorsB)
+
   /** Walk the pair, returning points at a fraction ACROSS the column. */
   const across = (t: number, steps = 48): Pt[] => {
     const out: Pt[] = []
     for (let i = 0; i <= steps; i++) {
       // Inset along the length so the underlay stops short of both ends.
       const u = 0.03 + (i / steps) * 0.94
-      const pa = atFraction(wa, u), pb = atFraction(wb, u)
+      const pa = atFraction(wa, toA(u)), pb = atFraction(wb, toB(u))
       out.push({ x: pa.x + (pb.x - pa.x) * t, y: pa.y + (pb.y - pa.y) * t })
     }
     return out

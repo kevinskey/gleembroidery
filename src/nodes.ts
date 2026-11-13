@@ -103,6 +103,30 @@ export function flattenShape(shape: Shape, tol = CHORD_MM): Pt[] {
   return out
 }
 
+/**
+ * Where each node falls along its own flattened path, as a fraction of 0..1.
+ *
+ * This is what lets a two-rail column pair by RUNG. The engine only ever sees
+ * flattened polylines, so without this the correspondence the digitizer
+ * clicked — this point on the left pairs with THAT point on the right — is
+ * lost the moment the curve is flattened.
+ */
+export function nodeFractions(shape: Shape, tol = CHORD_MM): number[] {
+  const { nodes, closed } = shape
+  if (nodes.length < 2) return nodes.map(() => 0)
+  const lens: number[] = [0]
+  let total = 0
+  const last = closed ? nodes.length : nodes.length - 1
+  for (let i = 0; i < last; i++) {
+    const seg = flattenShape({ nodes: [nodes[i], nodes[(i + 1) % nodes.length]], closed: false }, tol)
+    let L = 0
+    for (let k = 1; k < seg.length; k++) L += dist(seg[k - 1], seg[k])
+    total += L
+    lens.push(total)
+  }
+  return total > 1e-9 ? lens.map((l) => l / total) : lens.map(() => 0)
+}
+
 /** Flatten every shape of an object into the `paths` the engine sews. */
 export function shapesToPaths(shapes: readonly Shape[], tol = CHORD_MM): Pt[][] {
   return shapes.map((s) => {
@@ -236,6 +260,35 @@ export function deleteNode(shape: Shape, i: number): Shape {
   if (shape.nodes.length <= min) return shape
   const nodes = shape.nodes.filter((_, k) => k !== i)
   return { ...shape, nodes }
+}
+
+/**
+ * Give every smooth-but-handle-less node handles fitted to its neighbours.
+ *
+ * Lets a node be marked smooth at the moment it is PLACED — Cmd-click, with
+ * no drag — and still come out as a curve: the handles cannot be computed
+ * until the next point exists, so they are fitted afterwards, each time the
+ * path grows.
+ */
+export function autoSmooth(nodes: readonly PathNode[], closed = false): PathNode[] {
+  const out = nodes.map((n) => ({ ...n }))
+  for (let i = 0; i < out.length; i++) {
+    const n = out[i]
+    if (!n.smooth || n.hIn || n.hOut) continue
+    const prev = out[i - 1] ?? (closed ? out[out.length - 1] : undefined)
+    const next = out[i + 1] ?? (closed ? out[0] : undefined)
+    if (!prev && !next) continue
+    // Through-direction from the neighbours; an end node leans on the one
+    // neighbour it has, which is what keeps the first click curving too.
+    const dx = (next?.x ?? n.x) - (prev?.x ?? n.x)
+    const dy = (next?.y ?? n.y) - (prev?.y ?? n.y)
+    const len = Math.hypot(dx, dy)
+    if (len < 1e-9) continue
+    const k = len / 3
+    if (prev) n.hIn = { x: n.x - (dx / len) * k, y: n.y - (dy / len) * k }
+    if (next) n.hOut = { x: n.x + (dx / len) * k, y: n.y + (dy / len) * k }
+  }
+  return out
 }
 
 /** Every handle currently on show, for hit-testing and drawing. */

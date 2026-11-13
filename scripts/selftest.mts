@@ -1195,6 +1195,59 @@ console.log('\n# two-rail satin column')
     ok(strays === 0, 'a taper puts every stitch on a rail', `${strays} strays`)
   }
 
+  // --- rungs: the pairing the digitizer clicked must be the pairing sewn
+  {
+    // Rail A runs at constant speed; rail B dawdles then races. Proportional
+    // pairing would slide the join around; explicit rungs must not.
+    const ra: Pt[] = [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 40, y: 0 }]
+    const rb: Pt[] = [{ x: 0, y: 4 }, { x: 5, y: 4 }, { x: 40, y: 4 }]
+    // Three rungs: A at 0, 0.5, 1 of its length; B at 0, 5/40, 1 of its.
+    const anchorsA = [0, 0.5, 1]
+    const anchorsB = [0, 5 / 40, 1]
+    const col = satinTwoRail(ra, rb, P, { anchorsA, anchorsB })
+    ok(col.length > 20, 'a rung-paired column generates', `${col.length}`)
+
+    // Find the stitch nearest the middle rung on each rail; they must be the
+    // points the user actually clicked — (20,0) paired with (5,4).
+    const onA = col.filter((s) => Math.abs(s.y) < 1e-6)
+    const onB = col.filter((s) => Math.abs(s.y - 4) < 1e-6)
+    const nearestTo = (list: typeof col, x: number) =>
+      list.reduce((m, s) => (Math.abs(s.x - x) < Math.abs(m.x - x) ? s : m), list[0])
+    // Walk to the stitch pair straddling the halfway point of the column.
+    const midA = nearestTo(onA, 20)
+    const midB = nearestTo(onB, 5)
+    ok(Math.abs(midA.x - 20) < 1.0, 'rail A is sewn through its middle rung point',
+      `${midA.x.toFixed(2)} vs 20`)
+    ok(Math.abs(midB.x - 5) < 1.0, 'rail B is sewn through ITS middle rung point',
+      `${midB.x.toFixed(2)} vs 5`)
+
+    // The bars near the middle must join the clicked pair, not drift apart:
+    // at the halfway rung, A is at x=20 while B is at x=5.
+    const pairIdx = col.findIndex((s, i) =>
+      i > 0 && Math.abs(s.y) < 1e-6 && Math.abs(s.x - 20) < 1.2)
+    ok(pairIdx > 0, 'the middle rung appears in the stitch order')
+    const partner = col[pairIdx - 1]
+    ok(Math.abs(partner.x - 5) < 1.5,
+      'and its bar lands on the point it was paired with, not where arc length would put it',
+      `${partner.x.toFixed(2)} vs 5`)
+
+    // The same rails WITHOUT anchors pair by arc length: both rails are 40
+    // long, so A's x=20 pairs with B's x=20 — not with the x=5 the digitizer
+    // clicked. Asking what each mode pairs A's middle WITH is the comparison
+    // that actually discriminates; "nearest stitch to x=5" does not, because
+    // rail B carries stitches along its whole length either way.
+    const partnerOfA20 = (col: typeof plain) => {
+      const i = col.findIndex((s, k) => k > 0 && Math.abs(s.y) < 1e-6 && Math.abs(s.x - 20) < 1.2)
+      return i > 0 ? col[i - 1].x : NaN
+    }
+    const plain = satinTwoRail(ra, rb, P)
+    ok(Math.abs(partnerOfA20(plain) - 20) < 2,
+      'without rungs, arc length pairs A@20 with B@20', `${partnerOfA20(plain).toFixed(2)}`)
+    ok(Math.abs(partnerOfA20(col) - 5) < 2,
+      'with rungs, A@20 pairs with the B@5 that was clicked — the whole feature',
+      `${partnerOfA20(col).toFixed(2)}`)
+  }
+
   // --- the inner rail is never allowed to collapse into one hole
   {
     // A sharply curved pair: the inner rail is far shorter than the outer.

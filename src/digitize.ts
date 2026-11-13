@@ -11,6 +11,7 @@
 //     objects sharing a colour become ONE block.
 
 import { FILL_UNDERLAY_ORDER, orderedUnderlay, type Doc, type EmbObject, type Pt } from './model'
+import { nodeFractions } from './nodes'
 import type { ColorBlock, Stitch, StitchPlan } from './stitches'
 import { dist, resample, scanlineSpans, toRegions } from './geometry'
 import { unionSelfChecked } from './boolean'
@@ -248,14 +249,23 @@ function stitchObject(obj: EmbObject, warnings: string[], floor = MIN_STITCH_MM)
       // columns, which is what the loop below already does.
       if (obj.paths.length === 2 && obj.twoRail) {
         const [ra, rb] = obj.paths
+        // Rungs: when both rails carry the same number of nodes, those nodes
+        // ARE the pairs the digitizer clicked, so pair by node rather than by
+        // arc length. Unequal counts mean the rails arrived separately (a
+        // trace, an import) and arc length is the only correspondence there is.
+        const sh = obj.shapes
+        const rung = sh && sh.length === 2 && sh[0].nodes.length === sh[1].nodes.length
+          && sh[0].nodes.length >= 2
+          ? { anchorsA: nodeFractions(sh[0]), anchorsB: nodeFractions(sh[1]) }
+          : {}
         const check = twoRailCheck(ra, rb, obj.satin)
         for (const w of check.warnings) warnings.push(`${obj.name}: ${w}`)
         if (check.errors.length) {
           for (const e of check.errors) warnings.push(`${obj.name}: NOT STITCHED — ${e}`)
           break
         }
-        push(satinTwoRailUnderlay(ra, rb, obj.satin))
-        push(satinTwoRail(ra, rb, obj.satin))
+        push(satinTwoRailUnderlay(ra, rb, obj.satin, rung))
+        push(satinTwoRail(ra, rb, obj.satin, rung))
         break
       }
       for (const path of obj.paths) {
