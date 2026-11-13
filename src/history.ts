@@ -108,6 +108,10 @@ export interface History<T> {
   cancel: () => void
   undo: () => void
   redo: () => void
+  /** The whole stack, for parking a document while another is on screen. */
+  snapshot: () => HistoryState<T>
+  /** Put a parked stack back, undo history and all. */
+  install: (next: HistoryState<T>) => void
   canUndo: boolean
   canRedo: boolean
 }
@@ -148,8 +152,21 @@ export function useHistory<T>(initial: T | (() => T)): History<T> {
   const undo = useCallback(() => { gesture.current = false; setH(undoState) }, [])
   const redo = useCallback(() => { gesture.current = false; setH(redoState) }, [])
 
+  /**
+   * The whole stack, for parking a document while another is on screen.
+   *
+   * Switching between open documents has to keep each one's undo stack, or
+   * every switch silently throws away the work you could take back. The
+   * stack is plain data, so the tab strip parks it and hands it back.
+   */
+  const snapshot = useCallback(() => h, [h])
+  const install = useCallback((next: HistoryState<T>) => {
+    gesture.current = false
+    setH(next)
+  }, [])
+
   return useMemo(() => ({
-    state: h.present, set, reset, begin, end, cancel, undo, redo,
+    state: h.present, set, reset, begin, end, cancel, undo, redo, snapshot, install,
     canUndo: h.past.length > 0, canRedo: h.future.length > 0,
-  }), [h, set, reset, begin, end, cancel, undo, redo])
+  }), [h, set, reset, begin, end, cancel, undo, redo, snapshot, install])
 }

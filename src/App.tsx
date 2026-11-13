@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { Menu, MenuItem, MenuLabel, MenuSep, closeAllMenus } from './Menu'
 import { Thumb } from './Thumb'
+import { formatField, formatLength, parseLength, sizePair, type Unit } from './units'
 import {
   RACK_KEY, nearestMachineThread, nearestSpools, newSpool, parseRack, serializeRack,
   spoolLabel, type Spool,
@@ -31,7 +32,7 @@ import {
 } from './arrange'
 import type { BoolOp } from './boolean'
 import { close, segDist, toRegions } from './geometry'
-import { useHistory } from './history'
+import { initHistory, useHistory, type HistoryState } from './history'
 import { CELL_MM, analyseDensity } from './density'
 import {
   deleteStitches, freeze, freezeState, moveStitches, pickStitch, pickStitchesIn,
@@ -48,7 +49,7 @@ import {
 } from './nodes'
 import { bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from './draw'
 import {
-  boxCentre, fitPaths, handleCursor, hitHandle, movePaths, objectBox, pickObject,
+  MIN_SIZE_MM, boxCentre, fitPaths, handleCursor, hitHandle, movePaths, objectBox, pickObject,
   resizeBox, rotatePaths, rotationAngle, unionBox, type Box, type Handle,
 } from './transform'
 import {
@@ -110,6 +111,17 @@ const ROTATE_PX = 26
 
 /** Where in-progress work is parked so a reload does not lose it. */
 const AUTOSAVE_KEY = 'gleembroidery.autosave.v1'
+
+/**
+ * A design that is open but not on screen.
+ *
+ * `state` is null for the ACTIVE one: its stack lives in the history hook,
+ * and keeping a second copy here would be two truths about one document.
+ */
+interface ParkedDoc {
+  id: string
+  state: HistoryState<Doc> | null
+}
 
 /** Canvas tools. 'select' picks/moves/resizes; empty space still pans. */
 type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column' | 'angle' | 'wand' | 'text' | 'stitch'
@@ -292,29 +304,92 @@ function Num({ label, value, step = 0.1, min, max, onChange }: {
   )
 }
 
+const UNIT_KEY = 'gleembroidery.unit.v1'
+
 /**
- * A size as a shop says it: inches with a fraction, millimetres beside it.
+ * A length field for the transform bar.
  *
- * Doc's hoops are sold in inches and his customers ask for "a three inch
- * left chest", but the machine and this program work in millimetres. Both,
- * always, so nobody has to convert in their head — and the fraction rather
- * than a decimal, because 3 1/16" is what a tape measure says.
+ * Commits on Enter or on leaving the field, NOT on every keystroke: typing
+ * "3 1/2" passes through "3", "3 ", "3 1", "3 1/" on the way, and a field
+ * that applied each of those would resize the design four times and leave it
+ * at whatever the last readable fragment was.
+ *
+ * Unreadable text is left alone and the field snaps back to the real value.
+ * Refusing is the point — a field that turned nonsense into 0 would resize a
+ * design to nothing, and the undo would be the only way back.
  */
-function inchPair(wMm: number, hMm: number): string {
-  return `${inches(wMm)} × ${inches(hMm)} (${wMm.toFixed(1)} × ${hMm.toFixed(1)} mm)`
+function XField({ value, unit, onCommit, title, signed }: {
+  value: number | null
+  unit: Unit
+  onCommit: (mm: number) => void
+  title?: string
+  /** Negatives are meaningful here (a position), not a mistake (a size). */
+  signed?: boolean
+}) {
+  const [text, setText] = useState('')
+  const [editing, setEditing] = useState(false)
+  // What is still waiting to be applied. Held in a ref and CLEARED on the
+  // way through, because Enter commits and then blurs — and the blur
+  // handler fired a second commit with the same text, resizing the design
+  // twice. Asking for 3 1/2" got 4 3/8".
+  const pending = useRef<string | null>(null)
+  const shown = editing ? text : (value === null ? '' : formatField(value, unit))
+
+  const commit = () => {
+    setEditing(false)
+    const t = pending.current
+    pending.current = null
+    if (t === null) return
+    const mm = parseLength(t, unit)
+    if (mm === null) return
+    if (!signed && mm <= 0) return
+    onCommit(mm)
+  }
+
+  return (
+    <input
+      type="text" className="xf" title={title} value={shown} disabled={value === null}
+      onFocus={(e) => {
+        setEditing(true)
+        setText(e.target.value)
+        pending.current = null
+        e.target.select()
+      }}
+      onChange={(e) => { setText(e.target.value); pending.current = e.target.value }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') { commit(); (e.target as HTMLInputElement).blur() }
+        if (e.key === 'Escape') {
+          pending.current = null
+          setEditing(false)
+          ;(e.target as HTMLInputElement).blur()
+        }
+      }}
+    />
+  )
 }
 
-/** Millimetres as inches to the nearest sixteenth. */
-function inches(mm: number): string {
-  const total = mm / 25.4
-  const whole = Math.floor(total)
-  const sixteenths = Math.round((total - whole) * 16)
-  if (sixteenths === 0) return `${whole}"`
-  if (sixteenths === 16) return `${whole + 1}"`
-  // Reduce the fraction: 8/16 reads as 1/2, not as 8/16.
-  let n = sixteenths, d = 16
-  while (n % 2 === 0 && d % 2 === 0) { n /= 2; d /= 2 }
-  return `${whole ? `${whole} ` : ''}${n}/${d}"`
+/** A percentage that applies once and returns to 100. */
+function ScaleField({ onCommit }: { onCommit: (pct: number) => void }) {
+  const [text, setText] = useState('100')
+  const commit = () => {
+    const v = Number(text)
+    setText('100')
+    if (isFinite(v) && v > 0 && v !== 100) onCommit(v)
+  }
+  return (
+    <input
+      type="text" className="xf" value={text}
+      title="Scale by this much, then back to 100 — because the new size IS the size"
+      onFocus={(e) => e.target.select()}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') { commit(); (e.target as HTMLInputElement).blur() }
+        if (e.key === 'Escape') { setText('100'); (e.target as HTMLInputElement).blur() }
+      }}
+    />
+  )
 }
 
 function Text({ label, value, placeholder, onChange, tag }: {
@@ -683,20 +758,105 @@ export default function App() {
     if (wrap) setView(fitView(doc, wrap.clientWidth, wrap.clientHeight))
   }, [doc])
 
+  // --- open documents -------------------------------------------------------
+  //
+  // Several designs open at once, as in every digitizing package, because
+  // the commonest real job is "make this one look like that one" — and
+  // because copying an element between two files should not mean saving,
+  // closing, opening and finding it again.
+  //
+  // The ACTIVE document lives in `history`, so everything else in this file
+  // is unchanged. The others are parked as whole history stacks, undo and
+  // all: switching tabs that threw away what you could take back would be
+  // worse than not having tabs.
+
+  const [parked, setParked] = useState<ParkedDoc[]>([])
+  const [activeTab, setActiveTab] = useState(0)
+
+  const switchTo = (index: number) => {
+    if (index === activeTab) return
+    const target = parked[index]
+    if (!target) return
+    const here = history.snapshot()
+    setParked((ps) => ps.map((p, i) =>
+      (i === activeTab ? { ...p, state: here } : i === index ? { ...p, state: null } : p)))
+    history.install(target.state ?? initHistory(emptyDoc()))
+    setActiveTab(index)
+    setSelectedIds([])
+    setPicked([])
+    setSim(null)
+    setTimeout(fit, 0)
+  }
+
+  const newDocument = () => {
+    const here = history.snapshot()
+    const fresh = emptyDoc()
+    setParked((ps) => {
+      const next = ps.map((p, i) => (i === activeTab ? { ...p, state: here } : p))
+      next.push({ id: `d${Date.now().toString(36)}${next.length}`, state: null })
+      setActiveTab(next.length - 1)
+      return next
+    })
+    history.install(initHistory(fresh))
+    setSelectedIds([])
+    setPicked([])
+    setSim(null)
+    setNote('New design')
+    setTimeout(fit, 0)
+  }
+
+  const closeDocument = (index: number) => {
+    if (parked.length <= 1) { setNote('that is the only design open'); return }
+    const closing = index === activeTab
+      ? { ...parked[index], state: history.snapshot() }
+      : parked[index]
+    const name = closing.state?.present.name ?? doc.name
+    const hasWork = (closing.state?.present.objects.length ?? 0) > 0
+    if (hasWork && !window.confirm(
+      `Close “${name}”?\n\nIt is only autosaved while it is open. Save it first if you want to keep it.`,
+    )) return
+    const next = parked.filter((_, i) => i !== index)
+    const nextActive = activeTab > index ? activeTab - 1 : Math.min(activeTab, next.length - 1)
+    setParked(next)
+    if (closing === parked[activeTab] || index === activeTab) {
+      history.install(next[nextActive]?.state ?? initHistory(emptyDoc()))
+      setSelectedIds([])
+      setTimeout(fit, 0)
+    }
+    setActiveTab(nextActive)
+  }
+
   // --- autosave -----------------------------------------------------------
   // Explicit Save writes a file; this exists only so a refresh or a crash
-  // does not lose work in progress. Restored once, on mount, and said out loud.
+  // does not lose work in progress. EVERY open document is saved, not just
+  // the one on screen — a tab you cannot see is still unsaved work.
   useEffect(() => {
     try {
       const saved = localStorage.getItem(AUTOSAVE_KEY)
-      if (saved) {
-        const restored = deserialize(saved)
-        if (restored.objects.length) {
-          history.reset(restored)
-          setSelectedId(restored.objects[0].id)
-          setNote('Restored unsaved work from your last session')
-        }
+      if (!saved) { setParked([{ id: 'd0', state: null }]); setTimeout(fit, 0); return }
+      // Two shapes to read: the multi-document wrapper, and a single
+      // serialized project from before tabs existed. An older autosave is
+      // somebody's unsaved work and must still open.
+      const first = saved.trimStart()[0]
+      let docs: Doc[] = []
+      if (first === '[') {
+        const raw = JSON.parse(saved)
+        docs = (Array.isArray(raw) ? raw : []).map((t: string) => deserialize(t))
+      } else {
+        docs = [deserialize(saved)]
       }
+      const live = docs.filter((d) => d.objects.length)
+      if (!live.length) { setParked([{ id: 'd0', state: null }]); setTimeout(fit, 0); return }
+      history.install(initHistory(live[0]))
+      setParked(live.map((d, i) => ({
+        id: `d${i}`,
+        state: i === 0 ? null : initHistory(d),
+      })))
+      setActiveTab(0)
+      setSelectedId(live[0].objects[0]?.id ?? null)
+      setNote(live.length > 1
+        ? `Restored ${live.length} designs from your last session`
+        : 'Restored unsaved work from your last session')
     } catch (e) {
       // NEVER destroy an autosave because we could not read it. It is by
       // definition the only copy of unsaved work, and the commonest reason
@@ -711,6 +871,7 @@ export default function App() {
       } catch {
         // Nothing more we can do; leave it where it is.
       }
+      setParked([{ id: 'd0', state: null }])
       setNote(
         `Could not restore your last session (${(e as Error).message}). ` +
           'It has been kept aside, not deleted.',
@@ -723,7 +884,9 @@ export default function App() {
   useEffect(() => {
     const t = setTimeout(() => {
       try {
-        if (doc.objects.length) localStorage.setItem(AUTOSAVE_KEY, serialize(doc))
+        const all = parked.map((p, i) => (i === activeTab ? doc : p.state?.present))
+          .filter((d): d is Doc => !!d && d.objects.length > 0)
+        if (all.length) localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(all.map((d) => serialize(d))))
         else localStorage.removeItem(AUTOSAVE_KEY)
       } catch {
         // Out of quota. Clear the slot rather than leave a smaller, OLDER
@@ -733,7 +896,8 @@ export default function App() {
       }
     }, 600)
     return () => clearTimeout(t)
-  }, [doc])
+  }, [doc, parked, activeTab])
+
 
   // --- document edits -----------------------------------------------------
   // `tag` groups rapid edits to the SAME field into one undo step — typing
@@ -907,6 +1071,20 @@ export default function App() {
   /** Which inspector tab is showing. */
   const [inspector, setInspector] = useState<'colour' | 'object' | 'design'>('object')
   /**
+   * Which unit the numbers are written in.
+   *
+   * Remembered across sessions: a shop works in one or the other, and being
+   * asked again every morning is its own small insult.
+   */
+  const [unit, setUnit] = useState<Unit>(() => {
+    try { return window.localStorage.getItem(UNIT_KEY) === 'mm' ? 'mm' : 'inch' } catch { return 'inch' }
+  })
+  useEffect(() => {
+    try { window.localStorage.setItem(UNIT_KEY, unit) } catch { /* private mode */ }
+  }, [unit])
+  const [lockAspect, setLockAspect] = useState(true)
+  const [turnDeg, setTurnDeg] = useState(90)
+  /**
    * The whole design's extent, so every thumbnail shares one frame.
    *
    * From the ARTWORK rather than the stitches: the tree has to be usable
@@ -1023,6 +1201,99 @@ export default function App() {
       })
     }
     setShowProblems(false)
+  }
+
+  // --- the numeric transform ------------------------------------------------
+  //
+  // Dragging a handle is how you place something. TYPING is how you make it
+  // exactly three inches wide, because that is what the customer asked for
+  // and what the quote says.
+  //
+  // Every one of these goes through mapObjects, so paths, nodes, angle
+  // guides and the entry/exit markers all move together. Anything that
+  // transformed only `paths` would leave the editable outline behind and
+  // resurrect the old shape on the next flatten.
+
+  /**
+   * Resize the selection, anchored at its CENTRE.
+   *
+   * The centre and not a corner, because the Centre fields beside this one
+   * are the position: anchoring at a corner would make a resize move the
+   * thing whose position you had just set, and the numbers would chase each
+   * other round the bar.
+   */
+  const resizeSelection = (wMm: number | null, hMm: number | null) => {
+    const from = selBox
+    if (!from || !selectedObjs.length) return
+    const w0 = Math.max(1e-6, from.maxX - from.minX)
+    const h0 = Math.max(1e-6, from.maxY - from.minY)
+    let w = wMm ?? w0
+    let h = hMm ?? h0
+    if (lockAspect) {
+      if (wMm !== null) h = h0 * (w / w0)
+      else if (hMm !== null) w = w0 * (h / h0)
+    }
+    w = Math.max(MIN_SIZE_MM, w)
+    h = Math.max(MIN_SIZE_MM, h)
+    const cx = (from.minX + from.maxX) / 2
+    const cy = (from.minY + from.maxY) / 2
+    const sx = w / w0, sy = h / h0
+    mapObjects(selectedObjs.map((o) => o.id), () => (p) => ({
+      x: cx + (p.x - cx) * sx,
+      y: cy + (p.y - cy) * sy,
+    }))
+    setNote(`${formatLength(w, unit)} × ${formatLength(h, unit)}`)
+  }
+
+  /**
+   * Scale by a factor.
+   *
+   * The field always reads 100% afterwards and that is not a bug: the new
+   * size IS the size. A percentage that accumulated would have to remember
+   * an original nobody kept, and would disagree with the width field the
+   * moment either was edited.
+   */
+  const scaleSelection = (k: number) => {
+    const from = selBox
+    if (!from || !selectedObjs.length || !(k > 0) || k === 1) return
+    const cx = (from.minX + from.maxX) / 2
+    const cy = (from.minY + from.maxY) / 2
+    mapObjects(selectedObjs.map((o) => o.id), () => (p) => ({
+      x: cx + (p.x - cx) * k,
+      y: cy + (p.y - cy) * k,
+    }))
+    setNote(`scaled to ${(k * 100).toFixed(0)}%`)
+  }
+
+  /**
+   * Turn the selection by an angle.
+   *
+   * A TURN, not a setting, and the label says so. Rotation is applied to the
+   * points themselves — an object does not carry an angle it could be set
+   * to — so a field claiming to show "the rotation" would be inventing a
+   * number the geometry does not have.
+   */
+  const turnSelection = (deg: number) => {
+    const from = selBox
+    if (!from || !selectedObjs.length || !deg) return
+    const c = { x: (from.minX + from.maxX) / 2, y: (from.minY + from.maxY) / 2 }
+    const rad = (deg * Math.PI) / 180
+    const cos = Math.cos(rad), sin = Math.sin(rad)
+    mapObjects(selectedObjs.map((o) => o.id), () => (p) => ({
+      x: c.x + (p.x - c.x) * cos - (p.y - c.y) * sin,
+      y: c.y + (p.x - c.x) * sin + (p.y - c.y) * cos,
+    }))
+    setNote(`turned ${deg}°`)
+  }
+
+  /** Put the selection's centre at a position, measured from the hoop's. */
+  const moveSelectionTo = (x: number | null, y: number | null) => {
+    const from = selBox
+    if (!from || !selectedObjs.length) return
+    const dx = x === null ? 0 : x - (from.minX + from.maxX) / 2
+    const dy = y === null ? 0 : y - (from.minY + from.maxY) / 2
+    if (!dx && !dy) return
+    mapObjects(selectedObjs.map((o) => o.id), () => (p) => ({ x: p.x + dx, y: p.y + dy }))
   }
 
   const applyPreset = (p: StylePreset) => {
@@ -2698,6 +2969,87 @@ export default function App() {
           </div>
         </div>
 
+        {/* Open designs. The commonest real job is "make this one look like
+            that one", and copying between two files should not mean saving,
+            closing, opening and finding it again. */}
+        <div className="doctabs">
+          {parked.map((p, i) => {
+            const d = i === activeTab ? doc : p.state?.present
+            const name = d?.name || 'untitled'
+            const empty = !d || d.objects.length === 0
+            return (
+              <div key={p.id} className={`doctab${i === activeTab ? ' on' : ''}`}
+                title={empty ? `${name} — empty` : `${name} — ${d.objects.length} objects`}
+                onClick={() => switchTo(i)}>
+                <span className="dt-name">{empty ? name : `* ${name}`}</span>
+                {parked.length > 1 && (
+                  <button className="dt-x" title="Close this design"
+                    onClick={(e) => { e.stopPropagation(); closeDocument(i) }}>×</button>
+                )}
+              </div>
+            )
+          })}
+          <button className="dt-new" title="Start another design" onClick={newDocument}>+</button>
+          {/* Renaming lives here because the name is a property of the
+              DOCUMENT, and the tab is the only place a document is visible
+              as a whole. */}
+          <input className="dt-rename" value={doc.name}
+            title="Name this design — it becomes the file name on export"
+            onChange={(e) => setDoc((d) => ({ ...d, name: e.target.value }), 'doc.name')} />
+        </div>
+
+        {/* The numeric transform bar.
+            Dragging a handle is how you place something; TYPING is how you
+            make it exactly 3 inches wide because that is what the customer
+            asked for and what the quote says. Both, always. */}
+        <div className="xform">
+          <div className="group tight">
+            <label>Units</label>
+            {(['mm', 'inch'] as const).map((u) => (
+              <button key={u} className={unit === u ? 'primary' : undefined}
+                onClick={() => setUnit(u)}>{u === 'mm' ? 'mm' : 'inch'}</button>
+            ))}
+          </div>
+          <div className="group tight">
+            <label>Size</label>
+            <XField
+              value={selBox ? selBox.maxX - selBox.minX : null} unit={unit}
+              title="Width of the selection. Type a size — 3, 3 1/2, or 76mm."
+              onCommit={(v) => resizeSelection(v, null)} />
+            <button className={lockAspect ? 'primary' : undefined}
+              title={lockAspect
+                ? 'Proportions locked — the other side follows'
+                : 'Proportions free — each side is set on its own'}
+              onClick={() => setLockAspect((v) => !v)}>{lockAspect ? '🔒' : '🔓'}</button>
+            <XField
+              value={selBox ? selBox.maxY - selBox.minY : null} unit={unit}
+              title="Height of the selection."
+              onCommit={(v) => resizeSelection(null, v)} />
+            <ScaleField onCommit={(pct) => scaleSelection(pct / 100)} />
+          </div>
+          <div className="group tight">
+            <label title="Turns the selection by this much. The geometry does not remember an angle, so this is a turn, not a setting.">Turn</label>
+            <input
+              type="number" step={15} value={turnDeg} style={{ width: 62 }}
+              disabled={!selBox}
+              onChange={(e) => setTurnDeg(Number(e.target.value))} />
+            <button disabled={!selBox || !turnDeg} onClick={() => turnSelection(turnDeg)}>°</button>
+          </div>
+          <div className="group tight">
+            <label title="Where the middle of the selection sits, measured from the middle of the hoop">Centre</label>
+            <XField
+              value={selBox ? (selBox.minX + selBox.maxX) / 2 : null} unit={unit} signed
+              title="Across — negative is left of the hoop's middle."
+              onCommit={(v) => moveSelectionTo(v, null)} />
+            <XField
+              value={selBox ? (selBox.minY + selBox.maxY) / 2 : null} unit={unit} signed
+              title="Down — negative is above the hoop's middle."
+              onCommit={(v) => moveSelectionTo(null, v)} />
+            <button disabled={!selBox} title="Put the selection in the middle of the hoop"
+              onClick={() => { moveSelectionTo(0, null); moveSelectionTo(null, 0) }}>centre</button>
+          </div>
+        </div>
+
         {/* The palette. Pressed constantly, so it stays out and stays put. */}
         <div className="palette">
           <div className="group">
@@ -3655,15 +4007,15 @@ export default function App() {
             order they ask for them: will it fit, how big is the thing I
             have selected, how long will it run, and how many times do I
             re-thread. */}
-        <span><b>Hoop</b> {doc.hoop.name} — {inchPair(doc.hoop.widthMm, doc.hoop.heightMm)}</span>
+        <span><b>Hoop</b> {doc.hoop.name} — {sizePair(doc.hoop.widthMm, doc.hoop.heightMm)}</span>
         {selBox && (
           <span>
-            <b>Selected</b> {inchPair(selBox.maxX - selBox.minX, selBox.maxY - selBox.minY)}
+            <b>Selected</b> {sizePair(selBox.maxX - selBox.minX, selBox.maxY - selBox.minY)}
           </span>
         )}
         {pb && (
           <span>
-            <b>Design</b> {inchPair(pb.widthMm, pb.heightMm)}
+            <b>Design</b> {sizePair(pb.widthMm, pb.heightMm)}
           </span>
         )}
         <span><b>Stitches</b> {counts.stitches.toLocaleString()}</span>

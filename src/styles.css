@@ -77,6 +77,63 @@ body {
   flex-wrap: wrap;
 }
 
+/* Open designs. A tab is a whole document, so it carries the name and the
+   only place to rename it. */
+.doctabs { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+.doctab {
+  display: flex; align-items: center; gap: 4px;
+  padding: 3px 6px 3px 9px;
+  border: 1px solid var(--line);
+  border-bottom-color: transparent;
+  border-radius: 6px 6px 0 0;
+  background: var(--panel-2);
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  max-width: 190px;
+}
+.doctab:hover { color: var(--ink); }
+.doctab.on { background: var(--panel); color: var(--ink); border-color: var(--accent); }
+.dt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dt-x {
+  background: none; border: 0; padding: 0 2px;
+  color: inherit; opacity: 0.5; font-size: 13px; line-height: 1;
+}
+.dt-x:hover { opacity: 1; }
+.dt-new { padding: 2px 9px; font-size: 13px; line-height: 1.2; }
+.dt-rename {
+  margin-left: 10px;
+  width: 190px;
+  padding: 3px 7px;
+  font-size: 12px;
+}
+
+/* The numeric transform. Dragging a handle places a thing; typing is how
+   you make it exactly three inches wide. */
+.xform {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding-top: 1px;
+}
+.xform .group.tight > label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.xform button { padding: 3px 7px; font-size: 12px; }
+.xf {
+  width: 62px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.xf:disabled { opacity: 0.4; }
+
 /* A pair of plain buttons sitting in the menu bar — Undo/Redo, Fit — with no
    uppercase caption, because at this size the caption would be most of it. */
 .group.tight { gap: 4px; padding-right: 10px; }

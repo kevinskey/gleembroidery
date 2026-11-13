@@ -31,6 +31,7 @@ import {
   colourName, needleKey, reorder, runBlocks, threadChanges, unassignedBlocks,
 } from '../src/runview'
 import { classifyProblems, nextStep, summarise } from '../src/problems'
+import { formatField, parseLength, toInchFraction } from '../src/units'
 import {
   BROTHER_THREADS, colourDistance, nearestMachineThread, nearestSpools, newSpool,
   parseRack, serializeRack, spoolLabel,
@@ -4180,6 +4181,62 @@ console.log('\n# the thread rack')
       'a blue is nearer another blue than it is to a brown')
     ok(colourDistance('#ff0000', 'nonsense') === Infinity,
       'an unreadable colour is infinitely far from anything')
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# units')
+{
+  // --- inches as a tape measure reads them
+  {
+    ok(toInchFraction(25.4) === '1"', 'a whole inch', toInchFraction(25.4))
+    ok(toInchFraction(0) === '0"', 'nothing')
+    ok(toInchFraction(12.7) === '1/2"', 'a half, reduced from 8/16', toInchFraction(12.7))
+    ok(toInchFraction(61.9) === '2 7/16"', 'a mixed number', toInchFraction(61.9))
+    ok(toInchFraction(-7.94) === '-5/16"', 'and a negative one', toInchFraction(-7.94))
+    // Rounding up through a whole inch must carry, not print 2 16/16.
+    ok(toInchFraction(25.4 * 1.999) === '2"', 'a hair under 2 inches rounds to 2',
+      toInchFraction(25.4 * 1.999))
+  }
+
+  // --- the parser takes what people type
+  {
+    const inch = (t: string) => parseLength(t, 'inch')
+    ok(Math.abs(inch('1')! - 25.4) < 1e-9, 'a bare number in the showing unit')
+    ok(Math.abs(inch('2 7/16')! - 61.9125) < 1e-6, 'a mixed number', `${inch('2 7/16')}`)
+    ok(Math.abs(inch('2-7/16')! - 61.9125) < 1e-6, 'written with a hyphen')
+    ok(Math.abs(inch('7/16')! - 11.1125) < 1e-6, 'a bare fraction')
+    ok(Math.abs(inch('2.4375')! - 61.9125) < 1e-6, 'a decimal')
+    ok(Math.abs(inch('-5/16')! + 7.9375) < 1e-6, 'and a negative')
+    // An explicit unit WINS. Somebody typing 60mm into an inch field means
+    // 60 mm and must not get 1524.
+    ok(Math.abs(inch('60mm')! - 60) < 1e-9, 'an explicit mm overrides the showing unit',
+      `${inch('60mm')}`)
+    ok(Math.abs(parseLength('2"', 'mm')! - 50.8) < 1e-9, 'and an explicit inch does too')
+  }
+
+  // --- nonsense is REFUSED, not guessed at
+  {
+    ok(parseLength('', 'mm') === null, 'empty is nothing')
+    ok(parseLength('abc', 'mm') === null, 'and so is a word')
+    ok(parseLength('1/0', 'inch') === null, 'a divide by zero is not a length')
+    ok(parseLength('2 7/', 'inch') === null, 'nor is half a fraction')
+    // The one that matters: a field that turned nonsense into 0 would
+    // resize a design to nothing.
+    ok(parseLength('3..5', 'mm') === null, 'nor a mistyped decimal')
+  }
+
+  // --- the field round-trips through itself
+  {
+    for (const mm of [0.1, 1, 12.7, 25.4, 61.9125, 100, 203.2]) {
+      for (const u of ['mm', 'inch'] as const) {
+        const back = parseLength(formatField(mm, u), u)
+        ok(back !== null && Math.abs(back - mm) < (u === 'inch' ? 1.6 : 0.06),
+          `${mm} mm survives a round trip through the ${u} field`,
+          `${formatField(mm, u)} -> ${back}`)
+      }
+    }
   }
 }
 
