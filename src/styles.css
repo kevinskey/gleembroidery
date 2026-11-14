@@ -797,3 +797,30 @@ legend { font-size: 11px; color: var(--muted); text-transform: uppercase; letter
   padding: 1px 4px;
   flex: none;
 }
+
+/* A refused action. The only message that explains why the canvas did NOT
+   change, so it is the one message that cannot be allowed to read as
+   decoration — it takes its own row and keeps the warning colour. */
+.status .refused {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-basis: 100%;
+  white-space: normal;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+.status .refused .link { color: var(--warn); font-weight: 600; }
+.status .refused .dismiss {
+  margin-left: auto;
+  padding: 0 4px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}

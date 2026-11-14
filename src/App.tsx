@@ -23,7 +23,7 @@ import { writeExp } from './exp'
 import { writeJef } from './jef'
 import { FILL_STYLE_DEFAULTS, MIN_MOTIF_MM, MOTIFS } from './decorative'
 import {
-  BOOL_LABEL, BOOL_OPS, booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap,
+  BOOL_LABEL, BOOL_OPS, booleanOp, cleanNodes, hasArea, joinShapes, offsetOp, removeOverlap,
   simplifyPaths, splitShapeAt,
 } from './shapeops'
 import {
@@ -633,6 +633,21 @@ export default function App() {
   const [sim, setSim] = useState<number | null>(null)
   const [machine, setMachine] = useState<MachineProfile>(DEFAULT_MACHINE)
   const [note, setNote] = useState<string | null>(null)
+  /**
+   * An action that was REFUSED, and what to do instead.
+   *
+   * Separate from `note` and much louder, because the two are read in
+   * opposite situations. A note reports something that happened; a refusal
+   * reports that nothing did — and the user is looking at an unchanged canvas
+   * wondering whether the click registered. A quiet line at the bottom of the
+   * window is not an answer to that, and "it didn't work" is what comes back.
+   *
+   * It carries the way forward where there is one: a boolean refused because
+   * its outlines are open is one click from Join ends, and the refusal is the
+   * moment to say so.
+   */
+  const [refusal, setRefusal] = useState<
+    { text: string; action?: { label: string; run: () => void } } | null>(null)
   const [opts, setOpts] = useState<Omit<RenderOptions, 'upTo' | 'selectedId' | 'reference' | 'draft' | 'selectionBox' | 'nodeEdit' | 'rotateOffsetPx' | 'marquee' | 'backdrop' | 'letterHandles' | 'endpoints' | 'density' | 'picked'>>({
     showGrid: true, showArt: true, showStitches: true, showPoints: false, showJumps: true,
   })
@@ -834,6 +849,11 @@ export default function App() {
   const setShapes = useCallback((id: string, shapes: Shape[], tag?: string) => {
     patch(id, (o) => ({ ...o, shapes, paths: shapesToPaths(shapes) }), tag)
   }, [])
+
+  // A refusal is about ONE attempt on ONE selection. Once the selection
+  // changes it is describing something the user is no longer looking at, and
+  // a stale warning is worse than none.
+  useEffect(() => { setRefusal(null) }, [selectedIds])
 
   // --- rendering ----------------------------------------------------------
   const draw = useCallback(() => {
@@ -1605,7 +1625,25 @@ export default function App() {
 
   const runBoolean = (op: BoolOp) => {
     const r = booleanOp(op, selectedObjs.map((o) => o.paths))
-    if (r.errors.length) { setNote(r.errors[0]); return }
+    if (r.errors.length) {
+      // A boolean needs areas, and a satin column is a LINE — so two columns
+      // that together trace one border refuse, correctly, and the user is
+      // left looking at an unchanged canvas. What they almost always meant is
+      // to make the two into one outline, which is Join ends. Offered only
+      // when it would actually do something, because a button that then says
+      // "no ends close enough to join" is a second dead end.
+      const openOnes = selectedObjs.filter((o) => !hasArea(o.paths))
+      const joinable = openOnes.length > 0
+        && joinShapes(selectedObjs.flatMap((o) => shapesOf(o))).joined > 0
+      setRefusal({
+        text: r.errors[0],
+        ...(joinable
+          ? { action: { label: 'Join ends instead', run: runJoin } }
+          : {}),
+      })
+      return
+    }
+    setRefusal(null)
     replaceSelection(r.paths, BOOL_LABEL[op].toLowerCase())
     setNote(`${BOOL_LABEL[op]}d ${selectedObjs.length} objects`)
   }
@@ -1643,7 +1681,13 @@ export default function App() {
       if (r.errors.length) bad.push(`${o.name}: ${r.errors[0]}`)
       else next.set(o.id, r.paths)
     }
-    if (!next.size) { setNote(bad[0] ?? 'nothing to offset'); return }
+    if (!next.size) {
+      // Same shape of failure as a boolean, so it gets the same treatment:
+      // nothing moved, and the reason belongs where it cannot be missed.
+      setRefusal({ text: bad[0] ?? 'Nothing to offset.' })
+      return
+    }
+    setRefusal(null)
     setDoc((d) => ({
       ...d,
       objects: d.objects.map((o) =>
@@ -1693,7 +1737,14 @@ export default function App() {
     // land as separate OBJECTS.
     const all = selectedObjs.flatMap((o) => shapesOf(o))
     const j = joinShapes(all)
-    if (!j.joined) { setNote('no ends close enough to join'); return }
+    if (!j.joined) {
+      setRefusal({
+        text: 'No ends are close enough to join — move the outlines until their '
+          + 'ends meet, or drag the end nodes together with the Nodes tool.',
+      })
+      return
+    }
+    setRefusal(null)
     replaceSelection(shapesToPaths(j.shapes), 'joined')
     // Put the joined shapes back so the result stays node-editable — the only
     // operation here whose output IS the same nodes that went in.
@@ -4686,6 +4737,25 @@ export default function App() {
         </span>
         {ms > 0 && <span className="dim">{ms.toFixed(0)} ms{inline ? ' inline' : ''}</span>}
         {note && <span className="note">{note}</span>}
+        {/* Loud on purpose: this is the only message that explains why the
+            canvas did not change. */}
+        {refusal && (
+          <span className="refused">
+            ⚠ {refusal.text}
+            {refusal.action && (
+              <>
+                {' '}
+                <button className="link" onClick={() => {
+                  const run = refusal.action!.run
+                  setRefusal(null)
+                  run()
+                }}>{refusal.action.label}</button>
+              </>
+            )}
+            <button className="dismiss" title="Dismiss"
+              onClick={() => setRefusal(null)}>×</button>
+          </span>
+        )}
         {/* The freeze banner. A stale plan is a DECISION the user has to
             make — the spec's requirement is that hand edits are never lost
             silently, so nothing resolves this on their behalf. */}
