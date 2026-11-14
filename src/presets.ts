@@ -218,6 +218,10 @@ export function parsePresets(text: string | null): StylePreset[] {
     const o = v as Record<string, unknown>
     if (typeof o.id !== 'string' || typeof o.name !== 'string') continue
     const d = base()
+    // Compensation may legitimately be absent from a preset, meaning the
+    // object keeps following the document. See CompDefaults.
+    const optNum = (x: unknown) =>
+      (typeof x === 'number' && Number.isFinite(x) ? x : undefined)
     const num = (x: unknown, fb: number) =>
       typeof x === 'number' && isFinite(x) ? x : fb
     const sub = (k: string) => (o[k] && typeof o[k] === 'object' ? o[k] as Record<string, unknown> : {})
@@ -238,7 +242,10 @@ export function parsePresets(text: string | null): StylePreset[] {
       satin: {
         width: num(sa.width, d.satin.width),
         density: num(sa.density, d.satin.density),
-        pullComp: num(sa.pullComp, d.satin.pullComp),
+        // A preset may legitimately say nothing about compensation, which
+        // means the object keeps following the document. See CompDefaults.
+        pullComp: optNum(sa.pullComp),
+        pushComp: optNum(sa.pushComp),
         underlay: Array.isArray(sa.underlay)
           ? (sa.underlay.filter((u) => u === 'center' || u === 'edge' || u === 'zigzag') as SatinParams['underlay'])
           : d.satin.underlay,
@@ -256,7 +263,8 @@ export function parsePresets(text: string | null): StylePreset[] {
         spacing: num(f.spacing, d.fill.spacing),
         length: num(f.length, d.fill.length),
         stagger: num(f.stagger, d.fill.stagger),
-        pullComp: num(f.pullComp, d.fill.pullComp),
+        pullComp: optNum(f.pullComp),
+        pushComp: optNum(f.pushComp),
         underlay: Array.isArray(f.underlay)
           ? (f.underlay.filter((u) => u === 'edge' || u === 'zigzag') as FillParams['underlay'])
           : d.fill.underlay,

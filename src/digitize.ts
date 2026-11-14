@@ -20,6 +20,7 @@ import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
 import { chainPaths, orderPaths, travelIsHidden } from './travel'
 import { MIN_MOTIF_MM, crossStitchFill, echoFill, motifById, motifFill, motifRun, stippleFill } from './decorative'
 import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
+import { resolveComp, withComp } from './compensate'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
 export const MAX_STITCH_MM = 10
@@ -646,7 +647,8 @@ export function digitize(doc: Doc): DigitizeResult {
       continue
     }
 
-    const stitches = orientToEntryExit(stitchObject(obj, warnings, doc.tie, floor), obj)
+    const stitches = orientToEntryExit(
+      stitchObject(withComp(obj, doc.comp), warnings, doc.tie, floor), obj)
     if (!stitches.length) continue
 
     // Merge only when the NEEDLE would not change. Keying on the screen
@@ -686,7 +688,7 @@ export function digitize(doc: Doc): DigitizeResult {
       const cover = [obj, doc.objects.find((q) => q.id === lastObjId)]
         .filter((q): q is EmbObject => !!q && q.type === 'fill')
         .flatMap((q) => {
-          const comp = Math.max(0, q.fill.pullComp)
+          const comp = resolveComp(q.fill, doc.comp, 'fill').pull
           const grown = comp > 0 ? offsetPathsChecked(q.paths, comp) : null
           return toRegions(grown && !grown.failed && grown.paths.length ? grown.paths : q.paths)
         })

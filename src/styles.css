@@ -779,3 +779,21 @@ legend { font-size: 11px; color: var(--muted); text-transform: uppercase; letter
   border: 1px solid rgba(0, 0, 0, 0.4);
   vertical-align: baseline;
 }
+
+/* A compensation field that is following the document rather than carrying
+   its own value. Dimmed so the distinction is visible at a glance — the
+   number is real, it just belongs to the design. */
+.row input.inherited {
+  opacity: 0.68;
+  font-style: italic;
+}
+.row .tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 1px 4px;
+  flex: none;
+}

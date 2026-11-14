@@ -16,6 +16,7 @@ import type { FillParams, Pt } from './model'
 import type { Stitch } from './stitches'
 import { dist, pointInPoly, resample, rotatePt, scanlineSpans } from './geometry'
 import { offsetPathsChecked } from './offset'
+import { directionalInset } from './compensate'
 
 /** Even-odd containment across every ring, so holes read as outside. */
 export function insideRegion(region: Pt[][], p: Pt): boolean {
@@ -70,13 +71,29 @@ export function tatamiFill(region: Pt[][], p: FillParams, start?: Pt, report?: R
   // Pull compensation: the thread drags the fabric in, so the stitched shape
   // ends up smaller than the outline. Grow the region a touch to land on it.
   let work = region
-  if (p.pullComp > 0) {
-    const grown = offsetPathsChecked(region, p.pullComp)
+  const pull = Math.max(0, p.pullComp ?? 0)
+  if (pull > 0) {
+    const grown = offsetPathsChecked(region, pull)
     if (grown.failed) {
       // Never silently sew an uncompensated shape: it comes out undersized.
-      report?.(`pull compensation could not be computed — filling the raw outline, so the stitched shape will run about ${(p.pullComp * 2).toFixed(2)} mm small`)
+      report?.(`pull compensation could not be computed — filling the raw outline, so the stitched shape will run about ${(pull * 2).toFixed(2)} mm small`)
     } else if (grown.paths.length) {
       work = grown.paths
+    }
+  }
+
+  // Push compensation, AFTER pull and in one direction only: the fabric
+  // squeezed along the rows bulges out across them, so the region is taken
+  // back in where its outline faces that way. Applying it to the already
+  // grown region is what makes the two corrections compose — they act at
+  // right angles, so neither undoes the other.
+  const push = Math.max(0, p.pushComp ?? 0)
+  if (push > 0) {
+    const shrunk = directionalInset(work, push, p.angle)
+    if (shrunk.failed) {
+      report?.(`push compensation could not be computed — the shape is too small for ${push.toFixed(2)} mm, so it will sew about ${(push * 2).toFixed(2)} mm long across the rows`)
+    } else {
+      work = shrunk.paths
     }
   }
 

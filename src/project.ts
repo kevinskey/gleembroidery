@@ -16,6 +16,7 @@
 // version it understands, and anything newer is REFUSED with a message rather
 // than partially read.
 
+import type { CompDefaults } from './model'
 import type { PathNode, Shape } from './nodes'
 import type { AngleGuide } from './satin'
 import { DEFAULT_MOTIF, MOTIF_IDS } from './decorative'
@@ -28,6 +29,7 @@ import {
   DEFAULT_PUFF,
   DEFAULT_RUN,
   DEFAULT_SATIN,
+  DEFAULT_COMP,
   DEFAULT_TIE,
   FILL_STYLES,
   HOOPS,
@@ -204,6 +206,7 @@ export function serialize(doc: Doc, pretty = false): string {
       // it is written only when there is one.
       ...(doc.backdrop ? { backdrop: { ...doc.backdrop, origin: [doc.backdrop.origin.x, doc.backdrop.origin.y] } } : {}),
       ...(doc.fabric ? { fabric: doc.fabric } : {}),
+      comp: { ...doc.comp },
       objects: doc.objects.map(objectOut),
       // Manual stitch edits ARE the document once they exist. A project that
       // reopened without them would lose work with no way to get it back,
@@ -238,6 +241,36 @@ const isObj = (v: unknown): v is Record<string, unknown> =>
 
 function num(v: unknown, fallback: number): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : fallback
+}
+
+/**
+ * A number that may legitimately be absent.
+ *
+ * Compensation uses absence to mean "follow the document", so it cannot go
+ * through num(): substituting a default here would bake today's number into
+ * the file and the object would stop following the document forever — and
+ * silently, on the first save.
+ */
+function optNum(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+/**
+ * The document's compensation, with a floor of zero.
+ *
+ * A file written before this existed has no `comp` at all, and the right
+ * answer there is the standard default — every object in such a file carries
+ * its own explicit values anyway, so the document value it inherits is only
+ * what NEW objects will pick up.
+ */
+function compIn(v: unknown): CompDefaults {
+  const d = DEFAULT_COMP()
+  if (!isObj(v)) return d
+  return {
+    satinPull: Math.max(0, num(v.satinPull, d.satinPull)),
+    fillPull: Math.max(0, num(v.fillPull, d.fillPull)),
+    push: Math.max(0, num(v.push, d.push)),
+  }
 }
 
 function str(v: unknown, fallback: string): string {
@@ -582,7 +615,8 @@ function objectIn(v: unknown, index: number): EmbObject | null {
     satin: {
       width: num(satin.width, dSatin.width),
       density: num(satin.density, dSatin.density),
-      pullComp: num(satin.pullComp, dSatin.pullComp),
+      pullComp: optNum(satin.pullComp),
+      pushComp: optNum(satin.pushComp),
       underlay: underlayIn(satin.underlay, SATIN_UNDERLAY_ORDER, LEGACY_SATIN_UNDERLAY, dSatin.underlay),
       lean: num(satin.lean, dSatin.lean),
       split: {
@@ -597,7 +631,8 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       spacing: num(fill.spacing, dFill.spacing),
       length: num(fill.length, dFill.length),
       stagger: num(fill.stagger, dFill.stagger),
-      pullComp: num(fill.pullComp, dFill.pullComp),
+      pullComp: optNum(fill.pullComp),
+      pushComp: optNum(fill.pushComp),
       underlay: underlayIn(fill.underlay, FILL_UNDERLAY_ORDER, LEGACY_FILL_UNDERLAY, dFill.underlay),
       border: {
         enabled: border.enabled === true,
@@ -660,6 +695,7 @@ export function deserialize(text: string): Doc {
     hoop: hoopIn(payload.hoop),
     spacing: oneOf(payload.spacing, SPACINGS, 'TJ500'),
     tie: tieIn(payload.tie),
+    comp: compIn(payload.comp),
     groups: groupsIn(payload.groups),
     ...(backdropIn(payload.backdrop) ? { backdrop: backdropIn(payload.backdrop)! } : {}),
     ...(typeof payload.fabric === 'string' && /^#[0-9a-fA-F]{6}$/.test(payload.fabric)
@@ -720,6 +756,11 @@ export function docSignature(doc: Doc): string {
   }
   mixStr(JSON.stringify(hoopOut(doc.hoop)))
   mixStr(JSON.stringify(doc.tie))
+  // Compensation is a DOCUMENT-level input to the geometry: every object
+  // that has not overridden it reads these numbers, so changing them has to
+  // regenerate the plan. Leaving it out would make the field appear dead —
+  // exactly the bug class that made bar lean and angle guides do nothing.
+  mixStr(JSON.stringify(doc.comp))
   mixStr(JSON.stringify(doc.groups))
   for (const o of doc.objects) {
     // Settings: hashed wholesale from the save format, so a new one cannot be

@@ -38,6 +38,7 @@ import {
 } from '../src/threads'
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { EDGE_PX, EDGE_SPEED, edgeVelocity, panStep } from '../src/autoscroll'
+import { directionalInset, hasOwnComp, resolveComp, trimEnds, withComp } from '../src/compensate'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskColour, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines, textOnPath } from '../src/text'
 import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton } from '../src/skeleton'
@@ -4458,6 +4459,175 @@ console.log('\n# auto-scroll at the canvas edge')
     // Frame time is honoured, so a dropped frame does not lose ground.
     const long = panStep(v, 1 / 15, 20)
     ok(Math.abs(long.dx - near.dx * 4) < 1e-9, 'a long frame travels proportionally further')
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n# push and pull compensation')
+// ---------------------------------------------------------------------------
+{
+  const doc = { satinPull: 0.2, fillPull: 0.15, push: 0.3 }
+
+  // --- what an object follows
+  {
+    ok(resolveComp(undefined, doc, 'satin').pull === 0.2, 'an object with no value of its own follows the document')
+    ok(resolveComp(undefined, doc, 'fill').pull === 0.15,
+      'and satin and fill follow DIFFERENT numbers, because they are different quantities')
+    ok(resolveComp({ pullComp: 0.5 }, doc, 'satin').pull === 0.5, 'its own value wins when it has one')
+    // Zero is a VALUE, not an absence: an object deliberately set to no
+    // compensation must not quietly inherit the document's.
+    ok(resolveComp({ pullComp: 0 }, doc, 'satin').pull === 0, 'and zero is a value, not an absence')
+    ok(resolveComp({ pullComp: -1 }, doc, 'satin').pull === 0, 'a negative stored value is floored at zero')
+    ok(hasOwnComp({ pushComp: 0 }) && !hasOwnComp({}) && !hasOwnComp(undefined),
+      'an override is detected by presence, not by value')
+  }
+
+  // --- resolving at the boundary
+  {
+    const o = newObject({ type: 'satin', paths: [[{ x: 0, y: 0 }, { x: 10, y: 0 }]] })
+    ok(o.satin.pullComp === undefined, 'a NEW object carries no compensation of its own')
+    const r = withComp(o, doc)
+    ok(r.satin.pullComp === 0.2 && r.satin.pushComp === 0.3, 'and gets concrete numbers at the engine boundary',
+      `${r.satin.pullComp}/${r.satin.pushComp}`)
+    ok(r.fill.pullComp === 0.15, 'the fill side too, from its own default', `${r.fill.pullComp}`)
+    ok(o.satin.pullComp === undefined, 'without mutating the document object')
+  }
+
+  // --- the document value reaches the stitches
+  {
+    const mk = (push: number) => {
+      const d = emptyDoc()
+      d.comp = { satinPull: 0.2, fillPull: 0.15, push }
+      d.objects = [newObject({
+        name: 'bar', color: '#000000', type: 'satin',
+        paths: [[{ x: 0, y: 0 }, { x: 40, y: 0 }]],
+      })]
+      return digitize(d).plan
+    }
+    const plain = planBounds(mk(0))!
+    const pushed = planBounds(mk(0.5))!
+    // A 40 mm column with 0.5 mm off each end sews 1 mm shorter.
+    const shrunk = plain.widthMm - pushed.widthMm
+    ok(Math.abs(shrunk - 1) < 0.15, 'the document push shortens a satin column by it at EACH end',
+      `${shrunk.toFixed(2)} mm shorter`)
+    ok(Math.abs(plain.heightMm - pushed.heightMm) < 0.05,
+      'and does not touch the width, which is pull\'s business')
+    // The signature has to move, or the field is dead: this is the exact bug
+    // class that made bar lean and angle guides do nothing.
+    const a = emptyDoc(), b = emptyDoc()
+    b.comp = { ...b.comp, push: 0.4 }
+    ok(docSignature(a) !== docSignature(b), 'changing the document value regenerates the plan')
+  }
+
+  // --- trimming a column
+  {
+    const line = [{ x: 0, y: 0 }, { x: 10, y: 0 }]
+    const t = trimEnds(line, 1)
+    ok(Math.abs(t[0].x - 1) < 1e-9 && Math.abs(t[t.length - 1].x - 9) < 1e-9,
+      'trimEnds takes the length off BOTH ends', `${t[0].x}..${t[t.length - 1].x}`)
+    // Across a vertex, not just within the first segment.
+    const bent = [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 10, y: 0 }]
+    const tb = trimEnds(bent, 3)
+    ok(Math.abs(tb[0].x - 3) < 1e-9, 'walking past a vertex to find the cut', `${tb[0].x}`)
+    ok(tb.some((q) => Math.abs(q.x - 2) < 1e-9) === false
+      || tb.filter((q) => q.x > 3 - 1e-9 && q.x < 7 + 1e-9).length >= 1,
+      'and the points between the cuts are kept as they were')
+    // A shape too small for its own correction keeps its length: a vanished
+    // object is the worst outcome, because nothing on screen explains it.
+    const tiny = trimEnds([{ x: 0, y: 0 }, { x: 1, y: 0 }], 2)
+    ok(tiny.length === 2 && Math.abs(tiny[1].x - 1) < 1e-9,
+      'a column shorter than twice its push is left alone rather than erased')
+    ok(trimEnds(line, 0).length === 2, 'zero push changes nothing')
+  }
+
+  // --- the fill inset is DIRECTIONAL
+  {
+    // A 40x40 square, rows running along X (angle 0). Push acts across the
+    // rows, so the square must lose height and keep its width.
+    const sq = [[{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 40 }, { x: 0, y: 40 }]]
+    const r = directionalInset(sq, 1, 0)
+    ok(!r.failed, 'a square insets')
+    const xs = r.paths[0].map((q) => q.x), ys = r.paths[0].map((q) => q.y)
+    const w = Math.max(...xs) - Math.min(...xs), h = Math.max(...ys) - Math.min(...ys)
+    ok(Math.abs(h - 38) < 0.1, 'it comes in by the amount ACROSS the rows', `${h.toFixed(2)} mm tall`)
+    ok(Math.abs(w - 40) < 0.1, 'and not at all ALONG them — those edges are pulled, not pushed',
+      `${w.toFixed(2)} mm wide`)
+
+    // Rotate the rows and the correction rotates with them.
+    const r90 = directionalInset(sq, 1, 90)
+    const xs9 = r90.paths[0].map((q) => q.x), ys9 = r90.paths[0].map((q) => q.y)
+    ok(Math.abs((Math.max(...xs9) - Math.min(...xs9)) - 38) < 0.1
+      && Math.abs((Math.max(...ys9) - Math.min(...ys9)) - 40) < 0.1,
+      'rows at 90 degrees take it off the other axis')
+
+    // A hole opens up as the region squeezes in, the same as any inset.
+    const donut = [circle(0, 0, 18), circle(0, 0, 7)]
+    const di = directionalInset(donut, 0.5, 0)
+    const hole = di.paths[1]
+    const holeH = Math.max(...hole.map((q) => q.y)) - Math.min(...hole.map((q) => q.y))
+    ok(!di.failed && holeH > 14, 'a hole GROWS while the outline comes in', `${holeH.toFixed(2)} mm`)
+
+    // Too small for the correction: keep the shape and say so, rather than
+    // sewing nothing.
+    const speck = [[{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 0.4 }, { x: 0, y: 0.4 }]]
+    const bad = directionalInset(speck, 3, 0)
+    ok(bad.failed, 'a shape too small for its push compensation is refused, not collapsed')
+    ok(bad.paths[0].length === 4 && Math.abs(bad.paths[0][2].y - 0.4) < 1e-9,
+      'and comes back untouched so something still sews')
+    ok(directionalInset(sq, 0, 0).failed === false, 'zero push is a no-op, not a failure')
+  }
+
+  // --- push and pull compose instead of cancelling
+  {
+    // Pull grows the region all round; push takes it back in one direction.
+    // Applied together on a 40x40 square with rows along X, the result should
+    // be WIDER than drawn and SHORTER than drawn.
+    const mk = (push: number) => {
+      const d = emptyDoc()
+      d.comp = { satinPull: 0.2, fillPull: 0.4, push }
+      d.objects = [newObject({
+        name: 'sq', color: '#000000', type: 'fill',
+        paths: [[...rect(0, 0, 40, 40), { x: 0, y: 0 }]],
+      })]
+      d.objects[0].fill = { ...d.objects[0].fill, angle: 0, underlay: [] }
+      return planBounds(digitize(d).plan)!
+    }
+    // Measured against the SAME fill without push, not against the drawn
+    // size: a tatami's rows do not land exactly on the outline, so the
+    // absolute figure carries a constant that has nothing to do with
+    // compensation. The difference is the thing being tested.
+    const none = mk(0), pushed = mk(0.4)
+    ok(none.widthMm > 40, 'pull makes the fill wider than drawn', `${none.widthMm.toFixed(2)} mm`)
+    ok(Math.abs((none.heightMm - pushed.heightMm) - 0.8) < 0.05,
+      'and push then takes it back in ACROSS the rows, by the amount on each side',
+      `${(none.heightMm - pushed.heightMm).toFixed(2)} mm shorter`)
+    ok(Math.abs(none.widthMm - pushed.widthMm) < 0.05,
+      'leaving the along-the-rows size exactly as pull left it',
+      `${none.widthMm.toFixed(2)} vs ${pushed.widthMm.toFixed(2)} mm`)
+  }
+
+  // --- it survives a save, and absence survives too
+  {
+    const d = emptyDoc()
+    d.comp = { satinPull: 0.25, fillPull: 0.18, push: 0.35 }
+    d.objects = [newObject({ type: 'fill', paths: [[...rect(0, 0, 20, 20), { x: 0, y: 0 }]] })]
+    const back = deserialize(serialize(d))
+    ok(back.comp.push === 0.35 && back.comp.satinPull === 0.25 && back.comp.fillPull === 0.18,
+      'the document values survive a save')
+    // THE important one: an object that was following the document must not
+    // come back carrying a frozen copy of today's number, or it would stop
+    // following it — silently, on the first save.
+    ok(back.objects[0].fill.pullComp === undefined && back.objects[0].fill.pushComp === undefined,
+      'and an object that was following it still is')
+    d.objects[0].fill = { ...d.objects[0].fill, pushComp: 0.6 }
+    const kept = deserialize(serialize(d))
+    ok(kept.objects[0].fill.pushComp === 0.6, 'while a deliberate override is kept', `${kept.objects[0].fill.pushComp}`)
+    // A file written before any of this existed has no comp at all.
+    const legacy = JSON.parse(serialize(d))
+    delete legacy.doc.comp
+    const old = deserialize(JSON.stringify(legacy))
+    ok(old.comp.satinPull === 0.2 && old.comp.fillPull === 0.15 && old.comp.push === 0,
+      'an older file with no compensation block opens on the historical defaults')
   }
 }
 

@@ -31,6 +31,7 @@ import {
   type AlignEdge,
 } from './arrange'
 import { edgeVelocity, panStep } from './autoscroll'
+import { hasOwnComp, resolveComp } from './compensate'
 import type { BoolOp } from './boolean'
 import { close, segDist, toRegions } from './geometry'
 import { initHistory, useHistory, type HistoryState } from './history'
@@ -104,6 +105,16 @@ const AUTOSCROLL_KEY = 'gleembroidery.autoscroll.v1'
  * not moved.
  */
 interface MoveLike { clientX: number; clientY: number; shiftKey: boolean }
+
+/**
+ * Is every path a closed ring?
+ *
+ * Asked so the inspector can say when push compensation has nothing to do:
+ * push is length taken off the ends of a column, and a ring has no ends.
+ */
+const allClosed = (paths: readonly Pt[][]): boolean =>
+  paths.length > 0 && paths.every((r) =>
+    r.length > 2 && Math.hypot(r[0].x - r[r.length - 1].x, r[0].y - r[r.length - 1].y) < 1e-6)
 
 const PALETTE = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#1f2d3d']
 
@@ -343,6 +354,47 @@ function Num({ label, value, step = 0.1, min, max, onChange }: {
           if (!Number.isNaN(v)) onChange(v)
         }}
       />
+    </div>
+  )
+}
+
+/**
+ * A number that may be following the document instead of carrying its own.
+ *
+ * The distinction has to be VISIBLE, or the document default is a trap: the
+ * field would show 0.2 whether that number belongs to this object or to the
+ * design, and changing the design's value would appear to do nothing to the
+ * objects already showing it. So an inherited field says so and offers no
+ * reset; an overridden one offers the way back.
+ */
+function CompNum({ label, value, inherited, step = 0.05, min = 0, max = 2, onChange, onReset, title }: {
+  label: string
+  /** The effective value — the object's own, or the document's. */
+  value: number
+  inherited: boolean
+  step?: number; min?: number; max?: number
+  onChange: (v: number) => void
+  onReset: () => void
+  title?: string
+}) {
+  return (
+    <div className="row" title={title}>
+      <label>{label}</label>
+      <input
+        type="number" value={value} step={step} min={min} max={max}
+        className={inherited ? 'inherited' : ''}
+        onChange={(e) => {
+          const v = parseFloat(e.target.value)
+          if (!Number.isNaN(v)) onChange(v)
+        }}
+      />
+      {inherited
+        ? <span className="tag" title="Following the design's value — Design tab">design</span>
+        : (
+          <button className="link" title="Follow the design's value again" onClick={onReset}>
+            reset
+          </button>
+        )}
     </div>
   )
 }
@@ -2284,6 +2336,11 @@ export default function App() {
   }
 
   /** Is an outline half-drawn right now? */
+  // Objects carrying their own compensation rather than following the
+  // document. Shown in the Design tab because a design-wide value that some
+  // objects quietly ignore is worse than no default at all.
+  const overridden = doc.objects.filter((o) => hasOwnComp(o.satin) || hasOwnComp(o.fill))
+
   const drawing = () =>
     penNodes.current.length > 0 || polyPts.current.length > 0
     || colA.current.length > 0 || colB.current.length > 0
@@ -3774,6 +3831,58 @@ export default function App() {
           {inspector === 'design' && (
             <>
               <fieldset>
+                <legend>Push and pull compensation</legend>
+                <div className="row wide">
+                  <span className="dim">
+                    The thread pulls the fabric in along the stitch and it bulges out at
+                    right angles, so a shape sews narrow one way and long the other.
+                    These are the whole design's values — a fabric setting, not a shape
+                    one. Objects follow them unless you override one.
+                  </span>
+                </div>
+                {/* Two pull fields, not one. A satin column's value is a TOTAL
+                    added width and a fill's is PER SIDE, so a single number
+                    would mean different things to the two and could not be
+                    labelled honestly. The units are on the fields. */}
+                <Num label="Pull — satin, total width (mm)" value={doc.comp.satinPull} step={0.05} min={0} max={2}
+                  onChange={(v) => setDoc((d) => ({ ...d, comp: { ...d.comp, satinPull: Math.max(0, v) } }), 'comp.satinPull')} />
+                <Num label="Pull — fill, per side (mm)" value={doc.comp.fillPull} step={0.05} min={0} max={2}
+                  onChange={(v) => setDoc((d) => ({ ...d, comp: { ...d.comp, fillPull: Math.max(0, v) } }), 'comp.fillPull')} />
+                <Num label="Push (mm)" value={doc.comp.push} step={0.05} min={0} max={2}
+                  onChange={(v) => setDoc((d) => ({ ...d, comp: { ...d.comp, push: Math.max(0, v) } }), 'comp.push')} />
+                <div className="row wide">
+                  <span className="dim">
+                    Push shortens a satin column at each end, and takes a fill back in
+                    across its rows — the direction the fabric bulges. It starts at zero:
+                    it is a number to arrive at from a sewout, not one to assume.
+                  </span>
+                </div>
+                {overridden.length > 0 && (
+                  <div className="row wide">
+                    <span className="dim">
+                      {overridden.length} object{overridden.length === 1 ? '' : 's'} override
+                      {overridden.length === 1 ? 's' : ''} this.
+                    </span>
+                    <button className="link"
+                      title="Clear every per-object value so the whole design follows these numbers"
+                      onClick={() => {
+                        setDoc((d) => ({
+                          ...d,
+                          objects: d.objects.map((o) => ({
+                            ...o,
+                            satin: { ...o.satin, pullComp: undefined, pushComp: undefined },
+                            fill: { ...o.fill, pullComp: undefined, pushComp: undefined },
+                          })),
+                        }), 'comp.clear')
+                        setNote(`${overridden.length} object${overridden.length === 1 ? '' : 's'} now follow the design`)
+                      }}>
+                      make all follow
+                    </button>
+                  </div>
+                )}
+              </fieldset>
+
+              <fieldset>
                 <legend>Tie-in and tie-off</legend>
                 <div className="row wide">
                   <span className="dim">
@@ -4127,8 +4236,33 @@ export default function App() {
                     onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, width: v } }), 'satin.width')} />
                   <Num label="Stitch spacing (mm)" value={selected.satin.density} step={0.05} min={0.15} max={2}
                     onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, density: v } }), 'satin.density')} />
-                  <Num label="Pull compensation (mm)" value={selected.satin.pullComp} step={0.05} min={0} max={1}
-                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, pullComp: v } }), 'satin.pullComp')} />
+                  <CompNum
+                    label="Pull compensation (mm)"
+                    title="Widens the column to cover the fabric the stitch pulls in. This one is the TOTAL added width, not per side."
+                    value={resolveComp(selected.satin, doc.comp, 'satin').pull}
+                    inherited={selected.satin.pullComp === undefined}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, pullComp: v } }), 'satin.pullComp')}
+                    onReset={() => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, pullComp: undefined } }), 'satin.pullComp')} />
+                  <CompNum
+                    label="Push compensation (mm)"
+                    title="Shortens the column at each end. The bars squeeze the fabric across the column and it bulges out along the spine, so the column sews longer than it was drawn."
+                    value={resolveComp(selected.satin, doc.comp, 'satin').push}
+                    inherited={selected.satin.pushComp === undefined}
+                    onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, pushComp: v } }), 'satin.pushComp')}
+                    onReset={() => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, pushComp: undefined } }), 'satin.pushComp')} />
+                  {/* A control that silently does nothing is worse than no
+                      control. Push is length taken off the ends, and a closed
+                      column has no ends — the distortion on a ring is radial,
+                      which is what the width and pull compensation cover. */}
+                  {allClosed(selected.paths) && resolveComp(selected.satin, doc.comp, 'satin').push > 0 && (
+                    <div className="row wide">
+                      <span className="dim">
+                        This column is closed, so there are no ends to shorten — push does
+                        nothing here. On a ring the distortion is outward all round, which
+                        is what pull compensation covers.
+                      </span>
+                    </div>
+                  )}
                   <Num label="Bar lean (°)" value={selected.satin.lean} step={5} min={-70} max={70}
                     onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, lean: v } }), 'satin.lean')} />
                   <UnderlayPicker
@@ -4362,8 +4496,20 @@ export default function App() {
                       <>
                         <Num label="Stagger (0–1)" value={selected.fill.stagger} step={0.05} min={0} max={1}
                           onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, stagger: v } }), 'fill.stagger')} />
-                        <Num label="Pull compensation (mm)" value={selected.fill.pullComp} step={0.05} min={0} max={1}
-                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pullComp: v } }), 'fill.pullComp')} />
+                        <CompNum
+                          label="Pull compensation (mm)"
+                          title="Grows the region before filling, PER SIDE — 0.2 makes a 20 mm circle fill as 20.4 mm."
+                          value={resolveComp(selected.fill, doc.comp, 'fill').pull}
+                          inherited={selected.fill.pullComp === undefined}
+                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pullComp: v } }), 'fill.pullComp')}
+                          onReset={() => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pullComp: undefined } }), 'fill.pullComp')} />
+                        <CompNum
+                          label="Push compensation (mm)"
+                          title="Takes the region back in ACROSS the rows, where the fabric squeezed along them bulges out. Applied only where the outline faces that way, so it does not undo the pull compensation."
+                          value={resolveComp(selected.fill, doc.comp, 'fill').push}
+                          inherited={selected.fill.pushComp === undefined}
+                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pushComp: v } }), 'fill.pushComp')}
+                          onReset={() => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, pushComp: undefined } }), 'fill.pushComp')} />
                         <UnderlayPicker
                           value={selected.fill.underlay}
                           order={FILL_UNDERLAY_ORDER}

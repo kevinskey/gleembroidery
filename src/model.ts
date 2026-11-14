@@ -78,13 +78,82 @@ export function orderedUnderlay<T extends string>(want: readonly T[], order: rea
   return order.filter((k) => want.includes(k))
 }
 
+/**
+ * The design's push and pull compensation.
+ *
+ * Compensation is a property of the FABRIC, not of any one shape: a logo
+ * sewn on piqué needs more than the same logo on a woven shirt, and when
+ * the garment changes every object in the design needs the new number. So
+ * the values live on the document, and an object only carries its own when
+ * the digitizer has deliberately overridden it — a lettering column that
+ * needs holding back, say.
+ *
+ * Objects created before this existed carry explicit values and keep them,
+ * which is why the per-object fields are optional rather than nullable: an
+ * absent field means "follow the document", and that is a thing a file can
+ * only say by not saying anything.
+ */
+export interface CompDefaults {
+  /**
+   * Pull compensation for satin columns: TOTAL added width, mm.
+   *
+   * Separate from the fill's because they are not the same quantity. This
+   * one is a whole width; the fill's is per side. Collapsing them into one
+   * number would mean one of the two silently changing what every design
+   * already in the shop sews, which is not a trade worth a tidier struct.
+   */
+  satinPull: number
+  /** Pull compensation for fills: per side, mm. */
+  fillPull: number
+  /**
+   * Push compensation, mm. 0 is off, which is the historical behaviour.
+   *
+   * One number for both, because here they ARE the same quantity: millimetres
+   * taken off each end of a column, and off each side of a fill across its
+   * rows.
+   */
+  push: number
+}
+
+/**
+ * Exactly the numbers every object in this program has always been created
+ * with, and no push.
+ *
+ * Deliberately not round, and deliberately not equal: these are what satin
+ * and fill objects defaulted to before compensation moved to the document,
+ * so an existing design opened today sews precisely what it sewed yesterday.
+ * Push at ZERO for the same reason — every design that already exists was
+ * digitized without it, and switching it on by default would change them
+ * all. It is a number a shop arrives at from a sewout, not one to assume.
+ */
+export const DEFAULT_COMP = (): CompDefaults => ({ satinPull: 0.2, fillPull: 0.15, push: 0 })
+
 export interface SatinParams {
   /** Column width, mm. Over ~10 mm the stitch is too long and snags. */
   width: number
   /** Needle-to-needle spacing along the column, mm. Lower = denser. */
   density: number
-  /** Widen the column to cover the fabric pulled in by the stitch, mm. */
-  pullComp: number
+  /**
+   * Widen the column to cover the fabric pulled in by the stitch, mm.
+   *
+   * TOTAL added width, not per side — a column of width 4 with 0.2 here
+   * sews 4.2 wide. (The fill's field of the same name is per side. See
+   * compensate.ts.)
+   *
+   * Undefined means "use the document's default". See Doc.comp.
+   */
+  pullComp?: number
+  /**
+   * Shorten the column at each END, mm. See compensate.ts.
+   *
+   * The other half of the same distortion: the thread contracts the fabric
+   * along the bars, which makes the column narrower (pull), and that fabric
+   * has to go somewhere, so it bulges out along the spine and the column
+   * sews LONGER than it was drawn. This takes that back off each end.
+   *
+   * Undefined means "use the document's default". See Doc.comp.
+   */
+  pushComp?: number
   /**
    * Underlay layers, applied together.
    *
@@ -138,8 +207,27 @@ export interface FillParams {
   length: number
   /** Row-to-row shift of the split points, as a fraction of `length`. */
   stagger: number
-  /** Grow the region before filling to cover pull-in, mm. */
-  pullComp: number
+  /**
+   * Grow the region before filling to cover pull-in, mm.
+   *
+   * PER SIDE — 0.2 here makes a 20 mm circle fill as 20.4 mm. (The satin
+   * field of the same name is a total width. See compensate.ts.)
+   *
+   * Undefined means "use the document's default". See Doc.comp.
+   */
+  pullComp?: number
+  /**
+   * Shrink the region ACROSS the stitch rows, mm per side.
+   *
+   * Push is directional in a way pull compensation here is not: the fabric
+   * squeezed along the rows has to go somewhere, and it goes out at right
+   * angles to them. So this inset is applied only where the outline faces
+   * that way, leaving the ends of the rows — which are pulled, not pushed —
+   * untouched. See compensate.ts.
+   *
+   * Undefined means "use the document's default". See Doc.comp.
+   */
+  pushComp?: number
   /** Underlay layers, applied together. Empty means none. */
   underlay: FillUnderlay[]
   /** Satin border run around the filled region after the fill. */
@@ -566,6 +654,10 @@ export interface Doc {
   tie: TieParams
   /** Named sets of objects. See Group — they do not affect sewing order. */
   groups: Group[]
+  /**
+   * Push and pull compensation for the whole design. See CompDefaults.
+   */
+  comp: CompDefaults
   /** The picture being traced over, if there is one. See Backdrop. */
   backdrop?: Backdrop
   /**
@@ -619,7 +711,8 @@ export const NO_SPLIT = (): SatinSplitParams => ({ enabled: false, maxLength: 6,
 export const DEFAULT_SATIN = (): SatinParams => ({
   width: 2.5,
   density: 0.4,
-  pullComp: 0.2,
+  // pullComp and pushComp are deliberately ABSENT: a new object follows the
+  // document, which is where compensation belongs. See CompDefaults.
   underlay: ['center'],
   lean: 0,
   // Off by default: a column inside the snag limit needs no split, and an
@@ -634,7 +727,7 @@ export const DEFAULT_FILL = (): FillParams => ({
   spacing: 0.4,
   length: 4.0,
   stagger: 0.5,
-  pullComp: 0.15,
+  // Absent: follows the document. See CompDefaults.
   underlay: ['edge'],
   border: { enabled: false, width: 2.0, density: 0.4 },
 })
@@ -681,7 +774,7 @@ export function emptyDoc(): Doc {
   // bracket spacing — the hoop a shop reaches for without thinking.
   return {
     name: 'untitled', hoop: DEFAULT_HOOP, spacing: 'TJ500',
-    tie: DEFAULT_TIE(), groups: [], objects: [],
+    tie: DEFAULT_TIE(), comp: DEFAULT_COMP(), groups: [], objects: [],
   }
 }
 

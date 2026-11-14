@@ -13,6 +13,24 @@
 import { NO_SPLIT, SATIN_UNDERLAY_ORDER, orderedUnderlay, type PuffParams, type Pt, type RunParams, type SatinParams, type SatinUnderlay } from './model'
 import type { Stitch } from './stitches'
 import { dedupe, dist, isClosed, pathLength, resample, tangentAt } from './geometry'
+import { trimEnds } from './compensate'
+
+/**
+ * The column's pull compensation, as a concrete number.
+ *
+ * Absent means "follow the document", and by the time geometry runs the
+ * document has already been consulted (see compensate.ts) — so an absent
+ * value this deep is a caller that built params by hand, and zero is the
+ * honest reading of it rather than a guess at what they meant.
+ */
+const pullOf = (p: { pullComp?: number }): number => Math.max(0, p.pullComp ?? 0)
+
+/** The column's push compensation. Absent means none, as above. */
+const pushOf = (p: { pushComp?: number }): number => Math.max(0, p.pushComp ?? 0)
+
+/** One rail of a two-rail column, shortened for push. Rings are left alone. */
+const trimRail = (rail: Pt[], p: SatinParams): Pt[] =>
+  (isClosed(rail) ? rail : trimEnds(rail, pushOf(p)))
 
 /** Hard floor on same-rail penetration spacing, mm. Below this is one hole. */
 export const MIN_RAIL_MM = 0.3
@@ -292,7 +310,7 @@ function smoothColumn(
   pts: Pt[], p: SatinParams, closed: boolean, startSide: number,
   guides: readonly ResolvedGuide[] = [], sOffset = 0,
 ): { stitches: Stitch[]; side: number } {
-  const half = (p.width + p.pullComp) / 2
+  const half = (p.width + pullOf(p)) / 2
   const density = Math.max(0.1, p.density)
   const fine = resample(pts, Math.min(0.15, density / 3))
   if (fine.length < 2) return { stitches: [], side: startSide }
@@ -379,7 +397,7 @@ function smoothColumn(
  */
 function cornerFan(pts: Pt[], i: number, p: SatinParams, startSide: number):
   { stitches: Stitch[]; side: number } {
-  const half = (p.width + p.pullComp) / 2
+  const half = (p.width + pullOf(p)) / 2
   const density = Math.max(0.1, p.density)
   const c = pts[i]
   const t1 = unit(pts[i - 1], c), t2 = unit(c, pts[i + 1])
@@ -451,14 +469,19 @@ export function satinColumn(
   path: Pt[], p: SatinParams, guides: readonly AngleGuide[] = [],
   onDrop?: (g: AngleGuide, d: number) => void,
 ): Stitch[] {
-  const pts = dedupe(path)
-  if (pts.length < 2) return []
-  if ((p.width + p.pullComp) / 2 <= 0) return []
   const closed = isClosed(path)
+  // Push compensation: the bars squeeze the fabric across the column, and it
+  // bulges out along the spine, so the column sews LONGER than it was drawn.
+  // Taking it off the spine is exact — the ends simply start and finish where
+  // the finished stitching should. A closed spine has no ends to trim, so
+  // trimEnds leaves a ring alone.
+  const pts = closed ? dedupe(path) : trimEnds(path, pushOf(p))
+  if (pts.length < 2) return []
+  if ((p.width + pullOf(p)) / 2 <= 0) return []
 
   // Resolved against the WHOLE spine, once, so arc length means the same
   // thing in every segment the corners split it into.
-  const half = (p.width + p.pullComp) / 2
+  const half = (p.width + pullOf(p)) / 2
   const resolved = guides.length
     ? resolveGuides(pts, guides, closed, Math.max(half * 2, GUIDE_REACH_MM), onDrop)
     : []
@@ -551,7 +574,10 @@ export function applySatinSplit(stitches: Stitch[], p: SatinParams): Stitch[] {
 
 /** Satin's underlay options, all laid on the spine before the column. */
 export function satinUnderlay(path: Pt[], p: SatinParams): Stitch[] {
-  const pts = dedupe(path)
+  // Trimmed with the column it sits under. Underlay that kept the full
+  // length would run past the shortened ends in bare thread — the exact
+  // thing underlay must never do.
+  const pts = isClosed(path) ? dedupe(path) : trimEnds(path, pushOf(p))
   if (pts.length < 2) return []
   // Layers sew in a fixed craft order, not the order they were ticked.
   const out: Stitch[] = []
@@ -568,7 +594,7 @@ function satinUnderlayLayer(pts: Pt[], p: SatinParams, layer: SatinUnderlay): St
       return resample(pts, 2.0)
     case 'edge': {
       // Runs just inside each rail, there and back.
-      const inset = Math.max(0.2, (p.width + p.pullComp) / 2 - 0.4)
+      const inset = Math.max(0.2, (p.width + pullOf(p)) / 2 - 0.4)
       const closed = isClosed(pts)
       const fine = resample(pts, 2.0)
       const left: Stitch[] = [], right: Stitch[] = []
@@ -715,8 +741,13 @@ export interface TwoRailOptions {
 export function satinTwoRail(
   railA: Pt[], railB: Pt[], p: SatinParams, opt: TwoRailOptions = {},
 ): Stitch[] {
-  const a = dedupe(railA)
-  const bRaw = dedupe(railB)
+  // Push shortens both rails together, so the column keeps its shape and
+  // loses length at each end. Rung anchors are fractions of arc length and
+  // therefore shift very slightly when the rails are trimmed — at the
+  // fractions of a millimetre compensation actually uses, that is far below
+  // what a rung's position can be seen to be.
+  const a = dedupe(trimRail(railA, p))
+  const bRaw = dedupe(trimRail(railB, p))
   if (a.length < 2 || bRaw.length < 2) return []
   const b = railsNeedFlip(a, bRaw) ? [...bRaw].reverse() : bRaw
 
@@ -725,7 +756,7 @@ export function satinTwoRail(
   const wa = railWalk(a, fine)
   const wb = railWalk(b, fine)
   if (wa.len <= 1e-9 && wb.len <= 1e-9) return []
-  const outward = Math.max(0, p.pullComp) / 2
+  const outward = Math.max(0, pullOf(p)) / 2
 
   const toA = reparam(opt.anchorsA)
   const toB = reparam(opt.anchorsB)
@@ -801,8 +832,8 @@ export function satinTwoRailUnderlay(
 ): Stitch[] {
   const layers = orderedUnderlay(p.underlay ?? [], SATIN_UNDERLAY_ORDER)
   if (!layers.length) return []
-  const a = dedupe(railA)
-  const bRaw = dedupe(railB)
+  const a = dedupe(trimRail(railA, p))
+  const bRaw = dedupe(trimRail(railB, p))
   if (a.length < 2 || bRaw.length < 2) return []
   const b = railsNeedFlip(a, bRaw) ? [...bRaw].reverse() : bRaw
   const fine = Math.min(0.15, Math.max(0.1, p.density) / 3)
@@ -879,7 +910,7 @@ export function twoRailCheck(railA: Pt[], railB: Pt[], p: SatinParams): SatinChe
     errors.push('a two-rail column needs two rails of at least two points each')
     return { errors, warnings }
   }
-  const comp = Math.max(0, p.pullComp)
+  const comp = Math.max(0, pullOf(p))
   const widest = Math.max(...widths) + comp
   const narrowest = Math.min(...widths) + comp
   // Same rule as the spine column: splitting is what makes a wide bar
@@ -959,7 +990,7 @@ export const PUFF_MAX_MM = 12
 export function puffCheck(p: SatinParams, puff: PuffParams): SatinCheck {
   const errors: string[] = []
   const warnings: string[] = []
-  const w = p.width + p.pullComp
+  const w = p.width + pullOf(p)
   if (w < PUFF_MIN_MM) {
     warnings.push(`${w.toFixed(1)} mm is narrow for puff — under about ${PUFF_MIN_MM} mm the thread flattens the foam instead of standing on it`)
   }
@@ -990,7 +1021,7 @@ export function puffCheck(p: SatinParams, puff: PuffParams): SatinCheck {
 export function puffCaps(path: Pt[], p: SatinParams): Stitch[] {
   const pts = dedupe(path)
   if (pts.length < 2) return []
-  const half = (p.width + p.pullComp) / 2
+  const half = (p.width + pullOf(p)) / 2
   const closed = isClosed(path)
   // A closed column has no ends to cap — the foam is enclosed by the ring.
   if (closed) return []
@@ -1032,7 +1063,7 @@ export interface SatinCheck {
 export function satinCheck(path: Pt[], p: SatinParams): SatinCheck {
   const errors: string[] = []
   const warnings: string[] = []
-  const w = p.width + p.pullComp
+  const w = p.width + pullOf(p)
   const half = w / 2
   const pts = dedupe(path)
 
