@@ -37,7 +37,7 @@ import {
   parseRack, serializeRack, spoolLabel,
 } from '../src/threads'
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
-import { DEFAULT_TOLERANCE, floodMask, maskArea, maskContours, traceRegionAt, type Raster } from '../src/trace'
+import { DEFAULT_TOLERANCE, floodMask, maskArea, maskColour, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines, textOnPath } from '../src/text'
 import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton } from '../src/skeleton'
 import { MIN_DRAW_MM, bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from '../src/draw'
@@ -1555,6 +1555,38 @@ console.log('\n# auto-trace (magic wand)')
     const tiny = traceRegionAt(speck, 1, 1, { minAreaPx: 12 })
     ok(tiny.paths.length === 0, 'a single-pixel speck is not turned into an object')
     ok(tiny.warnings.join(' ').includes('too small to sew'), 'and the reason is given', tiny.warnings[0] ?? '')
+  }
+
+  // --- the traced colour
+  //
+  // This is the whole point of tracing artwork: a crest with three colours
+  // has to come back as three objects in THOSE colours. Handing each region
+  // the next entry from a rainbow palette turned a 3-thread crest into a
+  // 30-thread one, which is the kind of mistake that is only noticed at the
+  // machine.
+  {
+    const solid = raster(['....', '.##.', '.##.', '....'], { '.': [255, 255, 255, 255], '#': [0, 51, 170, 255] })
+    const mask = floodMask(solid, 1, 1, DEFAULT_TOLERANCE)
+    ok(maskColour(solid, mask) === '#0033aa', 'a solid region traces to its own colour',
+      maskColour(solid, mask))
+    // An area that is not quite flat — anti-aliasing, a JPEG — averages,
+    // which is the only answer a single thread can give.
+    const mixed = raster(['..', '##'], { '.': [255, 255, 255, 255], '#': [100, 100, 100, 255] })
+    const m2 = floodMask(mixed, 0, 1, DEFAULT_TOLERANCE)
+    ok(maskColour(mixed, m2) === '#646464', 'an uneven region averages to one thread',
+      maskColour(mixed, m2))
+    // Transparent pixels contribute nothing: a PNG's background is not a
+    // colour anybody threads.
+    const alpha = raster(['##'], { '#': [20, 200, 20, 255] })
+    alpha.data[4 + 3] = 0
+    alpha.data[4] = 255
+    const m3 = new Uint8Array([1, 1])
+    ok(maskColour(alpha, m3) === '#14c814', 'transparent pixels are left out of the average',
+      maskColour(alpha, m3))
+    ok(maskColour(solid, new Uint8Array(16)) === '#808080',
+      'an empty mask gives a neutral grey rather than black')
+    const tr = traceRegionAt(solid, 1, 1, { minAreaPx: 1 })
+    ok(tr.color === '#0033aa', 'and the trace result carries it', tr.color)
   }
 
   // --- simplification keeps the outline where it was
@@ -4327,6 +4359,27 @@ console.log('\n# the backdrop saves with the project')
     ok(docSignature(withPic) === docSignature(without),
       'nor does it change the document signature')
   }
+
+// --- the garment colour -----------------------------------------------------
+//
+// A preview fact, not a stitching one: it changes what the thread looks like
+// against and nothing else. So it has to survive a save — a logo approved for
+// navy must open on navy for the next person — and it must NOT disturb the
+// signature, or choosing a shirt colour would regenerate the whole design.
+{
+  const base = emptyDoc()
+  base.objects = [newObject({ type: 'fill', paths: [[...rect(0, 0, 20, 20), { x: 0, y: 0 }]] })]
+  const navy = { ...base, fabric: '#1d2744' }
+  const back = deserialize(serialize(navy))
+  ok(back.fabric === '#1d2744', 'the garment colour survives a save', String(back.fabric))
+  ok(docSignature(navy) === docSignature(base),
+    'but it does not change the document signature')
+  // Junk is dropped rather than carried: a bad value would be handed
+  // straight to the renderer as a fill colour.
+  const junk = deserialize(JSON.stringify({ ...JSON.parse(serialize(base)), fabric: 'navy' }))
+  ok(junk.fabric === undefined, 'a malformed garment colour is dropped, not kept')
+}
+
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

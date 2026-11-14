@@ -15,6 +15,15 @@ import type { Pt } from './model'
 export interface VectorImport {
   name: string
   paths: Pt[][] // mm, normalised so the bounding box starts at (0,0)
+  /**
+   * The fill colour of each path, '#rrggbb', parallel to `paths`.
+   *
+   * An SVG logo already says what colour everything is, and that is the
+   * whole answer to "which thread". Dealing out a rotating palette instead
+   * turned a three-colour crest into thirty thread changes — the colours
+   * were in the file the entire time.
+   */
+  colors: string[]
   widthMm: number
   heightMm: number
   skipped: number // elements that could not be flattened (text, images…)
@@ -34,6 +43,29 @@ function lengthToMm(v: string | null): number | null {
 
 const SKIP_PARENTS = new Set(['defs', 'clipPath', 'mask', 'symbol', 'pattern', 'marker', 'metadata', 'title', 'desc'])
 const GEOMETRY = new Set(['path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon'])
+
+/**
+ * The colour an element will be stitched in.
+ *
+ * Fill first, then stroke: a shape with no fill is an outline, and its
+ * stroke colour is the only colour it has. Anything unreadable — a
+ * gradient, a pattern, currentColor against nothing — falls back to black
+ * rather than to a random palette entry, because black is an honest "we
+ * could not tell" that the user will notice and change, where a cheerful
+ * magenta looks deliberate.
+ */
+function elementColour(cs: CSSStyleDeclaration): string {
+  const pick = (v: string): string | null => {
+    const m = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?\)$/.exec(v.trim())
+    if (!m) return null
+    // Fully transparent is not a colour: a fill:none rect is a frame, and
+    // its stroke is what gets sewn.
+    if (m[4] !== undefined && parseFloat(m[4]) === 0) return null
+    const hex = (x: string) => Number(x).toString(16).padStart(2, '0')
+    return `#${hex(m[1])}${hex(m[2])}${hex(m[3])}`
+  }
+  return pick(cs.fill) ?? pick(cs.stroke) ?? '#000000'
+}
 
 function insideSkipped(el: Element, root: Element): boolean {
   for (let p = el.parentElement; p && p !== root; p = p.parentElement)
@@ -121,6 +153,7 @@ export function parseSvgToPaths(svgText: string, name = 'vector'): VectorImport 
 
     const stepMm = 0.15 // sampling step along curves, before simplification
     const paths: Pt[][] = []
+    const colors: string[] = []
     let skipped = 0
     const all = Array.from(svg.querySelectorAll('*'))
     for (const el of all) {
@@ -167,7 +200,7 @@ export function parseSvgToPaths(svgText: string, name = 'vector'): VectorImport 
         }
         start = end
         const s = simplify(pts, 0.03)
-        if (s.length >= 2) paths.push(s)
+        if (s.length >= 2) { paths.push(s); colors.push(elementColour(cs)) }
       }
     }
     if (!paths.length) throw new Error(skipped ? 'No cuttable shapes — the file is text or images only. Convert text to outlines first.' : 'No shapes found in this SVG')
@@ -175,7 +208,7 @@ export function parseSvgToPaths(svgText: string, name = 'vector'): VectorImport 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const p of paths) for (const q of p) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
     const out = paths.map((p) => p.map((q) => ({ x: q.x - minX, y: q.y - minY })))
-    return { name, paths: out, widthMm: maxX - minX, heightMm: maxY - minY, skipped }
+    return { name, paths: out, colors, widthMm: maxX - minX, heightMm: maxY - minY, skipped }
   } finally {
     host.remove()
   }

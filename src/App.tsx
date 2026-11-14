@@ -94,6 +94,35 @@ import { parseSvgToPaths } from './vector'
 // adjacent objects are told apart at a glance before the user sets real ones.
 const PALETTE = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#1f2d3d']
 
+/**
+ * The garment colours worth one click.
+ *
+ * Deliberately the shirt colours a shop actually stocks and quotes in, not a
+ * spectrum: the question being answered is "does this logo work on the blanks
+ * we sell", and anything else is reachable through the colour picker beside
+ * them.
+ */
+const GARMENTS: { name: string; color: string }[] = [
+  { name: 'White', color: '#ffffff' },
+  { name: 'Natural', color: '#efe6d2' },
+  { name: 'Ash', color: '#d5d6d2' },
+  { name: 'Sport grey', color: '#b1b3b3' },
+  { name: 'Charcoal', color: '#53565a' },
+  { name: 'Black', color: '#101113' },
+  { name: 'Navy', color: '#1d2744' },
+  { name: 'Royal', color: '#15489c' },
+  { name: 'Carolina blue', color: '#7ba4db' },
+  { name: 'Red', color: '#b3202c' },
+  { name: 'Maroon', color: '#6b2032' },
+  { name: 'Orange', color: '#dd6b20' },
+  { name: 'Gold', color: '#e6bb2b' },
+  { name: 'Irish green', color: '#00834a' },
+  { name: 'Forest', color: '#213b2b' },
+  { name: 'Purple', color: '#4b2a7b' },
+  { name: 'Light pink', color: '#f2c2cf' },
+  { name: 'Sand', color: '#cbb89a' },
+]
+
 /** Grab radius for a resize handle and for picking an object, screen px.
  *  Screen-constant on purpose: a tolerance in mm would be unusably tiny when
  *  zoomed out and absurdly fat when zoomed in. */
@@ -737,7 +766,7 @@ export default function App() {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
     render(ctx, doc, plan, view, {
-      ...opts, upTo: sim ?? undefined, selectedId, reference, draft,
+      ...opts, upTo: sim ?? undefined, selectedId, reference, draft, fabric: doc.fabric,
       // Handles only in the select tool — they are not grabbable otherwise,
       // and drawing them would promise an interaction that is not there.
       selectionBox: tool === 'select' ? selBox : null,
@@ -1350,6 +1379,66 @@ export default function App() {
     setNote(`${n} object${n === 1 ? '' : 's'} deleted — Cmd/Ctrl+Z puts ${n === 1 ? 'it' : 'them'} back`)
   }
 
+  /**
+   * Set the screen colour of several objects at once.
+   *
+   * Tagged so dragging through a colour picker is ONE undo step rather than
+   * one per shade it passed through on the way.
+   */
+  const setColourOf = (ids: readonly string[], color: string) => {
+    setDoc((d) => ({
+      ...d,
+      objects: d.objects.map((o) => (ids.includes(o.id) ? { ...o, color } : o)),
+    }), `colour:${ids.join(',')}`)
+  }
+
+  // --- sew-out playback -----------------------------------------------------
+  //
+  // Watching it sew is how ordering mistakes show themselves: a colour that
+  // runs twice, a travel across the middle of a finished area, a knockdown
+  // laid after the thing it was meant to flatten. None of that is visible in
+  // the finished picture, which is the point of a preview that moves.
+
+  const [playing, setPlaying] = useState(false)
+  /**
+   * How fast, as a multiple of the machine's own speed.
+   *
+   * Real time is honest but useless to watch — a 14,000-stitch design at
+   * 800 spm is eighteen minutes. Expressed as a multiple rather than as an
+   * abstract "speed" so the number still means something: 1x is what the
+   * machine does.
+   */
+  const [speed, setSpeed] = useState(20)
+  const playPos = useRef(0)
+
+  useEffect(() => {
+    if (!playing || !total) return
+    // Start again from the beginning if it is sitting at the end.
+    playPos.current = sim === null || sim >= total ? 0 : sim
+    let raf = 0
+    let last = performance.now()
+    const tick = (now: number) => {
+      const dt = Math.min(0.25, (now - last) / 1000)
+      last = now
+      playPos.current += (machine.spm / 60) * speed * dt
+      if (playPos.current >= total) {
+        // Finish on the WHOLE design rather than one stitch short, and stop
+        // — looping would make it impossible to see the last colour land.
+        setSim(null)
+        setPlaying(false)
+        return
+      }
+      setSim(Math.floor(playPos.current))
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+    // `sim` is deliberately not a dependency: it changes every frame, and
+    // depending on it would tear the loop down and rebuild it sixty times a
+    // second.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, total, speed, machine.spm])
+
   const applyPreset = (p: StylePreset) => {
     if (!selectedObjs.length) { setNote('select an object first'); return }
     const ids = selectedObjs.map((o) => o.id)
@@ -1638,23 +1727,44 @@ export default function App() {
     setNote(`duplicated ${copies.length} object${copies.length === 1 ? '' : 's'}`)
   }
 
-  const addPaths = (paths: Pt[][], label: string) => {
-    // Split into regions so a letter keeps its counter as a hole of the SAME
-    // object, while separate shapes become separate objects the user can
-    // colour and treat independently.
-    const regions = toRegions(paths)
-    const groups: Pt[][][] = regions.length ? regions : [paths]
+  const addPaths = (paths: Pt[][], label: string, colors?: readonly string[]) => {
     const b = bounds(paths)
     const dx = b ? -(b.minX + b.maxX) / 2 : 0
     const dy = b ? -(b.minY + b.maxY) / 2 : 0
-    const made = groups.map((g, i) =>
-      newObject({
-        name: groups.length > 1 ? `${label} ${i + 1}` : label,
-        color: PALETTE[i % PALETTE.length],
-        type: 'fill',
-        paths: g.map((ring) => [...ring, ring[0]].map((p) => ({ x: p.x + dx, y: p.y + dy }))),
-      }),
-    )
+
+    // Group by the colour the artwork already states, THEN split each colour
+    // into regions. Regioning the whole file at once would make a white
+    // highlight sitting on a red disc into a hole in the red — visually true
+    // of the drawing, but wrong as stitching, where it is a white object
+    // sewn on top. Within one colour, a counter really is a hole.
+    const byColour = new Map<string, Pt[][]>()
+    paths.forEach((ring, i) => {
+      const key = colors?.[i] ?? ''
+      const bucket = byColour.get(key)
+      if (bucket) bucket.push(ring)
+      else byColour.set(key, [ring])
+    })
+
+    const made: EmbObject[] = []
+    for (const [colour, group] of byColour) {
+      // Split into regions so a letter keeps its counter as a hole of the
+      // SAME object, while separate shapes become separate objects the user
+      // can colour and treat independently.
+      const regions = toRegions(group)
+      const parts: Pt[][][] = regions.length ? regions : [group]
+      parts.forEach((g, i) => {
+        made.push(newObject({
+          name: parts.length > 1 || byColour.size > 1
+            ? `${label} ${made.length + 1}` : label,
+          // No colour in the file at all — a plain outline drawing — still
+          // gets the rotating palette, because there is nothing to read.
+          color: colour || PALETTE[made.length % PALETTE.length],
+          type: 'fill',
+          paths: g.map((ring) => [...ring, ring[0]].map((p) => ({ x: p.x + dx, y: p.y + dy }))),
+        }))
+        void i
+      })
+    }
     setDoc((d) => ({ ...d, objects: [...d.objects, ...made] }))
     setSelectedId(made[0]?.id ?? null)
     setSim(null)
@@ -1982,9 +2092,13 @@ export default function App() {
     for (const w of res.warnings) setNote(w)
     if (!res.paths.length) return
     const n = doc.objects.length
+    // THE COLOUR IT TRACED, not the next one off a palette. A crest with
+    // three colours in it came out as thirty — one per click, cycling
+    // through a rainbow — which is not a design anyone can look at, and
+    // meant thirty thread changes for a three-thread logo.
     const obj = newObject({
-      name: `Traced ${n + 1}`,
-      color: PALETTE[n % PALETTE.length],
+      name: `${colourName(res.color)} ${n + 1}`,
+      color: res.color,
       type: 'fill',
       paths: res.paths.map((ring) => [...ring, { ...ring[0] }]),
     })
@@ -2000,7 +2114,7 @@ export default function App() {
     closeAllMenus()
     try {
       const v = parseSvgToPaths(await file.text(), file.name.replace(/\.svg$/i, ''))
-      addPaths(v.paths, v.name)
+      addPaths(v.paths, v.name, v.colors)
       setNote(v.skipped
         ? `${v.skipped} element(s) skipped — convert text to outlines first`
         : `Imported ${v.name}`)
@@ -3063,6 +3177,41 @@ export default function App() {
                 onChange={(e) => setShowDensity(e.target.checked)} />
               Density
             </label>
+            <MenuSep />
+            <MenuLabel>Garment colour</MenuLabel>
+            <div className="row wide keep-open">
+              {/* Thread reads completely differently on navy than on white —
+                  a cream fill that looks like lettering on white disappears
+                  on ash. This is the one thing the preview can do that no
+                  amount of zooming can: show it against what it is going on. */}
+              <div className="swatches">
+                {GARMENTS.map((g) => (
+                  <button
+                    key={g.name}
+                    className={`gsw${(doc.fabric ?? '') === g.color ? ' on' : ''}`}
+                    style={{ background: g.color }}
+                    title={g.name}
+                    onClick={() => setDoc((d) => ({ ...d, fabric: g.color }), 'fabric')}
+                  />
+                ))}
+                <button
+                  className={`gsw none${doc.fabric ? '' : ' on'}`}
+                  title="No garment — plain background"
+                  onClick={() => setDoc((d) => {
+                    const { fabric, ...rest } = d
+                    void fabric
+                    return rest
+                  }, 'fabric')}
+                >×</button>
+              </div>
+            </div>
+            <div className="row wide keep-open">
+              <label>Other</label>
+              <input type="color" value={doc.fabric ?? '#ffffff'}
+                title="Any garment colour"
+                onChange={(e) => setDoc((d) => ({ ...d, fabric: e.target.value }), 'fabric')} />
+              <span className="dim">{doc.fabric ? colourName(doc.fabric) : 'none'}</span>
+            </div>
             {tool === 'wand' && (
               <>
                 <MenuSep />
@@ -3401,7 +3550,15 @@ export default function App() {
                 <div className="crow"
                   onClick={() => setSelectedIds(b.objects.map((q) => q.object.id))}>
                   <span className="cno">{b.number}</span>
-                  <span className="cswatch" style={{ background: b.color }} />
+                  {/* The swatch IS the colour control: this is the list you
+                      are looking at when you decide two blocks should be
+                      one thread, so it is where the change belongs. */}
+                  <label className="cswatch" style={{ background: b.color }}
+                    title={`${colourName(b.color)} — click to change the colour of all ${b.objects.length} object${b.objects.length === 1 ? '' : 's'} in this block`}
+                    onClick={(e) => e.stopPropagation()}>
+                    <input type="color" value={b.color}
+                      onChange={(e) => setColourOf(b.objects.map((q) => q.object.id), e.target.value)} />
+                  </label>
                   <div className="cbody">
                     <span className="cname"
                       title={b.thread
@@ -3411,6 +3568,16 @@ export default function App() {
                     </span>
                     <span className="dim">{(b.stitches ?? 0).toLocaleString()} stitches</span>
                   </div>
+                  <button title="Give this block the same colour as the one above it, so they sew as one threading"
+                    disabled={blocks.filter((q) => q.number > 0)[0] === b}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const live = blocks.filter((q) => q.number > 0)
+                      const above = live[live.indexOf(b) - 1]
+                      if (!above) return
+                      setColourOf(b.objects.map((q) => q.object.id), above.color)
+                      setNote('Merged into the block above — one threading fewer')
+                    }}>merge up</button>
                   <button title="Choose the thread for this block"
                     onClick={(e) => {
                       e.stopPropagation()
@@ -3609,9 +3776,13 @@ export default function App() {
               <Text label="Name" value={selected.name}
                 onChange={(v) => patch(selected.id, (o) => ({ ...o, name: v }), 'name')} />
               <div className="row">
-                <label>Screen colour</label>
+                <label>{selectedObjs.length > 1 ? `Colour — all ${selectedObjs.length}` : 'Colour'}</label>
+                {/* Applies to the WHOLE selection. Recolouring a traced logo
+                    one object at a time is thirty colour pickers, and the
+                    reason to recolour is usually to make several objects
+                    share ONE thread. */}
                 <input type="color" value={selected.color}
-                  onChange={(e) => patch(selected.id, (o) => ({ ...o, color: e.target.value }), 'color')} />
+                  onChange={(e) => setColourOf(selectedObjs.map((o) => o.id), e.target.value)} />
               </div>
 
               <fieldset>
@@ -4200,6 +4371,15 @@ export default function App() {
         <span title="Needles on the machine / colour blocks in this design">
           <b>Ndls/Cols</b> {machine.needles}/{threads}
         </span>
+        {doc.fabric && (
+          /* Named down here because it changes what every colour on the
+             canvas looks like, and invisible state that alters the whole
+             preview is how someone approves the wrong thing. */
+          <span title="Garment colour — View ▸ Garment colour">
+            on <span className="fabchip" style={{ background: doc.fabric }} />
+            {' '}{colourName(doc.fabric)}
+          </span>
+        )}
         {total > 0 && <span>~<b>{stats.minutes.toFixed(1)}</b> min</span>}
         <span className="dim">
           {counts.jumps} jumps · {stats.trims} trims · longest {longestStitch(plan).toFixed(1)} mm
@@ -4252,10 +4432,27 @@ export default function App() {
         {!summary.actionable && total > 0 && <span className="ok">✓ no problems found</span>}
 
         <span className="sim">
-          <label>Stitch-out</label>
+          <button
+            className={`play${playing ? ' on' : ''}`}
+            disabled={!total}
+            title={playing ? 'Pause' : 'Watch it sew, in order'}
+            onClick={() => setPlaying((v) => !v)}
+          >{playing ? '❚❚' : '▶'}</button>
+          <select
+            value={speed} disabled={!total}
+            title="How fast, as a multiple of the machine's own speed"
+            onChange={(e) => setSpeed(Number(e.target.value))}
+          >
+            {[1, 5, 20, 100, 400].map((k) => (
+              <option key={k} value={k}>{k}×</option>
+            ))}
+          </select>
           <input
             type="range" min={0} max={total} value={sim ?? total}
             onChange={(e) => {
+              // Taking hold of the slider takes over from the playback —
+              // fighting an animation for the handle is maddening.
+              setPlaying(false)
               const v = parseInt(e.target.value, 10)
               setSim(v >= total ? null : v)
             }}

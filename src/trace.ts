@@ -198,7 +198,30 @@ export interface TraceResult {
   paths: Pt[][]
   /** Pixels the flood covered, so the caller can report a miss. */
   area: number
+  /**
+   * The region's own colour, '#rrggbb'.
+   *
+   * The AVERAGE of the pixels the flood covered, not the one that was
+   * clicked: a logo that has been through JPEG has speckle, and anti-aliased
+   * edges are a blend with whatever is next to them. Averaging the whole
+   * region lands on the colour a person would name, which is the colour the
+   * thread has to match.
+   */
+  color: string
   warnings: string[]
+}
+
+/** Mean colour of the pixels a mask covers, ignoring transparent ones. */
+export function maskColour(img: Raster, mask: Uint8Array): string {
+  let r = 0, g = 0, b = 0, n = 0
+  for (let i = 0, p = 0; i < mask.length; i++, p += 4) {
+    if (!mask[i] || img.data[p + 3] < 8) continue
+    r += img.data[p]; g += img.data[p + 1]; b += img.data[p + 2]
+    n++
+  }
+  if (!n) return '#808080'
+  const hex = (v: number) => Math.round(v / n).toString(16).padStart(2, '0')
+  return `#${hex(r)}${hex(g)}${hex(b)}`
 }
 
 export interface TraceOptions {
@@ -225,16 +248,22 @@ export function traceRegionAt(img: Raster, sx: number, sy: number, opt: TraceOpt
   const warnings: string[] = []
   const { width: w, height: h } = img
   if (w * h > MAX_TRACE_PIXELS) {
-    return { paths: [], area: 0, warnings: [`image is ${w}x${h}; scale it down before tracing`] }
+    return {
+      paths: [], area: 0, color: '#808080',
+      warnings: [`image is ${w}x${h}; scale it down before tracing`],
+    }
   }
   const mask = floodMask(img, Math.round(sx), Math.round(sy), opt.tolerance ?? DEFAULT_TOLERANCE)
   const area = maskArea(mask)
-  if (area === 0) return { paths: [], area: 0, warnings: ['nothing was selected there'] }
+  if (area === 0) {
+    return { paths: [], area: 0, color: '#808080', warnings: ['nothing was selected there'] }
+  }
+  const color = maskColour(img, mask)
 
   const { paths, dropped } = contoursToPaths(maskContours(mask, w, h), opt)
   if (dropped) warnings.push(`${dropped} speck${dropped === 1 ? ' was' : 's were'} too small to sew — dropped`)
   if (!paths.length) warnings.push('the traced area was too small to sew')
-  return { paths, area, warnings }
+  return { paths, area, color, warnings }
 }
 
 /** Scale contours out of pixel space, dropping anything too small to sew. */

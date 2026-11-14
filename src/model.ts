@@ -568,6 +568,15 @@ export interface Doc {
   groups: Group[]
   /** The picture being traced over, if there is one. See Backdrop. */
   backdrop?: Backdrop
+  /**
+   * The garment colour the design is for, '#rrggbb'.
+   *
+   * Part of the job, not of the session: a logo is approved for a navy
+   * polo, and the next person to open the file needs to see it on navy. It
+   * changes nothing about the stitches — it is what the thread will be
+   * looked at against.
+   */
+  fabric?: string
   objects: EmbObject[]
 }
 

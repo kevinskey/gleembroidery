@@ -203,6 +203,7 @@ export function serialize(doc: Doc, pretty = false): string {
       // The picture being traced over. Biggest thing in the file by far, so
       // it is written only when there is one.
       ...(doc.backdrop ? { backdrop: { ...doc.backdrop, origin: [doc.backdrop.origin.x, doc.backdrop.origin.y] } } : {}),
+      ...(doc.fabric ? { fabric: doc.fabric } : {}),
       objects: doc.objects.map(objectOut),
       // Manual stitch edits ARE the document once they exist. A project that
       // reopened without them would lose work with no way to get it back,
@@ -661,6 +662,8 @@ export function deserialize(text: string): Doc {
     tie: tieIn(payload.tie),
     groups: groupsIn(payload.groups),
     ...(backdropIn(payload.backdrop) ? { backdrop: backdropIn(payload.backdrop)! } : {}),
+    ...(typeof payload.fabric === 'string' && /^#[0-9a-fA-F]{6}$/.test(payload.fabric)
+      ? { fabric: payload.fabric } : {}),
     ...(frozenIn(payload.frozen) ? { frozen: frozenIn(payload.frozen)! } : {}),
     objects,
   }

@@ -68,6 +68,13 @@ export interface RenderOptions {
   picked?: { block: number; index: number }[] | null
   /** Over-dense cells to shade, with the grid size they were counted on. */
   density?: { cells: { x: number; y: number; ratio: number }[]; cellMm: number } | null
+  /**
+   * The garment colour, '#rrggbb'. Absent means the plain work area.
+   *
+   * A design that reads on white can disappear on navy, and that is not
+   * something a preview on a neutral background can tell you.
+   */
+  fabric?: string
   /** Reference image drawn behind everything, for tracing over. */
   backdrop?: { bitmap: CanvasImageSource; origin: Pt; widthMm: number; heightMm: number } | null
 }
@@ -134,6 +141,16 @@ function wobble(x: number, y: number): number {
 }
 
 /** Mix a hex colour towards white (t > 0) or black (t < 0). */
+/** Perceived brightness, 0..1 — what decides whether to lighten or darken. */
+function luminance(hex: string): number {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex)
+  if (!m) return 1
+  const n = parseInt(m[1], 16)
+  // Rec. 601 weights: green carries most of the perceived brightness, so a
+  // plain average calls mid-green dark and mid-blue light.
+  return (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255
+}
+
 function shade(hex: string, t: number): string {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex)
   if (!m) return hex
@@ -158,6 +175,16 @@ export function render(
   const paper = dark ? '#171a1f' : '#fbf8ea' // StitchArtist's cream work area
   const ink = dark ? '#cfd6e0' : '#3a3630'
 
+  // THE FABRIC. What is inside the hoop is cloth, and the colour of that
+  // cloth changes the design: a white logo is invisible on white and a navy
+  // one disappears on navy, and neither is apparent against an application
+  // background that is neither. Everything drawn ON the cloth takes its
+  // contrast from the cloth rather than from the window's theme, or a grid
+  // that was readable on cream vanishes on black.
+  const cloth = opt.fabric || paper
+  const clothDark = luminance(cloth) < 0.45
+  const onCloth = (t: number) => shade(cloth, clothDark ? t : -t)
+
   ctx.fillStyle = dark ? '#0f1216' : '#e8e4d6'
   ctx.fillRect(0, 0, W, H)
 
@@ -166,7 +193,7 @@ export function render(
   // --- hoop ---------------------------------------------------------------
   const hw = doc.hoop.widthMm / 2, hh = doc.hoop.heightMm / 2
   const tl = toS({ x: -hw, y: -hh }), br = toS({ x: hw, y: hh })
-  ctx.fillStyle = paper
+  ctx.fillStyle = cloth
   ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y)
 
   // --- grid ---------------------------------------------------------------
@@ -175,7 +202,7 @@ export function render(
     ctx.beginPath()
     ctx.rect(tl.x, tl.y, br.x - tl.x, br.y - tl.y)
     ctx.clip()
-    ctx.strokeStyle = dark ? '#2a3038' : '#cfc8ae'
+    ctx.strokeStyle = onCloth(0.13)
     ctx.lineWidth = 1
     ctx.setLineDash([3, 3])
     // One line per inch — the ruler is in inches, so the grid should agree.
@@ -191,7 +218,7 @@ export function render(
   }
 
   // Centre cross — the needle's start point.
-  ctx.strokeStyle = dark ? '#4b5563' : '#8a8268'
+  ctx.strokeStyle = onCloth(0.28)
   ctx.lineWidth = 1
   ctx.setLineDash([6, 4])
   const o = toS({ x: 0, y: 0 })
@@ -200,14 +227,14 @@ export function render(
   ctx.setLineDash([])
 
   // Hoop edge.
-  ctx.strokeStyle = dark ? '#6b7280' : '#8a7a4a'
+  ctx.strokeStyle = onCloth(0.45)
   ctx.lineWidth = 2
   ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y)
 
   // --- reference design loaded from a file --------------------------------
   if (opt.reference) {
     ctx.lineWidth = 1
-    ctx.strokeStyle = dark ? '#3f4752' : '#b9b19a'
+    ctx.strokeStyle = onCloth(0.3)
     for (const b of opt.reference.blocks) {
       ctx.beginPath()
       let pen = false
