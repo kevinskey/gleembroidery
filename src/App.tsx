@@ -116,6 +116,15 @@ const allClosed = (paths: readonly Pt[][]): boolean =>
   paths.length > 0 && paths.every((r) =>
     r.length > 2 && Math.hypot(r[0].x - r[r.length - 1].x, r[0].y - r[r.length - 1].y) < 1e-6)
 
+/**
+ * The tools that place a node whose TYPE the next click decides.
+ *
+ * Both work the same way — click for a corner, hold the modifier for a curve
+ * — so both show the same marker. Everything else drags out a whole shape,
+ * where there is no per-node choice to preview.
+ */
+const NODE_MARKER_TOOLS = new Set<Tool>(['pen', 'column'])
+
 const PALETTE = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#1f2d3d']
 
 /**
@@ -691,6 +700,15 @@ export default function App() {
    * outline to pick a different object would lose it.
    */
   const [cmdHeld, setCmdHeld] = useState(false)
+  /**
+   * Where the pointer is, in document mm.
+   *
+   * State rather than a ref because the marker at the cursor has to be drawn,
+   * and drawing happens on render. Only kept current while a tool that shows
+   * a marker is active, so an ordinary mouse move over the canvas does not
+   * re-render the whole design for nothing.
+   */
+  const [hover, setHover] = useState<Pt | null>(null)
   const [showDensity, setShowDensity] = useState(false)
   /** Stitches picked in the Stitches tool, as refs into the frozen plan. */
   const [picked, setPicked] = useState<StitchRef[]>([])
@@ -843,6 +861,15 @@ export default function App() {
         heightMm: backdrop.raster.height / backdrop.pxPerMm,
       },
       nodeEdit: tool === 'node' && selected ? { shapes: shapesOf(selected), active: activeNode } : null,
+      // The pen and column tools place typed nodes, so they show what the
+      // next click will place: a square for a corner, a circle for a curve.
+      pen: NODE_MARKER_TOOLS.has(tool)
+        ? {
+          nodes: tool === 'column' ? [...colA.current, ...colB.current] : penNodes.current,
+          next: hover && !spacePan && !panning.current
+            ? { at: hover, smooth: cmdHeld } : null,
+        }
+        : null,
       letterHandles: tool === 'select' && selected?.text?.mode === 'fill' && letterBoxes?.id === selected.id
         ? letterBoxes.letters.map((l) => l.centre) : null,
       endpoints: tool === 'select' && selected && (selected.entry || selected.exit)
@@ -856,7 +883,7 @@ export default function App() {
         ? { lines: selected?.guides ?? [], draft: guideDrag }
         : null,
     })
-  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop, letterBoxes, showDensity, density, picked, guideDrag])
+  }, [doc, plan, view, opts, sim, selectedId, reference, draft, tool, selected, shapesOf, activeNode, selBox, marqueeBox, backdrop, letterBoxes, showDensity, density, picked, guideDrag, hover, cmdHeld, spacePan])
 
   useEffect(() => { draw() }, [draw])
 
@@ -2687,6 +2714,8 @@ export default function App() {
   }
 
   const handleMove = (e: MoveLike) => {
+    // Only the tools that show a node marker pay for this.
+    if (NODE_MARKER_TOOLS.has(tool)) setHover(atMm(e))
     const pan = panning.current
     if (pan) {
       setView((v) => ({ ...v, cx: pan.cx - (e.clientX - pan.x) / v.scale, cy: pan.cy - (e.clientY - pan.y) / v.scale }))
@@ -3573,7 +3602,13 @@ export default function App() {
         <div
           className="canvas-wrap" ref={wrapRef}
           onWheel={onWheel} onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp}
-          onMouseLeave={onUp} onDoubleClick={(e) => {
+          onMouseLeave={(e) => {
+            // The marker belongs to the pointer; without this it is left
+            // stranded on the canvas after the mouse has gone.
+            setHover(null)
+            onUp(e)
+          }}
+          onDoubleClick={(e) => {
             if (tool === 'polygon') { finishPolygon(); return }
             if (tool === 'pen') { finishPen(false); return }
             if (tool === 'column') { finishColumn(); return }

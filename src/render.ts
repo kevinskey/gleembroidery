@@ -44,6 +44,20 @@ export interface RenderOptions {
   reference?: StitchPlan | null
   /** Shape being dragged out right now, drawn live and owned by nobody yet. */
   draft?: { paths: Pt[][]; closed: boolean } | null
+  /**
+   * The pen's own nodes, and the marker showing what the next click places.
+   *
+   * Separate from `draft` because a draft is a SHAPE — a rectangle being
+   * dragged out, a freehand trail — and has no node types to show. A pen path
+   * does: every point is either a corner or a curve, and which one is about
+   * to be placed is the single thing the digitizer needs to know before
+   * clicking.
+   */
+  pen?: {
+    nodes: readonly { x: number; y: number; smooth?: boolean }[]
+    /** Where the next node would land, and what kind it would be. */
+    next?: { at: Pt; smooth: boolean } | null
+  } | null
   /** Selection bounds to draw resize handles on. */
   selectionBox?: { minX: number; minY: number; maxX: number; maxY: number } | null
   /** Editable outlines to draw nodes and Bézier handles for. */
@@ -390,11 +404,40 @@ export function render(
       if (opt.draft.closed) ctx.closePath()
       ctx.stroke()
       // Mark the committed vertices so a polygon shows what it has so far.
-      ctx.setLineDash([])
-      ctx.fillStyle = '#1f9cf0'
-      for (const q of path) { const p = toS(q); ctx.fillRect(p.x - 2, p.y - 2, 4, 4) }
-      ctx.setLineDash([5, 3])
+      // The pen draws its own, by type, below.
+      if (!opt.pen) {
+        ctx.setLineDash([])
+        ctx.fillStyle = '#1f9cf0'
+        for (const q of path) { const p = toS(q); ctx.fillRect(p.x - 2, p.y - 2, 4, 4) }
+        ctx.setLineDash([5, 3])
+      }
     }
+    ctx.restore()
+  }
+
+  // --- the pen's nodes, and the marker at the cursor ----------------------
+  //
+  // The marker IS the answer to "what will this click do". A square places a
+  // corner, a circle places a curve, and holding the modifier changes it
+  // under the cursor before anything is committed — so the choice is made by
+  // looking rather than by remembering which key does what.
+  if (opt.pen) {
+    ctx.save()
+    const mark = (p: Pt, smooth: boolean, filled: boolean) => {
+      ctx.beginPath()
+      if (smooth) ctx.arc(p.x, p.y, 4, 0, Math.PI * 2)
+      else ctx.rect(p.x - 3.5, p.y - 3.5, 7, 7)
+      ctx.fillStyle = filled ? '#1f9cf0' : dark ? '#0f1216' : '#ffffff'
+      ctx.strokeStyle = '#1f9cf0'
+      ctx.lineWidth = filled ? 1 : 1.5
+      ctx.fill()
+      ctx.stroke()
+    }
+    // Placed nodes are solid: they are decided. Same square/round language
+    // the Nodes tool uses, so the two tools read the same way.
+    for (const n of opt.pen.nodes) mark(toS({ x: n.x, y: n.y }), !!n.smooth, true)
+    // The one under the cursor is hollow, because it has not been placed yet.
+    if (opt.pen.next) mark(toS(opt.pen.next.at), opt.pen.next.smooth, false)
     ctx.restore()
   }
 
