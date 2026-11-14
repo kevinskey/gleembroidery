@@ -824,3 +824,16 @@ legend { font-size: 11px; color: var(--muted); text-transform: uppercase; letter
   line-height: 1;
   cursor: pointer;
 }
+
+/* Lettering: the words ARE the object, so the box they go in is sized like
+   the thing it is rather than like one more parameter in a list. */
+.inspector fieldset.lettering { border-color: var(--accent); }
+.inspector fieldset.lettering > legend { color: var(--accent); }
+.row input.bigtext {
+  flex: 1;
+  min-width: 0;
+  font-size: 16px;
+  padding: 7px 9px;
+  border-color: var(--accent);
+}
+.row input.bigtext::placeholder { font-size: 13px; }

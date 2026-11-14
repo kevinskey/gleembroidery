@@ -1245,6 +1245,26 @@ export default function App() {
   /** Which inspector tab is showing. */
   const [inspector, setInspector] = useState<'colour' | 'object' | 'design'>('object')
   /**
+   * Set when new lettering has just been placed, so the text box takes focus.
+   *
+   * A ref consumed by an effect rather than a focus() call at the click,
+   * because the box does not exist yet at that moment — the object has only
+   * just been added to the document and React has not rendered the panel.
+   */
+  const wantTextFocus = useRef(false)
+
+  useEffect(() => {
+    if (!wantTextFocus.current) return
+    wantTextFocus.current = false
+    const el = document.getElementById('gw-text')
+    if (!(el instanceof HTMLInputElement)) return
+    el.focus()
+    // Selected, not just focused: the default content is a placeholder word,
+    // and anyone who just placed lettering means to replace it.
+    el.select()
+  }, [selectedId, inspector])
+
+  /**
    * Which unit the numbers are written in.
    *
    * Remembered across sessions: a shop works in one or the other, and being
@@ -2218,7 +2238,13 @@ export default function App() {
       id: obj.id,
       letters: out.letters.map((l) => ({ ...l, centre: { x: l.centre.x + at.x, y: l.centre.y + at.y } })),
     })
-    setNote(`${out.widthMm.toFixed(1)} × ${out.heightMm.toFixed(1)} mm — edit the words in Properties`)
+    // Placing text is a request to type some. Show the panel that has the
+    // box, put the caret in it, and select the placeholder word so the first
+    // keystroke replaces it — telling someone where to type is a worse answer
+    // than putting them there.
+    setInspector('object')
+    wantTextFocus.current = true
+    setNote(`${out.widthMm.toFixed(1)} × ${out.heightMm.toFixed(1)} mm — type to change the words`)
   }, [doc.objects.length, setDoc, setSelectedId])
 
   /** Trace whatever colour was clicked into a new object. */
@@ -4033,91 +4059,35 @@ export default function App() {
           )}
           {inspector === 'object' && selected && (
             <>
-              {/* Presets first: reaching for a known-good recipe is quicker
-                  than setting a dozen numbers, and it is what most jobs
-                  actually want. */}
-              <fieldset>
-                <legend>Stitch style</legend>
-                <div className="row wide">
-                  <div className="checks">
-                    {[...BUILT_IN_PRESETS, ...userPresets].map((p) => (
-                      <button key={p.id} title={p.note ?? 'A saved stitch style'}
-                        onClick={() => applyPreset(p)}>
-                        {p.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="row wide">
-                  <div className="checks">
-                    <button onClick={savePreset} title="Save this object's settings as a reusable style">
-                      Save current…
-                    </button>
-                    {userPresets.map((p) => (
-                      <button key={`x${p.id}`} title={`Delete "${p.name}"`}
-                        onClick={() => deletePreset(p.id)}>
-                        ✕ {p.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="row wide">
-                  <span className="dim">
-                    A style sets how an object is sewn — never its shape, colour or
-                    thread. The built-ins are starting points: check each against a
-                    sewout on the fabric you are using.
-                  </span>
-                </div>
-              </fieldset>
+              {/* LETTERING FIRST, before the presets, whenever the object is
+                  lettering.
+                  
+                  On every other object the panel is a list of settings and
+                  the order barely matters. On lettering one of those settings
+                  IS the object — change the words and it is a different
+                  thing — and it was below a wall of preset buttons, a stitch
+                  type, a Name box that happened to show the same word, and
+                  three thread fields. The first question anyone has of a text
+                  object is "where do I type", and it should not be a question
+                  with a scroll in the answer.
 
-              {/* The stitch type also lives in the toolbar, but that is a row
-                  of small icons far from the panel people actually read. With
-                  only the toolbar, "satin border" was visible in Properties
-                  while SATIN STITCH itself looked like it did not exist. */}
-              <div className="row">
-                <label>Stitch type</label>
-                <select value={selected.type}
-                  onChange={(e) => patch(selected.id, (o) => ({ ...o, type: e.target.value as StitchType }))}>
-                  <option value="run">Run — single line</option>
-                  <option value="bean">Bean — triple-pass line</option>
-                  <option value="satin">Satin — zigzag column</option>
-                  <option value="fill">Fill — tatami area</option>
-                  <option value="applique">Appliqué — fabric, with stops</option>
-                  <option value="knockdown">Knockdown — flatten pile first</option>
-                  <option value="none">Off — stitches nothing</option>
-                </select>
-              </div>
-              <Text label="Name" value={selected.name}
-                onChange={(v) => patch(selected.id, (o) => ({ ...o, name: v }), 'name')} />
-              <div className="row">
-                <label>{selectedObjs.length > 1 ? `Colour — all ${selectedObjs.length}` : 'Colour'}</label>
-                {/* Applies to the WHOLE selection. Recolouring a traced logo
-                    one object at a time is thirty colour pickers, and the
-                    reason to recolour is usually to make several objects
-                    share ONE thread. */}
-                <input type="color" value={selected.color}
-                  onChange={(e) => setColourOf(selectedObjs.map((o) => o.id), e.target.value)} />
-              </div>
-
-              <fieldset>
-                <legend>Thread</legend>
-                <Text label="Brand" placeholder="Isacord" tag="brand" value={selected.thread.brand ?? ''}
-                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, brand: v || undefined } }), 'thread.brand')} />
-                <Text label="Code" placeholder="spool no." value={selected.thread.code ?? ''}
-                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, code: v || undefined } }), 'thread.code')} />
-                <Text label="Name" placeholder="optional" value={selected.thread.name ?? ''}
-                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, name: v || undefined } }), 'thread.name')} />
-              </fieldset>
-
-              {/* Lettering stays editable: the words, face and size are the
-                  object, and the outlines are regenerated from them. */}
+                  The words stay editable: the outlines are regenerated from
+                  them, the face and the size. */}
               {selected.text && (
-                <fieldset>
+                <fieldset className="lettering">
                   <legend>Lettering</legend>
+                  {/* The words are the object. Everything else here styles
+                      them, so the box they are typed into is the first thing
+                      in the panel and is sized like the thing it is. */}
                   <div className="row wide">
-                    <label>Text</label>
+                    <label htmlFor="gw-text">Text to sew</label>
+                  </div>
+                  <div className="row wide">
                     <input
+                      id="gw-text" className="bigtext"
                       type="text" value={selected.text.content}
+                      placeholder="type the words…"
+                      autoComplete="off" spellCheck={false}
                       onChange={(e) => applyText(selected.id, { ...selected.text!, content: e.target.value })} />
                   </div>
                   <div className="row wide">
@@ -4235,6 +4205,85 @@ export default function App() {
                   </div>
                 </fieldset>
               )}
+
+              {/* Presets: reaching for a known-good recipe is quicker
+                  than setting a dozen numbers, and it is what most jobs
+                  actually want. */}
+              <fieldset>
+                <legend>Stitch style</legend>
+                <div className="row wide">
+                  <div className="checks">
+                    {[...BUILT_IN_PRESETS, ...userPresets].map((p) => (
+                      <button key={p.id} title={p.note ?? 'A saved stitch style'}
+                        onClick={() => applyPreset(p)}>
+                        {p.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="row wide">
+                  <div className="checks">
+                    <button onClick={savePreset} title="Save this object's settings as a reusable style">
+                      Save current…
+                    </button>
+                    {userPresets.map((p) => (
+                      <button key={`x${p.id}`} title={`Delete "${p.name}"`}
+                        onClick={() => deletePreset(p.id)}>
+                        ✕ {p.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="row wide">
+                  <span className="dim">
+                    A style sets how an object is sewn — never its shape, colour or
+                    thread. The built-ins are starting points: check each against a
+                    sewout on the fabric you are using.
+                  </span>
+                </div>
+              </fieldset>
+
+              {/* The stitch type also lives in the toolbar, but that is a row
+                  of small icons far from the panel people actually read. With
+                  only the toolbar, "satin border" was visible in Properties
+                  while SATIN STITCH itself looked like it did not exist. */}
+              <div className="row">
+                <label>Stitch type</label>
+                <select value={selected.type}
+                  onChange={(e) => patch(selected.id, (o) => ({ ...o, type: e.target.value as StitchType }))}>
+                  <option value="run">Run — single line</option>
+                  <option value="bean">Bean — triple-pass line</option>
+                  <option value="satin">Satin — zigzag column</option>
+                  <option value="fill">Fill — tatami area</option>
+                  <option value="applique">Appliqué — fabric, with stops</option>
+                  <option value="knockdown">Knockdown — flatten pile first</option>
+                  <option value="none">Off — stitches nothing</option>
+                </select>
+              </div>
+              <Text label="Name" value={selected.name}
+                onChange={(v) => patch(selected.id, (o) => ({ ...o, name: v }), 'name')} />
+              <div className="row">
+                <label>{selectedObjs.length > 1 ? `Colour — all ${selectedObjs.length}` : 'Colour'}</label>
+                {/* Applies to the WHOLE selection. Recolouring a traced logo
+                    one object at a time is thirty colour pickers, and the
+                    reason to recolour is usually to make several objects
+                    share ONE thread. */}
+                <input type="color" value={selected.color}
+                  onChange={(e) => setColourOf(selectedObjs.map((o) => o.id), e.target.value)} />
+              </div>
+
+              <fieldset>
+                <legend>Thread</legend>
+                <Text label="Brand" placeholder="Isacord" tag="brand" value={selected.thread.brand ?? ''}
+                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, brand: v || undefined } }), 'thread.brand')} />
+                <Text label="Code" placeholder="spool no." value={selected.thread.code ?? ''}
+                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, code: v || undefined } }), 'thread.code')} />
+                <Text label="Name" placeholder="optional" value={selected.thread.name ?? ''}
+                  onChange={(v) => patch(selected.id, (o) => ({ ...o, thread: { ...o.thread, name: v || undefined } }), 'thread.name')} />
+              </fieldset>
+
+              {/* Lettering stays editable: the words, face and size are the
+                  object, and the outlines are regenerated from them. */}
 
               <fieldset>
                 <legend>Start and end</legend>
