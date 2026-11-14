@@ -37,6 +37,7 @@ import {
   parseRack, serializeRack, spoolLabel,
 } from '../src/threads'
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
+import { EDGE_PX, EDGE_SPEED, edgeVelocity, panStep } from '../src/autoscroll'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskColour, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines, textOnPath } from '../src/text'
 import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton } from '../src/skeleton'
@@ -4380,6 +4381,84 @@ console.log('\n# the backdrop saves with the project')
   ok(junk.fabric === undefined, 'a malformed garment colour is dropped, not kept')
 }
 
+}
+
+
+// ---------------------------------------------------------------------------
+console.log('\n# auto-scroll at the canvas edge')
+// ---------------------------------------------------------------------------
+{
+  // A 1000x600 canvas sitting at (100, 50) on the page, so that a bug which
+  // measures the margin from the viewport instead of the canvas shows up as a
+  // wrong answer rather than an accidentally-right one.
+  const r = { left: 100, top: 50, right: 1100, bottom: 650 }
+  const at = (x: number, y: number) => edgeVelocity(r, x, y)
+
+  // --- the comfortable middle
+  {
+    const v = at(600, 350)
+    ok(v.vx === 0 && v.vy === 0, 'the middle of the canvas does not scroll')
+    // Exactly ON the margin line is still the middle: the trigger is being
+    // INSIDE it, or a pointer resting at the boundary would creep.
+    ok(at(r.left + EDGE_PX, 350).vx === 0, 'nor does the inside edge of the margin')
+    ok(at(r.right - EDGE_PX, 350).vx === 0, 'on either side')
+  }
+
+  // --- direction
+  {
+    ok(at(r.left + 4, 350).vx < 0, 'the left margin scrolls left')
+    ok(at(r.right - 4, 350).vx > 0, 'the right margin scrolls right')
+    ok(at(600, r.top + 4).vy < 0, 'the top margin scrolls up')
+    ok(at(600, r.bottom - 4).vy > 0, 'the bottom margin scrolls down')
+    // A path heading into a corner needs both at once.
+    const c = at(r.right - 2, r.bottom - 2)
+    ok(c.vx > 0 && c.vy > 0, 'a corner scrolls diagonally')
+    // And each axis is independent: being deep in the right margin must not
+    // invent vertical movement the user did not ask for.
+    ok(at(r.right - 2, 350).vy === 0, 'one axis at the edge leaves the other alone')
+  }
+
+  // --- the speed curve
+  {
+    const shallow = Math.abs(at(r.right - EDGE_PX + 1, 350).vx)
+    const deep = Math.abs(at(r.right - 1, 350).vx)
+    ok(shallow > 0 && shallow < 2, 'easing into the margin barely moves the view',
+      `${shallow.toFixed(3)} px/s`)
+    ok(deep > EDGE_SPEED * 0.9, 'and the very edge runs at full speed',
+      `${deep.toFixed(0)} px/s`)
+    // Halfway in is a QUARTER of the speed, not half — the curve is squared
+    // so there is a usable slow range to stop precisely in.
+    const half = Math.abs(at(r.right - EDGE_PX / 2, 350).vx)
+    ok(Math.abs(half - EDGE_SPEED / 4) < 1, 'halfway in is a quarter speed',
+      `${half.toFixed(0)} vs ${EDGE_SPEED / 4}`)
+  }
+
+  // --- outside the window entirely
+  {
+    // A drag can leave the canvas — off the side of the screen, even. Speed
+    // is capped there, or the view would accelerate away out of control.
+    const edge = Math.abs(at(r.right - 1, 350).vx)
+    const far = Math.abs(at(r.right + 5000, 350).vx)
+    ok(far <= EDGE_SPEED + 1e-9, 'a pointer dragged far outside is capped', `${far.toFixed(0)} px/s`)
+    ok(far >= edge, 'and never slower than at the edge itself')
+  }
+
+  // --- zoom independence
+  {
+    // The same on-screen speed at every zoom: a fixed millimetre step would
+    // crawl at 20x and lurch at 0.5x, and the speed the eye tracks is the
+    // on-screen one.
+    const v = at(r.right - 1, 350)
+    const near = panStep(v, 1 / 60, 20)
+    const far = panStep(v, 1 / 60, 0.5)
+    ok(near.dx * 20 - far.dx * 0.5 < 1e-9,
+      'a frame moves the same number of PIXELS at any zoom')
+    ok(far.dx > near.dx, 'which is a bigger jump in mm when zoomed out',
+      `${far.dx.toFixed(2)} vs ${near.dx.toFixed(2)} mm`)
+    // Frame time is honoured, so a dropped frame does not lose ground.
+    const long = panStep(v, 1 / 15, 20)
+    ok(Math.abs(long.dx - near.dx * 4) < 1e-9, 'a long frame travels proportionally further')
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

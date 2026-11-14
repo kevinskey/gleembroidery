@@ -30,6 +30,7 @@ import {
   DUPLICATE_OFFSET_MM, alignDeltas, boxCentreOf, distributeDeltas, mirrorPt,
   type AlignEdge,
 } from './arrange'
+import { edgeVelocity, panStep } from './autoscroll'
 import type { BoolOp } from './boolean'
 import { close, segDist, toRegions } from './geometry'
 import { initHistory, useHistory, type HistoryState } from './history'
@@ -92,6 +93,18 @@ import { parseSvgToPaths } from './vector'
 
 // Thread colours for freshly imported shapes — spaced around the wheel so
 // adjacent objects are told apart at a glance before the user sets real ones.
+/** Where the auto-scroll preference lives between sessions. */
+const AUTOSCROLL_KEY = 'gleembroidery.autoscroll.v1'
+
+/**
+ * The part of a mouse event the canvas reads.
+ *
+ * A plain object rather than a MouseEvent so the auto-scroll loop can replay
+ * the last pointer position while the view slides beneath a cursor that has
+ * not moved.
+ */
+interface MoveLike { clientX: number; clientY: number; shiftKey: boolean }
+
 const PALETTE = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#1f2d3d']
 
 /**
@@ -2276,7 +2289,7 @@ export default function App() {
     || colA.current.length > 0 || colB.current.length > 0
 
   /** Pointer position in document mm. */
-  const atMm = (e: React.MouseEvent): Pt => {
+  const atMm = (e: MoveLike): Pt => {
     const rect = wrapRef.current!.getBoundingClientRect()
     return screenToWorld(view, rect.width, rect.height, { x: e.clientX - rect.left, y: e.clientY - rect.top })
   }
@@ -2523,7 +2536,100 @@ export default function App() {
     dragging.current = { from: p, trail: [p] }
   }
 
+  // --- auto-scroll -----------------------------------------------------------
+  //
+  // Zoomed in far enough to place nodes accurately, the shape you are tracing
+  // is bigger than the window — so a pen path runs into the edge and stops,
+  // with no way to continue without abandoning the gesture to pan. Every
+  // digitizing program solves this the same way: when the cursor reaches the
+  // edge DURING a gesture, the view follows it.
+  //
+  // It is deliberately gesture-only. A view that drifted whenever the pointer
+  // rested near an edge would be unusable for reading the design.
+
+  const [autoScroll, setAutoScroll] = useState(
+    () => localStorage.getItem(AUTOSCROLL_KEY) !== 'off',
+  )
+  useEffect(() => {
+    localStorage.setItem(AUTOSCROLL_KEY, autoScroll ? 'on' : 'off')
+  }, [autoScroll])
+
+  /** The last pointer position, replayed by the loop as the view moves. */
+  const lastMove = useRef<MoveLike | null>(null)
+  const scrollRaf = useRef(0)
+  /**
+   * The CURRENT move handler and preference, for the loop to call.
+   *
+   * The loop outlives the render that started it, and the handler it closed
+   * over reads `view` — so calling that captured copy would map the cursor
+   * through the view as it was when the gesture began, and the rubber-band
+   * would be pinned to where the design used to be. Going through a ref
+   * means every frame uses the handler from the latest render, which is the
+   * one that knows where the view is now.
+   */
+  const moveRef = useRef<(e: MoveLike) => void>(() => {})
+  const autoScrollRef = useRef(true)
+
+  /**
+   * Is a gesture in progress?
+   *
+   * Every ref the move handler consults, because each one represents a
+   * half-finished action that the edge of the window should not be allowed to
+   * cut short. `panning` is excluded: the user is already moving the view by
+   * hand, and helping would fight them.
+   */
+  const gestureLive = () =>
+    !panning.current && (
+      drawing()
+      || !!dragging.current || !!marquee.current || !!endDrag.current
+      || !!letterDrag.current || !!nodeDrag.current || !!penDrag.current
+      || !!pickDrag.current || !!guideDraw.current || !!xform.current
+      || arcPts.current.length > 0
+    )
+
+  const stopAutoScroll = () => {
+    if (scrollRaf.current) cancelAnimationFrame(scrollRaf.current)
+    scrollRaf.current = 0
+  }
+
+  const runAutoScroll = () => {
+    stopAutoScroll()
+    let last = performance.now()
+    const step = (now: number) => {
+      const dt = Math.min(0.1, (now - last) / 1000)
+      last = now
+      const wrap = wrapRef.current
+      const e = lastMove.current
+      if (!wrap || !e || !gestureLive() || !autoScrollRef.current) { scrollRaf.current = 0; return }
+      // Replay FIRST, so the preview catches up with the pan applied at the
+      // end of the previous frame before this frame moves the view again.
+      moveRef.current(e)
+      const vel = edgeVelocity(wrap.getBoundingClientRect(), e.clientX, e.clientY)
+      // Zero on both axes means the pointer came back to the comfortable
+      // middle: stop the loop rather than keep it spinning at no speed.
+      if (!vel.vx && !vel.vy) { scrollRaf.current = 0; return }
+      setView((v) => {
+        const { dx, dy } = panStep(vel, dt, v.scale)
+        return { ...v, cx: v.cx + dx, cy: v.cy + dy }
+      })
+      scrollRaf.current = requestAnimationFrame(step)
+    }
+    scrollRaf.current = requestAnimationFrame(step)
+  }
+
+  // A gesture can end anywhere — mouse up, Escape, a finished shape — so the
+  // loop is never left running on its own authority.
+  useEffect(() => stopAutoScroll, [])
+
   const onMove = (e: React.MouseEvent) => {
+    lastMove.current = { clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey }
+    handleMove(lastMove.current)
+    if (!autoScroll) return
+    if (!gestureLive()) { stopAutoScroll(); return }
+    if (!scrollRaf.current) runAutoScroll()
+  }
+
+  const handleMove = (e: MoveLike) => {
     const pan = panning.current
     if (pan) {
       setView((v) => ({ ...v, cx: pan.cx - (e.clientX - pan.x) / v.scale, cy: pan.cy - (e.clientY - pan.y) / v.scale }))
@@ -2708,7 +2814,14 @@ export default function App() {
     setDraft(shapeFor(d.from, p, e.shiftKey))
   }
 
+  // Refreshed on EVERY render, not inside onMove: during an auto-scroll the
+  // pointer is stationary, so no move event fires and the loop would keep
+  // calling the handler from the render where the gesture started.
+  moveRef.current = handleMove
+  autoScrollRef.current = autoScroll
+
   const onUp = (e: React.MouseEvent) => {
+    stopAutoScroll()
     const panned = panning.current
     panning.current = null
     // The wand fires on release, and only when the pointer did not travel:
@@ -3159,6 +3272,12 @@ export default function App() {
                 the middle button.
               </span>
             </div>
+            <label className="check keep-open"
+              title="While you are drawing or dragging, move the view when the pointer reaches the edge — so a path can run off the side of the window and keep going">
+              <input type="checkbox" checked={autoScroll}
+                onChange={(e) => setAutoScroll(e.target.checked)} />
+              Auto-scroll while drawing
+            </label>
             <MenuSep />
             <MenuLabel>Show</MenuLabel>
             {([
