@@ -2517,10 +2517,26 @@ console.log('\n# the plan regenerates when the document changes')
     const stringifyAll = () => JSON.stringify(big.objects.map((o) => objectOut(o))).length
     // Warm both paths before timing either.
     docSignature(big); stringifyAll()
-    const time = (f: () => unknown, n: number) => {
-      const t0 = performance.now()
-      for (let i = 0; i < n; i++) f()
-      return (performance.now() - t0) / n
+    // BEST of several rounds, not the mean of one.
+    //
+    // A ratio between two timings is machine-independent, which is why this
+    // test is written as one — but a single round is not interference-
+    // independent. One GC pause or one scheduler preemption lands entirely in
+    // whichever side was running at the time, and with a dev server building
+    // in the background that is enough to flip the comparison. It did, once,
+    // which is how this comment came to be written.
+    //
+    // The minimum is the round least contaminated by whatever else the
+    // machine was doing, and it is the honest estimate of how long the work
+    // takes. The mean measures the machine's mood.
+    const time = (f: () => unknown, n: number, rounds = 5) => {
+      let best = Infinity
+      for (let r = 0; r < rounds; r++) {
+        const t0 = performance.now()
+        for (let i = 0; i < n; i++) f()
+        best = Math.min(best, (performance.now() - t0) / n)
+      }
+      return best
     }
     const ours = time(() => docSignature(big), 10)
     const naive = time(stringifyAll, 10)
