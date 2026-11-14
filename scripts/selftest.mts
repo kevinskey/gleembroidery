@@ -39,6 +39,7 @@ import {
 import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { EDGE_PX, EDGE_SPEED, edgeVelocity, panStep } from '../src/autoscroll'
 import { directionalInset, hasOwnComp, resolveComp, trimEnds, withComp } from '../src/compensate'
+import { ALL_FAMILIES, FONT_GROUPS, SYSTEM_FAMILIES, fontSpec, isWebFont } from '../src/fonts'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskColour, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines, textOnPath } from '../src/text'
 import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton } from '../src/skeleton'
@@ -4644,6 +4645,62 @@ console.log('\n# push and pull compensation')
     const old = deserialize(JSON.stringify(legacy))
     ok(old.comp.satinPull === 0.2 && old.comp.fillPull === 0.15 && old.comp.push === 0,
       'an older file with no compensation block opens on the historical defaults')
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n# the font catalogue')
+// ---------------------------------------------------------------------------
+//
+// Only the pure parts. Loading and availability are browser services and are
+// verified in a real browser instead — but the catalogue itself is data, and
+// data with a duplicate or a bad Google Fonts URL in it fails quietly.
+{
+  // --- the list the picker shows
+  {
+    ok(ALL_FAMILIES.length > 150, 'the catalogue is the whole shop list, not a handful',
+      `${ALL_FAMILIES.length} faces`)
+    ok(new Set(ALL_FAMILIES).size === ALL_FAMILIES.length,
+      'with no duplicates — the same name twice in a dropdown looks like a bug')
+    ok(ALL_FAMILIES.every((f) => f.trim() === f && f.length > 0),
+      'and no stray whitespace in a family name, which would break the CSS URL')
+    // Every group contributes, or a heading sits above nothing.
+    ok(FONT_GROUPS.every((g) => g.families.length > 0), 'every group has faces in it')
+    ok(FONT_GROUPS.every((g) => g.label.trim().length > 0), 'and a heading')
+  }
+
+  // --- the faces that need no network
+  {
+    ok(SYSTEM_FAMILIES.every((f) => !isWebFont(f)),
+      'nothing in "On this computer" is fetched from the web — that is the point of the group')
+    ok(isWebFont('Bebas Neue') && isWebFont('Graduate'),
+      'while the Google faces are')
+    ok(!isWebFont('Wingdings'),
+      'and a face that is not in the catalogue at all is never fetched')
+    // The studio offers these, so a job set in one must be openable in the
+    // other. A name that differs by a space is a face that cannot be found.
+    for (const f of ['Bebas Neue', 'Anton', 'Graduate', 'League Gothic', 'Permanent Marker',
+      'Rubik Mono One', 'UnifrakturMaguntia', 'Press Start 2P']) {
+      ok(ALL_FAMILIES.includes(f), `the studio's "${f}" is here too`)
+    }
+  }
+
+  // --- the Google Fonts URL fragment
+  {
+    ok(fontSpec('Roboto') === 'family=Roboto:wght@400;700',
+      'an ordinary face asks for both weights', fontSpec('Roboto'))
+    ok(fontSpec('Open Sans') === 'family=Open+Sans:wght@400;700',
+      'spaces become plus signs', fontSpec('Open Sans'))
+    // The trap this list exists for: asking a single-weight face for 700
+    // makes the CSS API 400 the WHOLE request, so the font never arrives and
+    // the canvas quietly traces a substitute.
+    ok(fontSpec('Bebas Neue') === 'family=Bebas+Neue',
+      'a single-weight face asks for no weight axis at all', fontSpec('Bebas Neue'))
+    ok(fontSpec('UnifrakturCook') === 'family=UnifrakturCook:wght@700',
+      'and a bold-only face asks for 700, since a name-only URL would give it 400',
+      fontSpec('UnifrakturCook'))
+    ok(ALL_FAMILIES.every((f) => !/[?&#]/.test(fontSpec(f))),
+      'no family name injects anything into the query string')
   }
 }
 

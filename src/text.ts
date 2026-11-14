@@ -107,6 +107,12 @@ export const DEFAULT_TEXT: () => TextSpec = () => ({
  * a permission prompt, which is a poor trade for a list most people will not
  * read.
  */
+/**
+ * Superseded by fonts.ts, which carries the whole shop catalogue.
+ *
+ * Kept only because a stored TextSpec may name any of these and the engine
+ * must not care where a family name came from.
+ */
 export const SUGGESTED_FACES = [
   'Georgia', 'Times New Roman', 'Palatino', 'Garamond',
   'Helvetica', 'Arial', 'Arial Black', 'Verdana', 'Tahoma', 'Impact',

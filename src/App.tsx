@@ -32,6 +32,7 @@ import {
 } from './arrange'
 import { edgeVelocity, panStep } from './autoscroll'
 import { hasOwnComp, resolveComp } from './compensate'
+import { ALL_FAMILIES, FONT_GROUPS, ensureFamily, isFamilyAvailable } from './fonts'
 import type { BoolOp } from './boolean'
 import { close, segDist, toRegions } from './geometry'
 import { initHistory, useHistory, type HistoryState } from './history'
@@ -42,7 +43,7 @@ import {
 } from './stitchedit'
 import { DEFAULT_TOLERANCE, traceRegionAt, type Raster } from './trace'
 import {
-  DEFAULT_TEXT, SUGGESTED_FACES, textToColumns, textToOutlines,
+  DEFAULT_TEXT, textToColumns, textToOutlines,
   type LetterNudge, type LetterOutline, type TextSpec,
 } from './text'
 import {
@@ -124,6 +125,12 @@ const allClosed = (paths: readonly Pt[][]): boolean =>
  * where there is no per-node choice to preview.
  */
 const NODE_MARKER_TOOLS = new Set<Tool>(['pen', 'column'])
+
+/** The picker's escape hatch: any face installed on this computer. */
+const OTHER_FAMILY = '\u0000other'
+
+/** Is this one of the catalogued faces, or something the user typed? */
+const knownFamily = (f: string): boolean => ALL_FAMILIES.includes(f)
 
 const PALETTE = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#1f2d3d']
 
@@ -854,6 +861,20 @@ export default function App() {
   // changes it is describing something the user is no longer looking at, and
   // a stale warning is worse than none.
   useEffect(() => { setRefusal(null) }, [selectedIds])
+
+  // Fetch the faces this document already uses, as soon as it is opened.
+  //
+  // Its lettering outlines were saved with it and are correct, so nothing
+  // looks wrong — but the first edit re-traces them, and a face that has not
+  // arrived yet would be substituted silently. Doing it on open means the
+  // font is there before anyone touches anything.
+  useEffect(() => {
+    const families = new Set(
+      doc.objects.map((o) => o.text?.family).filter((f): f is string => !!f))
+    for (const f of families) if (!isFamilyAvailable(f)) void ensureFamily(f)
+    // Keyed on the SET of families rather than on the document: this must not
+    // re-run on every nudge of a letter.
+  }, [[...new Set(doc.objects.map((o) => o.text?.family).filter(Boolean))].sort().join('\u0000')]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- rendering ----------------------------------------------------------
   const draw = useCallback(() => {
@@ -2133,7 +2154,59 @@ export default function App() {
    * face change or a longer word comes out as that face and that word, not
    * as the old shapes stretched to fit.
    */
+  /**
+   * Choose a face, fetching it first if it has to come from the web.
+   *
+   * The fetch has to finish BEFORE the outlines are traced. Lettering is
+   * rasterised through a canvas whose font string ends in a fallback, so a
+   * face that has not arrived yet does not fail — it silently produces the
+   * fallback's letterforms, which trace cleanly, look plausible, and sew the
+   * wrong typeface onto a customer's garment. Nothing downstream can catch
+   * that, because by then it is only outlines.
+   */
+  const pickFamily = (id: string, spec: TextSpec, family: string) => {
+    if (family === OTHER_FAMILY) {
+      // Hand the box back to the user, keeping whatever is there to edit.
+      applyText(id, { ...spec, family: knownFamily(spec.family) ? '' : spec.family })
+      return
+    }
+    if (isFamilyAvailable(family)) { applyText(id, { ...spec, family }); return }
+    setNote(`fetching ${family}…`)
+    ensureFamily(family).then((ok) => {
+      if (ok) {
+        applyText(id, { ...spec, family })
+        setNote(`${family} loaded`)
+        return
+      }
+      // Refused rather than absorbed: sewing the wrong typeface is worse
+      // than not changing the font.
+      setRefusal({
+        text: `${family} could not be loaded, so the lettering was left as it was. `
+          + 'It is fetched from the web the first time it is used — check the '
+          + 'connection, or pick one of the faces under "On this computer", '
+          + 'which need no network.',
+      })
+    })
+  }
+
   const applyText = useCallback((id: string, spec: TextSpec, at?: Pt) => {
+    // The LAST line of defence, and the one that matters on a reopened job:
+    // the outlines were saved with the design, so the lettering looks right
+    // until someone fixes a typo — at which point it is re-traced, and if the
+    // face has not been fetched in this session the fallback's letterforms go
+    // in instead. Checked on every edit rather than only on choosing a font,
+    // because the edit is where the damage is done.
+    if (spec.family && !isFamilyAvailable(spec.family)) {
+      void ensureFamily(spec.family).then((ok) => {
+        if (ok) applyText(id, spec, at)
+        else setRefusal({
+          text: `“${spec.family}” is not available, so this lettering would be `
+            + 'traced in a substitute typeface and sewn that way. Pick another '
+            + 'font, or reconnect and choose it again.',
+        })
+      })
+      return
+    }
     if (spec.mode === 'satin') { applySatinText(id, spec, at); return }
     const out = textToOutlines(spec)
     for (const w of out.warnings) setNote(w)
@@ -4091,15 +4164,46 @@ export default function App() {
                       onChange={(e) => applyText(selected.id, { ...selected.text!, content: e.target.value })} />
                   </div>
                   <div className="row wide">
-                    <label>Font</label>
-                    <input
-                      type="text" list="gw-faces" value={selected.text.family}
-                      placeholder="any font on this Mac"
-                      onChange={(e) => applyText(selected.id, { ...selected.text!, family: e.target.value })} />
-                    <datalist id="gw-faces">
-                      {SUGGESTED_FACES.map((f) => <option key={f} value={f} />)}
-                    </datalist>
+                    <label htmlFor="gw-font">Font</label>
                   </div>
+                  <div className="row wide">
+                    {/* A SELECT, not an input with a datalist.
+                        A datalist filters its options by what is already in
+                        the box, so with "Georgia" typed the list showed
+                        exactly one font and the other hundred and seventy
+                        looked like they did not exist. A list you have to
+                        empty the box to see is not a list. */}
+                    <select
+                      id="gw-font" className="bigtext"
+                      value={knownFamily(selected.text.family) ? selected.text.family : OTHER_FAMILY}
+                      onChange={(e) => pickFamily(selected.id, selected.text!, e.target.value)}
+                    >
+                      {FONT_GROUPS.map((g) => (
+                        <optgroup key={g.label} label={g.label}>
+                          {g.families.map((f) => (
+                            // Rendered IN the face where the browser has it,
+                            // because a name is a poor description of a
+                            // typeface and this list is long.
+                            <option key={f} value={f} style={{ fontFamily: `"${f}", sans-serif` }}>{f}</option>
+                          ))}
+                        </optgroup>
+                      ))}
+                      <optgroup label="Other">
+                        <option value={OTHER_FAMILY}>
+                          {knownFamily(selected.text.family)
+                            ? 'Type a font name…' : `${selected.text.family} (typed)`}
+                        </option>
+                      </optgroup>
+                    </select>
+                  </div>
+                  {!knownFamily(selected.text.family) && (
+                    <div className="row wide">
+                      <input
+                        type="text" value={selected.text.family}
+                        placeholder="any font installed on this computer"
+                        onChange={(e) => applyText(selected.id, { ...selected.text!, family: e.target.value })} />
+                    </div>
+                  )}
                   <Num label="Letter height (mm)" value={selected.text.sizeMm} step={0.5} min={3} max={200}
                     onChange={(v) => applyText(selected.id, { ...selected.text!, sizeMm: v })} />
                   <Num label="Letter spacing (mm)" value={selected.text.trackingMm} step={0.1} min={-5} max={20}
