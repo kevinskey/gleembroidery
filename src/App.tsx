@@ -88,7 +88,7 @@ import {
   type MachineProfile,
 } from './package'
 import { FILE_EXT, ProjectError, deserialize, docSignature, projectFilename, serialize } from './project'
-import { fitView, render, screenToWorld, type RenderOptions, type View } from './render'
+import { LETTER_HANDLE_PX, fitView, render, screenToWorld, type RenderOptions, type View } from './render'
 import { countStitches, longestStitch, planBounds, type StitchPlan } from './stitches'
 import { useStitchPlan } from './useStitchPlan'
 import { parseSvgToPaths } from './vector'
@@ -2630,7 +2630,8 @@ export default function App() {
       // they sit INSIDE the selection box, so anything else would make them
       // unreachable.
       if (selected?.text && selected.text.mode === 'fill' && letterBoxes?.id === selected.id) {
-        const tol = HANDLE_PX / view.scale
+        // The same size that is DRAWN, so what you aim at is what you hit.
+        const tol = (LETTER_HANDLE_PX / 2 + 2) / view.scale
         for (let i = 0; i < letterBoxes.letters.length; i++) {
           const c = letterBoxes.letters[i].centre
           if (Math.hypot(p.x - c.x, p.y - c.y) <= tol) {

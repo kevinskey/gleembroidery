@@ -23,6 +23,24 @@ import { trimEnds } from './compensate'
  * value this deep is a caller that built params by hand, and zero is the
  * honest reading of it rather than a guess at what they meant.
  */
+/**
+ * How far the column advances per NEEDLE PENETRATION, mm.
+ *
+ * `density` is the spacing between adjacent penetrations on the SAME side of
+ * the column — the number every commercial package means by satin density,
+ * and the number a digitizer has in their head when they type 0.4. Because
+ * penetrations alternate between the rails, the column advances half of it
+ * each time.
+ *
+ * This engine used to advance a FULL density per penetration, which put the
+ * same-side spacing at 0.8 mm for a 0.4 mm setting — half the density asked
+ * for. It was self-consistent and documented, so nothing contradicted itself;
+ * it simply meant something different by the word than the rest of the trade
+ * does, and the result was satin that looked like a spring on screen and
+ * would have sewn loose enough to show fabric through it.
+ */
+const advanceOf = (p: { density: number }): number => Math.max(0.05, p.density) / 2
+
 const pullOf = (p: { pullComp?: number }): number => Math.max(0, p.pullComp ?? 0)
 
 /** The column's push compensation. Absent means none, as above. */
@@ -309,9 +327,21 @@ export function findCorners(pts: Pt[]): number[] {
 function smoothColumn(
   pts: Pt[], p: SatinParams, closed: boolean, startSide: number,
   guides: readonly ResolvedGuide[] = [], sOffset = 0,
+  /**
+   * This run CONTINUES from a mitred corner, so it must not open with a bar.
+   *
+   * The fan already skips its own first bar for exactly this reason — k=0
+   * lands where the incoming column's last stitch is, and a repeated
+   * penetration is a hole, not a stitch. Coming back out of the fan the same
+   * thing happens in reverse, and it was never guarded: every corner opened
+   * its next run half a step early. It stayed above the same-rail floor only
+   * because the step used to be twice as long as it should have been, so
+   * correcting the density convention is what finally exposed it.
+   */
+  continuing = false,
 ): { stitches: Stitch[]; side: number } {
   const half = (p.width + pullOf(p)) / 2
-  const density = Math.max(0.1, p.density)
+  const density = advanceOf(p)
   const fine = resample(pts, Math.min(0.15, density / 3))
   if (fine.length < 2) return { stitches: [], side: startSide }
   const cum = cumulative(fine)
@@ -330,6 +360,11 @@ function smoothColumn(
     const t = tangentAt(fine, i, closed)
     const n = { x: -t.y, y: t.x }
 
+    // Let the rhythm start a full step in. Nothing else changes: `carried`
+    // accumulates from i=1 as usual, so the first bar of this run lands one
+    // proper step past the corner instead of on top of it.
+    if (i === 0 && continuing) continue
+
     if (i > 0) {
       carried += dist(fine[i - 1], fine[i])
       // On a bend of radius r the outer rail travels (r+half)/r times as far,
@@ -346,8 +381,13 @@ function smoothColumn(
       // and usually a broken needle.
       const narrow = Math.max(0, 1 - curvature * half)
       const innerStep = density / Math.max(1, widen)
-      const step = narrow > 1e-6 && innerStep * narrow < MIN_RAIL_MM
-        ? MIN_RAIL_MM / narrow
+      // MIN_RAIL_MM is a floor on SAME-RAIL spacing, and consecutive
+      // penetrations alternate rails — so two steps make one same-rail gap,
+      // and the comparison needs the factor of two. Without it the clamp is
+      // twice as eager as it should be and quietly loosens every column on a
+      // curve. It went unnoticed while the step itself was a full density.
+      const step = narrow > 1e-6 && 2 * innerStep * narrow < MIN_RAIL_MM
+        ? MIN_RAIL_MM / (2 * narrow)
         : innerStep
       if (carried + 1e-12 < step) continue
       carried = Math.max(0, carried - step)
@@ -376,8 +416,36 @@ function smoothColumn(
     y: last.y + nl.y * half * side + tl.y * tailSlide,
   }
   if (!out.length || dist(out[out.length - 1], tail) > 1e-6) {
-    out.push(tail)
-    side = -side
+    // The forced closing bar lands wherever the end of the path is, not where
+    // the rhythm would have put it — so it can arrive a fraction after the
+    // previous penetration on its OWN rail. Two holes that close together are
+    // one hole: shredded thread, and usually a broken needle. Drop the
+    // crowded one and keep the squarely-landed end, which is the whole point
+    // of forcing it.
+    //
+    // The two-rail engine has always done this; the spine engine did not, and
+    // got away with it only because its steps used to be twice as long.
+    // MOVE the crowded penetration rather than add another one.
+    //
+    // The forced closing bar lands where the path ends, not where the rhythm
+    // would have put it, so it can arrive a fraction after the previous
+    // penetration on its OWN rail — two holes that close together are one
+    // hole, with shredded thread and usually a broken needle. Deleting the
+    // crowded one leaves its neighbours on the same rail and the column stops
+    // alternating; deleting the whole bar moves the end of the column.
+    // Sliding it onto the end keeps the count, the alternation AND the square
+    // finish, which is the same answer the stitch pipeline reaches for the
+    // same problem.
+    //
+    // The two-rail engine has always closed out this way; the spine engine
+    // did not, and got away with it only because its steps used to be twice
+    // as long as they should have been.
+    if (out.length >= 2 && dist(out[out.length - 2], tail) < MIN_RAIL_MM) {
+      out[out.length - 2] = tail
+    } else {
+      out.push(tail)
+      side = -side
+    }
   }
   return { stitches: out, side }
 }
@@ -398,6 +466,14 @@ function smoothColumn(
 function cornerFan(pts: Pt[], i: number, p: SatinParams, startSide: number):
   { stitches: Stitch[]; side: number } {
   const half = (p.width + pullOf(p)) / 2
+  // The FULL density here, not the per-penetration advance.
+  //
+  // A fan is the one place where consecutive penetrations land on the SAME
+  // rail: the outer edge sweeps round the corner while the inner one stays
+  // pinned near the mitre point. So the spacing between them IS the density,
+  // with no factor of two — and halving it here put two holes 0.2 mm apart
+  // on the outside of every corner, which is the shredded thread and broken
+  // needle this routine exists to prevent.
   const density = Math.max(0.1, p.density)
   const c = pts[i]
   const t1 = unit(pts[i - 1], c), t2 = unit(c, pts[i + 1])
@@ -498,7 +574,7 @@ export function satinColumn(
   for (const c of corners) {
     const seg = pts.slice(from, c + 1)
     if (seg.length >= 2) {
-      const r = smoothColumn(seg, p, false, side, resolved, cumAll[from])
+      const r = smoothColumn(seg, p, false, side, resolved, cumAll[from], from > 0)
       out.push(...r.stitches)
       side = r.side
     }
@@ -509,7 +585,7 @@ export function satinColumn(
   }
   const tailSeg = pts.slice(from)
   if (tailSeg.length >= 2) {
-    out.push(...smoothColumn(tailSeg, p, false, side, resolved, cumAll[from]).stitches)
+    out.push(...smoothColumn(tailSeg, p, false, side, resolved, cumAll[from], true).stitches)
   }
   return applySatinSplit(out, p)
 }
@@ -751,7 +827,7 @@ export function satinTwoRail(
   if (a.length < 2 || bRaw.length < 2) return []
   const b = railsNeedFlip(a, bRaw) ? [...bRaw].reverse() : bRaw
 
-  const density = Math.max(0.1, p.density)
+  const density = advanceOf(p)
   const fine = Math.min(0.15, density / 3)
   const wa = railWalk(a, fine)
   const wb = railWalk(b, fine)
@@ -788,8 +864,10 @@ export function satinTwoRail(
     let du = fast > 1e-9 ? probe * (density / fast) : probe
     // Clamp so the inner rail keeps a sewable gap between penetrations.
     if (slow > 1e-9) {
+      // Same factor of two as the spine engine: this is the inner rail's
+      // advance per penetration, and its same-rail gap is twice that.
       const innerStep = slow * (du / probe)
-      if (innerStep < MIN_RAIL_MM) du = probe * (MIN_RAIL_MM / slow)
+      if (2 * innerStep < MIN_RAIL_MM) du = probe * (MIN_RAIL_MM / (2 * slow))
     }
     u += Math.max(du, 1e-7)
   }

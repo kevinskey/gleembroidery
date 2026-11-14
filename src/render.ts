@@ -114,24 +114,42 @@ const RULER = 22 // px gutter for the rulers
  * colour, not three per stitch, which is what keeps it usable while dragging.
  */
 const THREAD_MM = 0.4
+
+/**
+ * The per-letter nudge handles, in screen px.
+ *
+ * Shared with the hit test in App.tsx so the target is exactly what is drawn
+ * — a marker smaller than its hit area feels unreliable, and larger feels
+ * broken.
+ */
+export const LETTER_HANDLE_PX = 13
 /** Below this zoom a thread is a couple of pixels; the detail is invisible. */
 const DETAIL_SCALE = 5
 /** Past this many stitches, stay on the fast path whatever the zoom. */
 const DETAIL_MAX_STITCHES = 80_000
 /**
- * A stitch is shaded ALONG its length, not across it.
+ * A stitch is a ROUND CORD, drawn as stacked translucent strokes.
  *
- * A satin stitch dips into the fabric at both ends and lies proud in the
- * middle, so each strand is dark where it enters the cloth and bright where
- * it sits on top. Across a packed column that reads as fine banding running
- * PERPENDICULAR to the stitches — which is what real thread looks like, and
- * what a cross-stitch highlight gets wrong: lighting each strand along one
- * edge turns a dense fill into harsh stripes.
+ * The previous version shaded each stitch along its length — dark at the
+ * ends where it enters the cloth, bright in the middle — on the theory that
+ * a satin bar really does sit proud in the middle. It does, but drawing it
+ * that way made every stitch a high-contrast chunk with dark ends, and a
+ * tatami fill of 4 mm stitches came out as a heap of bricks rather than a
+ * surface. A digitizer could not read it, which is the only test that counts.
  *
- * These are the fractions of each stitch kept by the body and crown passes.
+ * What reads correctly is the way the realistic renderers do it: lay down a
+ * soft wide shadow, the cord over it, then a narrow bright crown ALONG the
+ * whole length. Three strokes of decreasing width approximate a cylinder lit
+ * from above, the shadow spreads under the neighbouring strands and merges
+ * the rows into one surface, and the crown gives the sheen that makes thread
+ * look like thread. No banding, no bricks.
+ *
+ * Widths are fractions of the laid thread width; alphas are what keeps the
+ * overlaps from turning into mud.
  */
-const BODY_SPAN = 0.88
-const CROWN_SPAN = 0.5
+const SHADOW_W = 1.18, SHADOW_A = 0.20, SHADOW_T = -0.38
+const CORD_W = 1.06, CORD_A = 1.0
+const CROWN_W = 0.38, CROWN_A = 0.34, CROWN_T = 0.30
 
 /**
  * How far a stitch end may wander, as a fraction of a thread width.
@@ -521,37 +539,65 @@ export function render(
       for (let i = 1; i < segs.length; i++) {
         const [ax, ay, bx, by] = segs[i - 1]
         const [cx, cy, dx2, dy2] = segs[i]
-        gaps.push(Math.hypot((cx + dx2) / 2 - (ax + bx) / 2, (cy + dy2) / 2 - (ay + by) / 2))
+        // ACROSS the stitch, not between midpoints.
+        //
+        // The distance between two stitch midpoints answers a different
+        // question depending on what is being sewn, and taking it as the
+        // lay-down spacing was catastrophic on fills. In a satin column
+        // consecutive bars are parallel and step along the spine, so the
+        // midpoints really are one density apart — about 0.4 mm. In a tatami
+        // fill consecutive stitches run END TO END along the same row, so
+        // their midpoints are a stitch LENGTH apart — about 4 mm, ten times
+        // too much. Every stitch was then drawn ten times too wide, which is
+        // why a filled letter came out as a pile of bricks.
+        //
+        // The perpendicular component asks the question that was meant: how
+        // far is the next stitch displaced ACROSS this one. Along a fill row
+        // that is zero, between rows it is the row spacing, and in a satin
+        // column it is the density — the right answer in all three.
+        let ux = bx - ax, uy = by - ay
+        const ulen = Math.hypot(ux, uy)
+        if (ulen < 1e-6) continue
+        ux /= ulen; uy /= ulen
+        const mx = (cx + dx2) / 2 - (ax + bx) / 2
+        const my = (cy + dy2) / 2 - (ay + by) / 2
+        gaps.push(Math.abs(mx * -uy + my * ux))
       }
       gaps.sort((a, b) => a - b)
+      // Median, not mean: the first and last stitch of every run are
+      // irregular, and a mean lets them drag the whole column.
       const spacing = gaps.length ? gaps[gaps.length >> 1] : 0
-      const lay = Math.max(threadPx, Math.min(spacing * 1.35, threadPx * 4))
+      // Capped at twice the thread, not four times. Thread laid under tension
+      // flattens and spreads a little to cover the gap to its neighbour, but
+      // it does not spread without limit — past about double, what is being
+      // drawn is no longer thread.
+      const lay = Math.max(threadPx, Math.min(spacing * 1.35, threadPx * 2))
 
-      // BUTT caps, not round. A round cap on a stroke widened to cover the
-      // stitch spacing puts a dark semicircle at every stitch end, and a
-      // column of those reads as a fringe of tentacles. Real stitch ends are
-      // flat where the needle went in.
-      ctx.lineCap = 'butt'
+      // ROUND caps, at the thread's own width. The previous version used butt
+      // caps because it drew strokes far wider than the thread, where a round
+      // cap bulges into a semicircle; at a true thread width a round cap is
+      // simply the end of a cord, which is what it is.
+      ctx.lineCap = 'round'
+      ctx.lineJoin = 'round'
 
-      const pass = (colour: string, width: number, span: number, alpha: number) => {
+      const pass = (colour: string, width: number, alpha: number) => {
         ctx.strokeStyle = colour
-        ctx.lineWidth = Math.max(0.4, width)
+        ctx.lineWidth = Math.max(0.35, width)
         ctx.globalAlpha = alpha
         ctx.beginPath()
         for (const [x0, y0, x1, y1] of segs) {
-          const mx = (x0 + x1) / 2, my = (y0 + y1) / 2
-          const hx = ((x1 - x0) / 2) * span, hy = ((y1 - y0) / 2) * span
-          ctx.moveTo(mx - hx, my - hy)
-          ctx.lineTo(mx + hx, my + hy)
+          ctx.moveTo(x0, y0)
+          ctx.lineTo(x1, y1)
         }
         ctx.stroke()
       }
 
-      pass(shade(b.color, -0.3), lay * 1.02, 1, 1)            // the ends, sunk into cloth
-      pass(b.color, lay * 0.98, BODY_SPAN, 1)                 // the body lying proud
-      pass(shade(b.color, 0.26), lay * 0.72, CROWN_SPAN, 0.4) // the lit crown
+      // Shadow first, spreading under the neighbours so rows merge into one
+      // surface instead of standing apart as separate bars.
+      pass(shade(b.color, SHADOW_T), lay * SHADOW_W, SHADOW_A)
+      pass(b.color, lay * CORD_W, CORD_A)
+      pass(shade(b.color, CROWN_T), lay * CROWN_W, CROWN_A)
       ctx.globalAlpha = 1
-      ctx.lineCap = 'round'
     }
 
     if (opt.showJumps) {
@@ -685,12 +731,21 @@ export function render(
     ctx.save()
     ctx.fillStyle = '#22c55e'
     ctx.strokeStyle = dark ? '#0f1216' : '#ffffff'
-    ctx.lineWidth = 1
+    ctx.lineWidth = 1.5
+    // Big enough to hit on the first try. These sit INSIDE the selection box
+    // and on top of stitching, so a small marker is both hard to see against
+    // a busy fill and hard to land on — and the gesture they start is a fine
+    // positional nudge, where fighting for the grab is the whole frustration.
+    const r = LETTER_HANDLE_PX / 2
     for (const c of opt.letterHandles) {
       const p = toS(c)
+      // A soft shadow so it reads on top of dense thread of any colour.
+      ctx.shadowColor = 'rgba(0,0,0,0.55)'
+      ctx.shadowBlur = 3
       ctx.beginPath()
-      ctx.rect(p.x - 4, p.y - 4, 8, 8)
+      ctx.rect(p.x - r, p.y - r, LETTER_HANDLE_PX, LETTER_HANDLE_PX)
       ctx.fill()
+      ctx.shadowBlur = 0
       ctx.stroke()
     }
     ctx.restore()

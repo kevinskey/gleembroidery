@@ -131,7 +131,14 @@ export const DEFAULT_COMP = (): CompDefaults => ({ satinPull: 0.2, fillPull: 0.1
 export interface SatinParams {
   /** Column width, mm. Over ~10 mm the stitch is too long and snags. */
   width: number
-  /** Needle-to-needle spacing along the column, mm. Lower = denser. */
+  /**
+   * Spacing between adjacent penetrations on the SAME side of the column, mm.
+   *
+   * The number every commercial package means by satin density, so 0.4 here
+   * is the 0.4 a digitizer already has in their head. The column advances
+   * half of it per penetration, because the penetrations alternate rails.
+   * Lower = denser.
+   */
   density: number
   /**
    * Widen the column to cover the fabric pulled in by the stitch, mm.

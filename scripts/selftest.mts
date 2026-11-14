@@ -204,11 +204,15 @@ console.log('\n# satin column')
   ok(halves.length === 1 && Math.abs(parseFloat(halves[0]) - 1.5) < 1e-6, 'column holds its width',
     `half-width ${halves[0]} mm`)
 
-  // Pitch along the spine should be the requested density.
+  // `density` is the spacing between adjacent penetrations on the SAME side
+  // of the column — what every commercial package means by satin density, and
+  // what a digitizer has in their head typing 0.4. The column therefore
+  // advances HALF of it per penetration, because they alternate rails.
   const pitches: number[] = []
-  for (let i = 2; i < s.length - 1; i++) pitches.push(Math.abs(s[i].x - s[i - 2].x) / 2)
+  for (let i = 2; i < s.length - 1; i++) pitches.push(Math.abs(s[i].x - s[i - 2].x))
   const avg = pitches.reduce((a, b) => a + b, 0) / pitches.length
-  ok(Math.abs(avg - 0.4) < 0.06, 'penetration pitch matches density', `${avg.toFixed(3)} mm`)
+  ok(Math.abs(avg - 0.4) < 0.06, 'same-side spacing matches the density setting',
+    `${avg.toFixed(3)} mm for density 0.4`)
 
   // Curvature correction: a tight arc must get MORE penetrations per mm of
   // spine than a straight run of the same length, or the outer rail gaps.
@@ -1233,14 +1237,15 @@ console.log('\n# two-rail satin column')
   ok(alternates, 'every penetration lands on a rail, alternating between them')
   ok(Math.abs(col[0].x) < 1e-6 && Math.abs(col[col.length - 1].x - 40) < 0.01,
     'the column spans the full rails', `${col[col.length - 1].x.toFixed(2)}`)
-  // Density is held along the rails.
-  // Same convention as the spine engine: `density` is the advance per
-  // PENETRATION, so two penetrations on one rail sit 2x density apart.
+  // Density is held along the rails, and means the SAME thing it means on
+  // the spine engine: the spacing between adjacent penetrations on one rail.
+  // The two engines disagreeing about this would be a design that changes
+  // density when a digitizer switches from a spine to two rails.
   const pitches: number[] = []
-  for (let i = 2; i < col.length - 1; i++) pitches.push(Math.abs(col[i].x - col[i - 2].x) / 2)
+  for (let i = 2; i < col.length - 1; i++) pitches.push(Math.abs(col[i].x - col[i - 2].x))
   const avg = pitches.reduce((a, b) => a + b, 0) / pitches.length
-  ok(Math.abs(avg - P.density) < 0.06, 'penetration pitch matches the density setting',
-    `${avg.toFixed(3)} mm`)
+  ok(Math.abs(avg - P.density) < 0.06, 'same-side spacing matches the density setting',
+    `${avg.toFixed(3)} mm for density ${P.density}`)
 
   // --- the bow tie: rail B drawn backwards
   {
@@ -4701,6 +4706,79 @@ console.log('\n# the font catalogue')
       fontSpec('UnifrakturCook'))
     ok(ALL_FAMILIES.every((f) => !/[?&#]/.test(fontSpec(f))),
       'no family name injects anything into the query string')
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n# satin density means what the trade means by it')
+// ---------------------------------------------------------------------------
+//
+// `density` is the spacing between adjacent penetrations on the SAME side of
+// the column. That is the number every commercial package means, and the
+// number a digitizer types without thinking. This engine used to advance a
+// full density per PENETRATION, which put the same-side spacing at twice the
+// setting — self-consistent, documented, and still half the density that was
+// asked for. On screen it looked like a spring; on fabric it would have sewn
+// loose enough to show cloth through a column.
+{
+  const straight = [{ x: 0, y: 0 }, { x: 30, y: 0 }]
+  const sameSide = (st: readonly Pt[]) => {
+    const g: number[] = []
+    for (let i = 2; i < st.length - 1; i++) g.push(dist(st[i - 2], st[i]))
+    g.sort((a, b) => a - b)
+    return g[g.length >> 1]
+  }
+
+  for (const d of [0.3, 0.4, 0.5]) {
+    const p = { ...DEFAULT_SATIN(), width: 4, density: d, pullComp: 0, underlay: [] as never[] }
+    const got = sameSide(satinColumn(straight, p))
+    ok(Math.abs(got - d) < 0.03, `density ${d} puts same-side holes ${d} mm apart`,
+      `${got.toFixed(3)} mm`)
+  }
+
+  // Halving the density must DOUBLE the stitches, or the control is not
+  // linear in the thing it claims to set. Measured between two settings that
+  // are both ABOVE the same-rail floor, since below it the answer is
+  // correctly the floor rather than what was asked for.
+  const at = (d: number) => satinColumn(straight,
+    { ...DEFAULT_SATIN(), width: 4, density: d, pullComp: 0, underlay: [] as never[] }).length
+  const ratio = at(0.4) / at(0.8)
+  ok(Math.abs(ratio - 2) < 0.1, 'halving the density doubles the penetrations',
+    `${ratio.toFixed(2)}x`)
+
+  // Below the floor the engine holds the floor rather than putting two holes
+  // in one place — a physical limit, not a preference.
+  {
+    const tooFine = sameSide(satinColumn(straight,
+      { ...DEFAULT_SATIN(), width: 4, density: 0.1, pullComp: 0, underlay: [] as never[] }))
+    ok(tooFine >= MIN_RAIL_MM - 0.02,
+      'a density finer than the needle allows is held at the floor, not obeyed',
+      `asked 0.10, got ${tooFine.toFixed(3)} mm (floor ${MIN_RAIL_MM})`)
+  }
+
+  // The two engines must agree. A digitizer who draws a spine and a digitizer
+  // who draws two rails are asking for the same column, and a density that
+  // changed meaning between them would be found only on the garment.
+  {
+    const p = { ...DEFAULT_SATIN(), width: 4, density: 0.4, pullComp: 0, underlay: [] as never[] }
+    const spine = sameSide(satinColumn(straight, p))
+    const rails = sameSide(satinTwoRail(
+      [{ x: 0, y: -2 }, { x: 30, y: -2 }], [{ x: 0, y: 2 }, { x: 30, y: 2 }], p))
+    ok(Math.abs(spine - rails) < 0.03, 'the spine and two-rail engines agree on density',
+      `${spine.toFixed(3)} vs ${rails.toFixed(3)} mm`)
+  }
+
+  // No two holes on one rail closer than the floor, ANYWHERE — including the
+  // junction where a run comes back out of a mitred corner, which opened half
+  // a step early until the density fix exposed it.
+  {
+    const corner = [{ x: -10, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 10 }]
+    const p = { ...DEFAULT_SATIN(), width: 2, density: 0.4, pullComp: 0, underlay: [] as never[] }
+    const st = satinColumn(corner, p)
+    let worst = Infinity
+    for (let i = 2; i < st.length; i++) worst = Math.min(worst, dist(st[i - 2], st[i]))
+    ok(worst >= MIN_RAIL_MM - 0.02, 'a run leaving a corner does not open on top of the fan',
+      `closest same-rail pair ${worst.toFixed(3)} mm`)
   }
 }
 
