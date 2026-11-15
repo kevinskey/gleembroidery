@@ -245,3 +245,77 @@ export function shortestStep(st: Stitch[]): number {
 }
 
 export { pathLength }
+
+// ---------------------------------------------------------------------------
+// Appliqué finishing edges
+//
+// A satin border is not the only way to finish an appliqué, and for some
+// fabrics it is the wrong one — a heavy satin on a stretchy knit patch
+// puckers it. These three are the alternatives a digitizer expects, and
+// each is a different idea about how to hold an edge down.
+// ---------------------------------------------------------------------------
+
+/** Open zigzag: a satin that is deliberately not solid. Light, and it breathes. */
+export function zigzagEdge(path: Pt[], widthMm: number, pitchMm: number): Stitch[] {
+  const pts = dedupe(path)
+  if (pts.length < 2) return pts as Stitch[]
+  const cum = cumulative(pts)
+  const total = cum[cum.length - 1]
+  const half = Math.max(MIN_SIDE_MM, widthMm) / 2
+  const n = Math.max(2, Math.round(total / Math.max(0.6, pitchMm)))
+  const out: Stitch[] = []
+  for (let k = 0; k <= n; k++) {
+    out.push(side(pts, cum, (k / n) * total, k % 2 === 0 ? half : -half))
+  }
+  return out
+}
+
+/**
+ * Blanket stitch: a run along the edge with a finger reaching in at
+ * intervals — the classic appliqué edge, and the gentlest of the three
+ * because most of the thread lies along the edge rather than across it.
+ *
+ * Each finger goes in and comes straight back to the SAME point on the
+ * edge, which is what makes it a blanket stitch rather than a zigzag: the
+ * line along the edge stays continuous.
+ */
+export function blanketEdge(path: Pt[], depthMm: number, pitchMm: number): Stitch[] {
+  const pts = dedupe(path)
+  if (pts.length < 2) return pts as Stitch[]
+  const cum = cumulative(pts)
+  const total = cum[cum.length - 1]
+  const depth = Math.max(MIN_SIDE_MM, depthMm)
+  const n = Math.max(2, Math.round(total / Math.max(1, pitchMm)))
+  const out: Stitch[] = [at(pts, cum, 0).p]
+  for (let k = 1; k <= n; k++) {
+    const s = (k / n) * total
+    const onEdge = at(pts, cum, s).p
+    out.push(onEdge)                       // along the edge
+    out.push(side(pts, cum, s, -depth))    // the finger, inward
+    out.push(onEdge)                       // and back to the same hole's edge
+  }
+  return out
+}
+
+/**
+ * E-stitch (buttonhole): a blanket stitch whose fingers are joined by the
+ * run along the edge, so each repeat draws an E. Grips harder than a
+ * blanket because the edge line is doubled between fingers.
+ */
+export function eStitchEdge(path: Pt[], depthMm: number, pitchMm: number): Stitch[] {
+  const pts = dedupe(path)
+  if (pts.length < 2) return pts as Stitch[]
+  const cum = cumulative(pts)
+  const total = cum[cum.length - 1]
+  const depth = Math.max(MIN_SIDE_MM, depthMm)
+  const n = Math.max(2, Math.round(total / Math.max(1, pitchMm)))
+  const out: Stitch[] = [at(pts, cum, 0).p]
+  for (let k = 1; k <= n; k++) {
+    const s0 = ((k - 1) / n) * total
+    const s1 = (k / n) * total
+    out.push(side(pts, cum, s0, -depth))   // in
+    out.push(side(pts, cum, s1, -depth))   // along, inside
+    out.push(at(pts, cum, s1).p)           // back out to the edge
+  }
+  return out
+}

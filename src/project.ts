@@ -21,6 +21,7 @@ import type { PathNode, Shape } from './nodes'
 import type { AngleGuide } from './satin'
 import { DEFAULT_MOTIF, MOTIF_IDS } from './decorative'
 import { DEFAULT_PROGRAM, PROGRAM_KINDS } from './programmotif'
+import { DEFAULT_PATCH, PATCH_CORNERS } from './patch'
 import type { FrozenPlan } from './stitchedit'
 import type { Stitch } from './stitches'
 import {
@@ -35,6 +36,7 @@ import {
   FILL_STYLES,
   RUN_STYLES,
   STITCH_TYPES,
+  APPLIQUE_BORDER_STYLES,
   HOOPS,
   SPACINGS,
   emptyDoc,
@@ -141,6 +143,7 @@ export function settingsOut(o: EmbObject) {
     } : {}),
     run: { ...o.run },
     program: { ...o.program },
+    patch: { ...o.patch },
     motif: { ...o.motif },
     satin: { ...o.satin, split: { ...o.satin.split } },
     fill: { ...o.fill, border: { ...o.fill.border } },
@@ -187,6 +190,7 @@ export function objectOut(o: EmbObject) {
     })),
     run: { ...o.run },
     program: { ...o.program },
+    patch: { ...o.patch },
     motif: { ...o.motif },
     satin: { ...o.satin, split: { ...o.satin.split } },
     fill: { ...o.fill, border: { ...o.fill.border } },
@@ -517,12 +521,13 @@ function objectIn(v: unknown, index: number): EmbObject | null {
   const paths = pathsIn(v.paths)
   const run = isObj(v.run) ? v.run : {}
   const prog = isObj(v.program) ? v.program : {}
+  const pat = isObj(v.patch) ? v.patch : {}
   const satin = isObj(v.satin) ? v.satin : {}
   const fill = isObj(v.fill) ? v.fill : {}
   const border = isObj(fill.border) ? fill.border : {}
   const ap = isObj(v.applique) ? v.applique : {}
   const dRun = DEFAULT_RUN(), dSatin = DEFAULT_SATIN(), dFill = DEFAULT_FILL()
-  const dProg = DEFAULT_PROGRAM()
+  const dProg = DEFAULT_PROGRAM(), dPatch = DEFAULT_PATCH()
   const pf = isObj(v.puff) ? v.puff : {}
   const dApp = DEFAULT_APPLIQUE()
   const kd = isObj(v.knockdown) ? v.knockdown : {}
@@ -559,7 +564,7 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       borderDensity: num(ap.borderDensity, dApp.borderDensity),
       borderPullComp: num(ap.borderPullComp, dApp.borderPullComp),
       border: ap.border !== false,
-      borderStyle: ap.borderStyle === 'overlock' ? 'overlock' : 'satin',
+      borderStyle: oneOf(ap.borderStyle, APPLIQUE_BORDER_STYLES, dApp.borderStyle),
     },
     knockdown: {
       spacing: num(kd.spacing, dKd.spacing),
@@ -607,6 +612,12 @@ function objectIn(v: unknown, index: number): EmbObject | null {
           : undefined,
       },
     } : {}),
+    patch: {
+      widthMm: num(pat.widthMm, dPatch.widthMm),
+      density: num(pat.density, dPatch.density),
+      overhangMm: num(pat.overhangMm, dPatch.overhangMm),
+      corner: oneOf(pat.corner, PATCH_CORNERS, dPatch.corner),
+    },
     program: {
       kind: oneOf(prog.kind, PROGRAM_KINDS, dProg.kind),
       sizeMm: num(prog.sizeMm, dProg.sizeMm),

@@ -135,6 +135,46 @@ const FIXTURES: Fixture[] = [
     ],
   },
   {
+    // A patch edge with real corners, and the three light appliqué finishes.
+    // Sew this to judge whether the overhang actually encases a cut edge and
+    // whether a fanned corner piles too much thread.
+    name: 'patch-and-edges',
+    note: 'Patch edge (fan and square corners) and the zigzag / blanket / E-stitch finishes',
+    objects: [
+      newObject({
+        name: 'patch-fan', color: '#c0392b', type: 'patch',
+        paths: [rect(-30, -18, 24, 14)],
+        patch: { widthMm: 3, density: 0.35, overhangMm: 0.7, corner: 'fan' },
+      }),
+      newObject({
+        name: 'patch-square', color: '#1f6feb', type: 'patch',
+        paths: [rect(4, -18, 24, 14)],
+        patch: { widthMm: 3, density: 0.35, overhangMm: 0.7, corner: 'square' },
+      }),
+      newObject({
+        name: 'zigzag-edge', color: '#16a34a', type: 'run',
+        paths: [[{ x: -30, y: 2 }, { x: 28, y: 2 }]],
+        run: { length: 2.5, style: 'plain', passes: 3, widthMm: 1.4, gapMm: 2.5 },
+      }),
+      newObject({
+        name: 'blanket-applique', color: '#7c3aed', type: 'applique',
+        paths: [circle(-14, 14, 9)],
+        applique: {
+          tackWidth: 1.6, tackDensity: 0.5, borderWidth: 3,
+          borderDensity: 0.4, borderPullComp: 0.2, border: true, borderStyle: 'blanket',
+        },
+      }),
+      newObject({
+        name: 'estitch-applique', color: '#d97706', type: 'applique',
+        paths: [circle(12, 14, 9)],
+        applique: {
+          tackWidth: 1.6, tackDensity: 0.5, borderWidth: 3,
+          borderDensity: 0.4, borderPullComp: 0.2, border: true, borderStyle: 'estitch',
+        },
+      }),
+    ],
+  },
+  {
     // Hand-placed penetrations, deliberately including work the machine
     // cannot sew as given: six steps over 10 mm that must be subdivided, and
     // a 0.2 mm pair that must be dropped. 10 placed points leave as 22. The

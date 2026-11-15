@@ -16,6 +16,7 @@ import type { FrozenPlan } from './stitchedit'
 import type { AngleGuide } from './satin'
 import { DEFAULT_MOTIF, type MotifParams } from './decorative'
 import { DEFAULT_PROGRAM, type ProgramParams } from './programmotif'
+import { DEFAULT_PATCH, type PatchParams } from './patch'
 
 export interface Pt {
   x: number
@@ -34,6 +35,7 @@ export type StitchType =
   | 'fill' // tatami fill of the enclosed region
   | 'manual' // every penetration placed by hand; the nodes ARE the stitches
   | 'program' // French knots, candlewicking, eyelets — piled, not looped
+  | 'patch' // wrapped border that encases a cut edge
   | 'none' // construction only — generates no stitches
 
 /**
@@ -47,7 +49,7 @@ export type StitchType =
  * a test asserts it covers the union.
  */
 export const STITCH_TYPES: StitchType[] = [
-  'applique', 'knockdown', 'run', 'bean', 'satin', 'fill', 'manual', 'program', 'none',
+  'applique', 'knockdown', 'run', 'bean', 'satin', 'fill', 'manual', 'program', 'patch', 'none',
 ]
 
 export interface RunParams {
@@ -354,6 +356,28 @@ export interface FillParams {
  * stops between them: DST has no "pause" of its own, and every controller
  * treats a colour change as one.
  */
+export type AppliqueBorderStyle = 'satin' | 'overlock' | 'zigzag' | 'blanket' | 'estitch'
+
+export const APPLIQUE_BORDER_STYLES: AppliqueBorderStyle[] = [
+  'satin', 'overlock', 'zigzag', 'blanket', 'estitch',
+]
+
+/**
+ * How the appliqué edge is finished.
+ *
+ * Satin is the default because it covers a cut edge completely. The others
+ * exist because on some fabrics that is the wrong answer: a heavy satin on
+ * a stretchy knit patch puckers it, and a blanket or E-stitch holds the
+ * edge with most of the thread lying ALONG it instead of across.
+ */
+export const APPLIQUE_BORDER_LABEL: Record<AppliqueBorderStyle, string> = {
+  satin: 'Satin — solid cover over the cut edge',
+  overlock: 'Faux overlock — leaned bars, imitates a serged edge',
+  zigzag: 'Zigzag — open satin, lighter and it breathes',
+  blanket: 'Blanket — a run along the edge with fingers reaching in',
+  estitch: 'E-stitch — blanket with the edge line doubled, grips harder',
+}
+
 export interface AppliqueParams {
   /** Width of the tack-down zigzag, mm. Narrow — it only has to hold. */
   tackWidth: number
@@ -371,7 +395,7 @@ export interface AppliqueParams {
    * ready-made patch has, which is what makes an appliqué read as a patch
    * rather than as fabric stitched to a shirt.
    */
-  borderStyle: 'satin' | 'overlock'
+  borderStyle: AppliqueBorderStyle
 }
 
 /**
@@ -505,6 +529,8 @@ export interface EmbObject {
   knockdown: KnockdownParams
   /** French knot / candlewick / eyelet settings. */
   program: ProgramParams
+  /** Patch-edge settings — the wrapped border of a cut patch. */
+  patch: PatchParams
   /** The repeated drawing, for a motif run or a motif fill. */
   motif: MotifParams
 }
@@ -868,6 +894,7 @@ export function newObject(partial: Partial<EmbObject> = {}): EmbObject {
     puff: DEFAULT_PUFF(),
     knockdown: DEFAULT_KNOCKDOWN(),
     program: DEFAULT_PROGRAM(),
+    patch: DEFAULT_PATCH(),
     motif: DEFAULT_MOTIF(),
     ...partial,
   }

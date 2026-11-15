@@ -77,12 +77,16 @@ import {
   type Spacing,
   type StitchType,
   type SatinMode,
+  type AppliqueBorderStyle,
+  APPLIQUE_BORDER_STYLES,
+  APPLIQUE_BORDER_LABEL,
   type RunStyle,
   RUN_STYLES,
   RUN_STYLE_LABEL,
 } from './model'
 import { manualPenetrations, manualStitches, manualWarnings } from './manual'
 import { PROGRAM_KINDS, PROGRAM_LABEL, programCheck, type ProgramKind, type ProgramParams } from './programmotif'
+import { PATCH_CORNERS, PATCH_CORNER_LABEL, patchCheck, type PatchCorner, type PatchParams } from './patch'
 import {
   DEFAULT_MACHINE,
   packageStats,
@@ -340,6 +344,7 @@ const TYPE_WORD: Record<StitchType, string> = {
   knockdown: 'knockdown',
   manual: 'manual',
   program: 'motif',
+  patch: 'patch',
   none: 'off',
 }
 
@@ -4466,6 +4471,7 @@ export default function App() {
                   <option value="knockdown">Knockdown — flatten pile first</option>
                   <option value="manual">Manual — every stitch placed by hand</option>
                   <option value="program">Program motif — knots, candlewick, eyelets</option>
+                  <option value="patch">Patch edge — wrapped border for a cut patch</option>
                   <option value="none">Off — stitches nothing</option>
                 </select>
               </div>
@@ -4521,6 +4527,39 @@ export default function App() {
                   </div>
                 </div>
               </fieldset>
+
+              {selected.type === 'patch' && (() => {
+                const notes = patchCheck(selected.patch)
+                const q = selected.patch
+                const set = (fn: (r: PatchParams) => PatchParams, tag?: string) =>
+                  patch(selected.id, (o) => ({ ...o, patch: fn(o.patch) }), tag)
+                return (
+                  <fieldset>
+                    <legend>Patch edge</legend>
+                    <Num label="Band width (mm)" value={q.widthMm} min={1} max={10} step={0.1}
+                      onChange={(v) => set((r) => ({ ...r, widthMm: v }), 'patch.width')} />
+                    <Num label="Stitch spacing (mm)" value={q.density} min={0.15} max={1} step={0.05}
+                      onChange={(v) => set((r) => ({ ...r, density: v }), 'patch.density')} />
+                    <Num label="Overhang past the edge (mm)" value={q.overhangMm} min={0} max={3} step={0.1}
+                      onChange={(v) => set((r) => ({ ...r, overhangMm: v }), 'patch.overhang')} />
+                    <div className="row wide">
+                      <label>Corners</label>
+                      <select value={q.corner}
+                        onChange={(e) => set((r) => ({ ...r, corner: e.target.value as PatchCorner }))}>
+                        {PATCH_CORNERS.map((k) => (
+                          <option key={k} value={k}>{PATCH_CORNER_LABEL[k]}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <p className="hint">
+                      Wraps a cut edge: the band reaches past the outline so the raw fibres are
+                      encased. This is not a leaned satin border — that is the faux overlock
+                      setting on a satin object, and it imitates a look rather than binding an edge.
+                    </p>
+                    {notes.map((n, i) => <p key={i} className="hint warn">{n}</p>)}
+                  </fieldset>
+                )
+              })()}
 
               {selected.type === 'program' && (() => {
                 const notes = programCheck(selected.program)
@@ -4879,20 +4918,26 @@ export default function App() {
                     <>
                       <div className="row wide">
                         <label>Edge style</label>
-                        <div className="checks">
-                          {(['satin', 'overlock'] as const).map((st) => (
-                            <button
-                              key={st}
-                              className={selected.applique.borderStyle === st ? 'primary' : undefined}
-                              title={st === 'overlock'
-                                ? 'Leaned bars imitating a serged edge — what a ready-made patch has'
-                                : 'An ordinary satin border, bars square to the edge'}
-                              onClick={() => patch(selected.id, (o) => ({ ...o, applique: { ...o.applique, borderStyle: st } }))}>
-                              {st === 'satin' ? 'Satin' : 'Faux overlock'}
-                            </button>
+                        <select value={selected.applique.borderStyle}
+                          title={APPLIQUE_BORDER_LABEL[selected.applique.borderStyle]}
+                          onChange={(e) => patch(selected.id, (o) => ({
+                            ...o,
+                            applique: { ...o.applique, borderStyle: e.target.value as AppliqueBorderStyle },
+                          }))}>
+                          {APPLIQUE_BORDER_STYLES.map((st) => (
+                            <option key={st} value={st}>{APPLIQUE_BORDER_LABEL[st]}</option>
                           ))}
-                        </div>
+                        </select>
                       </div>
+                      {/* The light finishes exist because satin is the wrong
+                          answer on some fabrics, not because they are easier. */}
+                      {selected.applique.borderStyle !== 'satin' && selected.applique.borderStyle !== 'overlock' && (
+                        <p className="hint">
+                          A lighter finish: most of the thread lies along the edge rather than
+                          across it, so a stretchy patch is held without being puckered. It does
+                          not cover the cut edge the way satin does.
+                        </p>
+                      )}
                       <Num label="Border width (mm)" value={selected.applique.borderWidth} step={0.1} min={1} max={8}
                         onChange={(v) => patch(selected.id, (o) => ({ ...o, applique: { ...o.applique, borderWidth: v } }), 'ap.bw')} />
                       <Num label="Border spacing (mm)" value={selected.applique.borderDensity} step={0.05} min={0.2} max={1}

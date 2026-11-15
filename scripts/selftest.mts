@@ -50,6 +50,8 @@ import { arcThrough, deleteNode, flattenShape, insertNode, moveHandle, moveNode,
 import { offsetPathsChecked } from '../src/offset'
 import { railsFromClosedPath } from '../src/satin'
 import { DEFAULT_PROGRAM, candlewickRun, eyelet, frenchKnot, programCheck } from '../src/programmotif'
+import { DEFAULT_PATCH, patchCheck, patchEdge } from '../src/patch'
+import { blanketEdge, eStitchEdge, zigzagEdge } from '../src/runstyles'
 import { longestStep, runStyleStitches, shortestStep } from '../src/runstyles'
 import { manualPenetrations, manualStitches, manualWarnings } from '../src/manual'
 
@@ -493,6 +495,7 @@ console.log('\n# project save / reopen')
   }
   doc.objects[0].knockdown = { spacing: 2.6, margin: 2.1, angle: 20, length: 3.5 }
   doc.objects[1].program = { kind: 'eyelet', sizeMm: 4.5, holeMm: 1.8, passes: 9, spacingMm: 5.5 }
+  doc.objects[0].patch = { widthMm: 3.4, density: 0.33, overhangMm: 0.7, corner: 'square' }
   doc.objects[1].visible = false
   // Entry/exit and the appliqué recipe, so a dropped field cannot hide here
   // either.
@@ -504,7 +507,7 @@ console.log('\n# project save / reopen')
   ]
   doc.objects[1].applique = {
     tackWidth: 1.9, tackDensity: 0.55, borderWidth: 3.1,
-    borderDensity: 0.37, borderPullComp: 0.25, border: false, borderStyle: 'overlock',
+    borderDensity: 0.37, borderPullComp: 0.25, border: false, borderStyle: 'blanket',
   }
 
   const text = serialize(doc, true)
@@ -523,7 +526,7 @@ console.log('\n# project save / reopen')
     'entry and exit points survive')
   ok(back.objects[1].applique.borderWidth === 3.1 && back.objects[1].applique.border === false,
     'the appliqué recipe survives')
-  ok(back.objects[1].applique.borderStyle === 'overlock', 'including a faux overlock edge')
+  ok(back.objects[1].applique.borderStyle === 'blanket', 'including the chosen edge finish')
   ok(back.objects[1].satin.lean === 18, 'the satin bar lean survives')
   ok(back.objects[1].satin.split.enabled === true && back.objects[1].satin.split.maxLength === 5.5,
     'the satin split recipe survives')
@@ -5172,6 +5175,86 @@ console.log('\n# satin density means what the trade means by it')
     })]
     const sewn = digitize(doc).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
     ok(sewn.length > 20, 'a program object reaches the plan', `${sewn.length} penetrations`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Patch edge + the lighter appliqué finishes (stage 4)
+// ---------------------------------------------------------------------------
+{
+  console.log('\npatch edge and appliqué finishes')
+  const square: Pt[] = [
+    { x: -15, y: -10 }, { x: 15, y: -10 }, { x: 15, y: 10 }, { x: -15, y: 10 }, { x: -15, y: -10 },
+  ]
+  const P = DEFAULT_PATCH()
+
+  {
+    const st = patchEdge(square, { ...P, widthMm: 3, overhangMm: 0.8, density: 0.4, corner: 'fan' })
+    ok(st.length > 50, 'a patch edge sews a band round the outline', `${st.length} penetrations`)
+
+    // THE POINT OF A PATCH EDGE: thread reaches PAST the cut edge.
+    const outside = st.filter((p) => Math.abs(p.x) > 15.2 || Math.abs(p.y) > 10.2)
+    ok(outside.length > 10, 'the band overhangs the cut edge, which is what stops it fraying',
+      `${outside.length} penetrations outside the outline`)
+    const far = Math.max(...st.map((p) => Math.max(Math.abs(p.x) - 15, Math.abs(p.y) - 10)))
+    ok(far <= 0.8 + 0.3, 'and no further out than the overhang asked for', `${far.toFixed(2)} mm`)
+
+    // And it reaches in far enough to hold the patch down.
+    const inside = st.filter((p) => Math.abs(p.x) < 13.5 && Math.abs(p.y) < 8.5)
+    ok(inside.length > 10, 'and inward onto the patch itself', `${inside.length} inner penetrations`)
+  }
+
+  {
+    // The corner control is a real difference, not a label: a fan puts more
+    // bars round the outside of a corner than square does.
+    const nearCorner = (st: Pt[]) =>
+      st.filter((p) => Math.hypot(p.x - 15, p.y - 10) < 4).length
+    const fan = nearCorner(patchEdge(square, { ...P, corner: 'fan', density: 0.4 }))
+    const sq = nearCorner(patchEdge(square, { ...P, corner: 'square', density: 0.4 }))
+    ok(fan > sq, 'a fanned corner gets more bars than a square one', `${fan} vs ${sq}`)
+  }
+
+  ok(patchCheck({ ...P, widthMm: 0.8 }).some((w) => w.includes('floor')),
+    'a band too narrow to encase an edge is refused')
+  ok(patchCheck({ ...P, overhangMm: 0 }).some((w) => w.includes('raw fibres')),
+    'no overhang is reported — that is the whole point of the construction')
+  ok(patchCheck(P).length === 0, 'sensible defaults report nothing')
+
+  // The lighter appliqué finishes.
+  const edge = [{ x: -20, y: 0 }, { x: 20, y: 0 }]
+  {
+    const z = zigzagEdge(edge, 3, 2)
+    const ys = z.map((p) => p.y)
+    ok(Math.max(...ys) > 1.4 && Math.min(...ys) < -1.4, 'zigzag swings both sides of the edge')
+    ok(z.length < 45, 'and is open, not solid satin', `${z.length} penetrations over 40 mm`)
+  }
+  {
+    const b = blanketEdge(edge, 3, 4)
+    // The defining property: fingers reach in, and the edge line is continuous.
+    const inward = b.filter((p) => p.y < -1)
+    ok(inward.length > 5, 'blanket reaches fingers in from the edge', `${inward.length} fingers`)
+    ok(b.filter((p) => Math.abs(p.y) < 1e-9).length > inward.length,
+      'with most penetrations still ON the edge, which is what makes it gentle')
+  }
+  {
+    const e = eStitchEdge(edge, 3, 4)
+    const inward = e.filter((p) => p.y < -1)
+    ok(inward.length >= 2 * (e.length - inward.length) - 4 || inward.length > 10,
+      'E-stitch runs along the inside as well as across', `${inward.length} inner of ${e.length}`)
+  }
+
+  // Appliqué still produces its phases and stops with a light finish.
+  {
+    const doc = emptyDoc()
+    doc.objects = [newObject({
+      name: 'patch', color: '#000', type: 'applique', paths: [square],
+      applique: { ...DEFAULT_APPLIQUE(), borderStyle: 'blanket' },
+    })]
+    const plan = digitize(doc).plan
+    ok(plan.blocks.length >= 3, 'a blanket-edged appliqué still sews in three phases',
+      `${plan.blocks.length} blocks`)
+    ok(/border \(blanket\)/.test(plan.blocks[plan.blocks.length - 1].label),
+      'and the label names the finish for the operator', plan.blocks[plan.blocks.length - 1].label)
   }
 }
 

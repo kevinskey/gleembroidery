@@ -10,7 +10,7 @@
 //   * colour grouping, since each change is a manual re-thread — adjacent
 //     objects sharing a colour become ONE block.
 
-import { FILL_UNDERLAY_ORDER, NO_SPLIT, objectVisible, orderedUnderlay, type Doc, type EmbObject, type Pt, type TieParams } from './model'
+import { APPLIQUE_BORDER_LABEL, FILL_UNDERLAY_ORDER, NO_SPLIT, objectVisible, orderedUnderlay, type Doc, type EmbObject, type Pt, type TieParams } from './model'
 import { nodeFractions } from './nodes'
 import type { ColorBlock, Stitch, StitchPlan } from './stitches'
 import { dist, pathLength, resample, scanlineSpans, toRegions } from './geometry'
@@ -20,9 +20,10 @@ import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
 import { chainPaths, orderPaths, travelIsHidden } from './travel'
 import { MIN_MOTIF_MM, crossStitchFill, echoFill, motifById, motifFill, motifRun, stippleFill } from './decorative'
 import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck, railsFromClosedPath } from './satin'
-import { runStyleStitches } from './runstyles'
+import { blanketEdge, eStitchEdge, runStyleStitches, zigzagEdge } from './runstyles'
 import { manualPenetrations, manualStitches, manualWarnings } from './manual'
 import { programCheck, programStitches } from './programmotif'
+import { patchCheck, patchStitches } from './patch'
 import { resolveComp, withComp } from './compensate'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
@@ -125,7 +126,12 @@ function enforceMaxStitch(stitches: Stitch[], max = MAX_STITCH_MM): Stitch[] {
     if (prev && !s.jump) {
       const d = dist(prev, s)
       if (d > max) {
-        const n = Math.ceil(d / max)
+        // Subdivide to just UNDER the cap. DST stores 0.1 mm units, so a
+        // stitch generated at exactly 10.000 mm can be written as 10.01 and
+        // read back over the limit — a file that fails its own safety check
+        // for a rounding step. Half a quantisation unit of headroom costs
+        // nothing and makes the exported file true.
+        const n = Math.ceil(d / (max - 0.05))
         for (let i = 1; i < n; i++)
           out.push({ x: prev.x + (s.x - prev.x) * (i / n), y: prev.y + (s.y - prev.y) * (i / n) })
       }
@@ -300,6 +306,21 @@ export function appliquePhases(
         lean: p.borderStyle === 'overlock' ? OVERLOCK_LEAN : 0,
         split: NO_SPLIT(),
       }
+      // The three light finishes are not satin at all — they hold the edge
+      // with thread lying ALONG it — so they skip satinCheck, whose rules
+      // are about column width and do not apply.
+      if (p.borderStyle === 'zigzag') {
+        border.push(...zigzagEdge(ring, p.borderWidth, Math.max(0.8, p.borderDensity * 4)))
+        continue
+      }
+      if (p.borderStyle === 'blanket') {
+        border.push(...blanketEdge(ring, p.borderWidth, Math.max(1.5, p.borderWidth * 1.2)))
+        continue
+      }
+      if (p.borderStyle === 'estitch') {
+        border.push(...eStitchEdge(ring, p.borderWidth, Math.max(1.5, p.borderWidth * 1.2)))
+        continue
+      }
       const check = satinCheck(ring, params)
       if (check.errors.length) {
         for (const e of check.errors) warnings.push(`${obj.name}: border NOT STITCHED — ${e}`)
@@ -309,7 +330,12 @@ export function appliquePhases(
     }
     if (border.length) {
       out.push({
-        label: `${obj.name} — ${p.borderStyle === 'overlock' ? 'overlock edge' : 'border'}`,
+        // Keep the word "border": the operator reads these labels at the
+        // machine and that is what the phase has always been called. The
+        // style is named alongside it, not instead of it.
+        label: p.borderStyle === 'satin'
+          ? `${obj.name} — border`
+          : `${obj.name} — border (${APPLIQUE_BORDER_LABEL[p.borderStyle].split(' —')[0].toLowerCase()})`,
         stitches: border,
       })
     }
@@ -435,6 +461,19 @@ function stitchObject(
     case 'bean':
       for (const path of planPaths(obj.paths, out)) push(beanStitch(path, obj.run))
       break
+
+    case 'patch': {
+      // Closed only: a patch edge wraps a cut outline, and an open path has
+      // no inside to offset towards. Refused rather than half-sewn.
+      for (const why of patchCheck(obj.patch)) warnings.push(`${obj.name}: ${why}`)
+      const closed = obj.paths.filter((q) => q.length > 2 && dist(q[0], q[q.length - 1]) < 0.05)
+      if (!closed.length) {
+        warnings.push(`${obj.name}: NOT STITCHED — a patch edge needs a closed outline`)
+        break
+      }
+      push(patchStitches(closed, obj.patch))
+      break
+    }
 
     case 'program': {
       // Checked BEFORE generating: an eyelet whose bars converge in the hole
@@ -636,8 +675,16 @@ function stitchObject(
   // or enforceMaxStitch subdivides a travel the lock was meant to bracket.
   const head = tie.tieIn ? lock(out[0], out[1], tie) : []
   const tail = tie.tieOff ? lock(out[out.length - 1], out[out.length - 2], tie, true) : []
-  return suppressShortStitches(
-    enforceMaxStitch(applyTrimsAndLocks([...head, ...out, ...tail], tie)), floor)
+  // enforceMaxStitch runs LAST, after the short-stitch pass.
+  //
+  // suppressShortStitches absorbs a too-short penetration by moving the
+  // SURVIVOR to the later position, which lengthens the stitch arriving at
+  // it. Run it after the length cap and a 10 mm stitch followed by a 0.3 mm
+  // one becomes a 10.3 mm stitch — over the limit, in a file that had just
+  // been capped. A dense patch edge produces exactly that pairing, which is
+  // how this surfaced.
+  return enforceMaxStitch(
+    suppressShortStitches(applyTrimsAndLocks([...head, ...out, ...tail], tie), floor))
 }
 
 /**
@@ -692,8 +739,19 @@ export function digitize(doc: Doc): DigitizeResult {
     if (obj.type === 'applique') {
       for (const phase of appliquePhases(obj, warnings)) {
         // Same finishing the other stitch types get: locks, trims, length caps.
-        const laid = suppressShortStitches(
-          enforceMaxStitch(applyTrimsAndLocks(phase.stitches, doc.tie)), floor)
+        // Tie each phase at BOTH ends, exactly as stitchObject does for an
+        // ordinary object. A phase boundary is where the machine stops and
+        // the operator cuts, so an untied phase end is a thread end with
+        // nothing holding it — the one place a tie matters most, and the one
+        // place that was missing it.
+        const ph = phase.stitches
+        const phHead = doc.tie.tieIn && ph.length > 1 ? lock(ph[0], ph[1], doc.tie) : []
+        const phTail = doc.tie.tieOff && ph.length > 1
+          ? lock(ph[ph.length - 1], ph[ph.length - 2], doc.tie, true) : []
+        // Same order as stitchObject, and for the same reason: the short
+        // pass can re-lengthen a stitch past the cap.
+        const laid = enforceMaxStitch(
+          suppressShortStitches(applyTrimsAndLocks([...phHead, ...ph, ...phTail], doc.tie), floor))
         if (!laid.length) continue
         blocks.push({
           color: obj.color,
