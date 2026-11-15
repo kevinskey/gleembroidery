@@ -633,3 +633,87 @@ export function textToOutlines(spec: TextSpec): TextOutlines {
     warnings,
   }
 }
+
+/**
+ * Turn a CLOSED filled outline into satin columns — the traced-letters path.
+ *
+ * `textToColumns` does this for text the app set itself, where the words are
+ * known. Artwork traced with the wand has no words behind it: it is a set of
+ * polygons that happen to look like letters, and it arrives as a FILL, which
+ * on a 15 mm letter is the wrong stitch — a tatami letter reads as a flat
+ * patch where a satin one has the sheen that makes lettering look sewn
+ * rather than printed.
+ *
+ * The pipeline is the same one, and deliberately so: rasterise, distance
+ * transform, thin to a skeleton, prune the spurs, then build a rail pair
+ * either side of each stroke at twice the local distance. It is a RASTER
+ * medial axis rather than an exact polygon one for the reason recorded in
+ * skeleton.ts — the exact version degenerates on parallel stems, serifs and
+ * tangent curves, which is precisely what letters are made of.
+ *
+ * THE SAME HONEST LIMIT APPLIES. This suits bold shapes at size. Thin
+ * strokes fall under the satin floor and are refused with a reason rather
+ * than sewn as something that will not hold.
+ */
+export function outlineToColumns(
+  paths: Pt[][],
+): { columns: { left: Pt[]; right: Pt[] }[]; warnings: string[] } {
+  const warnings: string[] = []
+  const rings = paths.filter((p) => p.length >= 3)
+  if (!rings.length) return { columns: [], warnings: ['no closed outline to work from'] }
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const r of rings) for (const p of r) {
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x)
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y)
+  }
+  const pad = 4
+  const w = Math.ceil((maxX - minX) * RASTER_PX_PER_MM) + pad * 2
+  const h = Math.ceil((maxY - minY) * RASTER_PX_PER_MM) + pad * 2
+  if (w < 8 || h < 8 || w > 4000 || h > 4000) {
+    return { columns: [], warnings: ['that shape is too small or too large to trace into columns'] }
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = w; canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return { columns: [], warnings: ['could not rasterise that shape'] }
+  ctx.fillStyle = '#fff'
+  ctx.beginPath()
+  for (const ring of rings) {
+    ring.forEach((p, i) => {
+      const x = (p.x - minX) * RASTER_PX_PER_MM + pad
+      const y = (p.y - minY) * RASTER_PX_PER_MM + pad
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+    })
+    ctx.closePath()
+  }
+  // EVEN-ODD, so a counter stays a hole. Filling non-zero would weld the
+  // middle of an O shut and the skeleton would run round a solid blob.
+  ctx.fill('evenodd')
+
+  const img = ctx.getImageData(0, 0, w, h)
+  const mask = alphaMask({ data: img.data, width: w, height: h })
+  const dist = distanceTransform(mask, w, h)
+  const skel = thin(mask, w, h)
+  // A spur shorter than the local stroke width is a bump on the outline, not
+  // a stroke of its own — the same judgement textToColumns makes, scaled off
+  // the shape rather than off a font size nobody stated.
+  const shortSide = Math.min(maxX - minX, maxY - minY)
+  const minBranch = Math.max(4, shortSide * RASTER_PX_PER_MM * 0.18)
+  const lines = pruneSpurs(traceSkeleton(skel, w, h), minBranch)
+  if (!lines.length) return { columns: [], warnings: ['no strokes found in that shape'] }
+
+  const columns: { left: Pt[]; right: Pt[] }[] = []
+  for (const line of lines) {
+    const rails = railsAlong(smoothLine(line, 4), dist, w, h, 1 / RASTER_PX_PER_MM)
+    if (rails.left.length < 3) continue
+    const back = (pts: Pt[]) => pts.map((p) => ({
+      x: (p.x * RASTER_PX_PER_MM - pad) / RASTER_PX_PER_MM + minX,
+      y: (p.y * RASTER_PX_PER_MM - pad) / RASTER_PX_PER_MM + minY,
+    }))
+    columns.push({ left: back(rails.left), right: back(rails.right) })
+  }
+  if (!columns.length) warnings.push('no usable strokes — the shape may be too thin for satin')
+  return { columns, warnings }
+}

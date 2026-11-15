@@ -43,7 +43,7 @@ import {
 } from './stitchedit'
 import { DEFAULT_TOLERANCE, traceRegionAt, type Raster } from './trace'
 import {
-  DEFAULT_TEXT, textToColumns, textToOutlines,
+  DEFAULT_TEXT, outlineToColumns, textToColumns, textToOutlines,
   type LetterNudge, type LetterOutline, type TextSpec,
 } from './text'
 import {
@@ -2471,6 +2471,53 @@ export default function App() {
     setNote(`${columns.length} satin stroke(s)`)
   }, [doc.objects, setDoc, setSelectedId])
 
+  /**
+   * Traced artwork -> satin columns.
+   *
+   * The wand gives FILL objects, which on a 15 mm letter is the wrong stitch:
+   * a tatami letter reads as a flat patch where a satin one has the sheen
+   * that makes lettering look sewn rather than printed. Each stroke found in
+   * the outline becomes its own two-rail column, for the same reason
+   * applySatinText does it — a two-rail column IS a pair of paths, so many
+   * strokes in one object would leave no way to say which rail pairs with
+   * which.
+   *
+   * The original object is kept and switched OFF rather than deleted. The
+   * trace is work, the skeleton is a guess at what it meant, and a bad guess
+   * must not cost the artwork — switch the columns off and the fill back on
+   * and you are where you started.
+   */
+  const outlineToSatin = useCallback((ids: string[]) => {
+    const targets = doc.objects.filter((o) => ids.includes(o.id) && o.paths.length)
+    if (!targets.length) { setNote('select a traced shape first'); return }
+    const made: EmbObject[] = []
+    const refused: string[] = []
+    for (const o of targets) {
+      const { columns, warnings } = outlineToColumns(o.paths)
+      if (!columns.length) { refused.push(`${o.name}: ${warnings[0] ?? 'no strokes found'}`); continue }
+      columns.forEach((c, i) => made.push(newObject({
+        name: `${o.name} stroke ${i + 1}`,
+        color: o.color,
+        type: 'satin',
+        twoRail: true,
+        paths: [c.left, c.right],
+      })))
+    }
+    if (!made.length) { setNote(refused[0] ?? 'nothing could be turned into columns'); return }
+    const ids2 = new Set(targets.map((o) => o.id))
+    history.begin()
+    setDoc((d) => ({
+      ...d,
+      objects: [...d.objects.map((o) => (ids2.has(o.id) ? { ...o, visible: false } : o)), ...made],
+    }))
+    history.end()
+    setSelectedIds(made.map((o) => o.id))
+    setSim(null)
+    setNote(refused.length
+      ? `${made.length} satin stroke(s); ${refused.length} shape(s) refused — ${refused[0]}`
+      : `${made.length} satin stroke(s) — the traced fill is kept but switched off`)
+  }, [doc.objects, setDoc, history])
+
   /** Place a new line of lettering. */
   const addText = useCallback((at: Pt) => {
     const spec = DEFAULT_TEXT()
@@ -3556,6 +3603,12 @@ export default function App() {
           {/* Everything here changes the OUTLINE, never the stitch settings,
               and everything produces objects that can still be node-edited. */}
           <Menu label="Shape" width={290}>
+            <MenuLabel>Convert</MenuLabel>
+            <MenuItem disabled={!selectedObjs.length}
+              onClick={() => outlineToSatin(selectedObjs.map((o) => o.id))}
+              hint="Traced artwork comes in as a fill; letters usually want satin. The fill is kept and switched off, not deleted">
+              Traced shape → satin columns
+            </MenuItem>
             <MenuLabel>Combine</MenuLabel>
             {BOOL_OPS.map((op) => (
               <MenuItem key={op} disabled={selectedObjs.length < 2}
