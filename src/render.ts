@@ -618,19 +618,38 @@ export function render(
        * length, as this did, gives every stitch one flat colour end to end,
        * and a column of them reads as poster paint.
        */
+      // Does this stitch END where the next one BEGINS? Shortening a stitch
+      // is only right where it really stops — at the edge of a satin column,
+      // where the thread dips into the cloth. A tatami row and a running
+      // stitch are chains of stitches laid END TO END, and pulling each one
+      // in leaves a dark notch at every junction: the fill came out dashed
+      // and the run came out as a string of sausages.
+      const JOIN_PX = Math.max(0.6, threadPx * 0.5)
+      const joins: boolean[] = []
+      for (let i = 0; i < segs.length; i++) {
+        const n = segs[i + 1]
+        joins.push(!!n && Math.hypot(n[0] - segs[i][2], n[1] - segs[i][3]) <= JOIN_PX)
+      }
+
       const pass = (colour: string, width: number, alpha: number, span: number) => {
         ctx.strokeStyle = colour
         ctx.lineWidth = Math.max(0.35, width)
         ctx.globalAlpha = alpha
         ctx.beginPath()
-        for (const [x0, y0, x1, y1] of segs) {
-          if (span >= 1) {
+        const trim = (1 - span) / 2
+        for (let i = 0; i < segs.length; i++) {
+          const [x0, y0, x1, y1] = segs[i]
+          // Only a FREE end is pulled in. A joined one runs to the meeting
+          // point so the two stitches meet with no gap between them.
+          const t0 = (i > 0 && joins[i - 1]) ? 0 : trim
+          const t1 = joins[i] ? 0 : trim
+          if (t0 === 0 && t1 === 0) {
             ctx.moveTo(x0, y0)
             ctx.lineTo(x1, y1)
           } else {
-            const mx = (x0 + x1) / 2, my = (y0 + y1) / 2
-            ctx.moveTo(mx + (x0 - mx) * span, my + (y0 - my) * span)
-            ctx.lineTo(mx + (x1 - mx) * span, my + (y1 - my) * span)
+            const dx = x1 - x0, dy = y1 - y0
+            ctx.moveTo(x0 + dx * t0, y0 + dy * t0)
+            ctx.lineTo(x1 - dx * t1, y1 - dy * t1)
           }
         }
         ctx.stroke()
