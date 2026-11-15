@@ -103,6 +103,24 @@ const FIXTURES: Fixture[] = [
     })],
   },
   {
+    // Hand-placed penetrations, deliberately including work the machine
+    // cannot sew as given: six steps over 10 mm that must be subdivided, and
+    // a 0.2 mm pair that must be dropped. 10 placed points leave as 22. The
+    // point of the fixture is that the EXPORT obeys the machine while the
+    // placed ORDER is preserved — no chaining, no reordering.
+    name: 'manual-stitch',
+    note: 'Hand-placed penetrations, with an overlong step and a double strike',
+    objects: [newObject({
+      name: 'hand', color: '#c0392b', type: 'manual',
+      paths: [[
+        { x: -24, y: -8 }, { x: -16, y: -12 }, { x: -8, y: -6 }, { x: 0, y: -14 },
+        { x: 14, y: -14 },            // 14 mm — over the limit on purpose
+        { x: 14.2, y: -14 },          // 0.2 mm — a second strike in one hole
+        { x: 20, y: -4 }, { x: 10, y: 4 }, { x: -2, y: 2 }, { x: -14, y: 8 },
+      ]],
+    })],
+  },
+  {
     // Every run style on both a straight line and a curve, in one file. The
     // straight line makes the construction readable; the arc is where a
     // style that offsets sideways (stem, chain) can put thread where the

@@ -21,6 +21,7 @@ import { chainPaths, orderPaths, travelIsHidden } from './travel'
 import { MIN_MOTIF_MM, crossStitchFill, echoFill, motifById, motifFill, motifRun, stippleFill } from './decorative'
 import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
 import { runStyleStitches } from './runstyles'
+import { manualPenetrations, manualStitches, manualWarnings } from './manual'
 import { resolveComp, withComp } from './compensate'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
@@ -433,6 +434,18 @@ function stitchObject(
     case 'bean':
       for (const path of planPaths(obj.paths, out)) push(beanStitch(path, obj.run))
       break
+
+    case 'manual': {
+      // The points ARE the stitches — no resampling, no chaining, no travel
+      // routing. Chaining reorders paths to shorten travel, which on a hand-
+      // placed sequence would rewrite the order the digitizer chose.
+      const report = manualStitches(manualPenetrations(obj))
+      // Said out loud, because the safety pass below is about to change work
+      // that was placed deliberately.
+      warnings.push(...manualWarnings(obj.name, report))
+      push(report.stitches)
+      break
+    }
 
     case 'satin':
       // TWO paths is a two-rail column: the digitizer drew both edges, so the

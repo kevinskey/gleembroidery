@@ -33,6 +33,7 @@ import {
   DEFAULT_TIE,
   FILL_STYLES,
   RUN_STYLES,
+  STITCH_TYPES,
   HOOPS,
   SPACINGS,
   emptyDoc,
@@ -50,7 +51,6 @@ import {
   SATIN_UNDERLAY_ORDER,
   orderedUnderlay,
 
-  type StitchType,
 } from './model'
 
 /** Bump ONLY with a matching entry in MIGRATIONS below. */
@@ -70,7 +70,6 @@ export interface ProjectFile {
 
 export class ProjectError extends Error {}
 
-const STITCH_TYPES: StitchType[] = ['run', 'bean', 'satin', 'fill', 'none']
 
 // ---------------------------------------------------------------------------
 // Writing

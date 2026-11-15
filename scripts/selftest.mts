@@ -8,7 +8,7 @@ import { planToMoves, splitMove } from '../src/machine'
 import { appliquePhases, centerPlan, digitize, orientToEntryExit, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
 import { insideRegion, tatamiFill } from '../src/fill'
 import { dist, isClosed, resample, ringArea, toRegions } from '../src/geometry'
-import { DEFAULT_APPLIQUE, DEFAULT_FILL, DEFAULT_RUN, RUN_STYLES, FILL_STYLES, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, objectVisible, orderedUnderlay, type Pt } from '../src/model'
+import { DEFAULT_APPLIQUE, DEFAULT_FILL, DEFAULT_RUN, RUN_STYLES, STITCH_TYPES, FILL_STYLES, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, objectVisible, orderedUnderlay, type Pt } from '../src/model'
 import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths , angleAt, assignGuides, resolveGuides } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
 import { SCHEMA_VERSION, SIGNATURE_GEOMETRY_KEYS, ProjectError, deserialize, docSignature, objectOut, serialize, settingsOut } from '../src/project'
@@ -49,6 +49,7 @@ import { COALESCE_MS, HISTORY_LIMIT, applyEdit, cancelState, initHistory, redoSt
 import { arcThrough, deleteNode, flattenShape, insertNode, moveHandle, moveNode, nearestSegment, pathToShape, shapesToPaths, toggleSmooth, type Shape } from '../src/nodes'
 import { offsetPathsChecked } from '../src/offset'
 import { longestStep, runStyleStitches, shortestStep } from '../src/runstyles'
+import { manualPenetrations, manualStitches, manualWarnings } from '../src/manual'
 
 let pass = 0, fail = 0
 function ok(cond: boolean, label: string, detail = '') {
@@ -4949,6 +4950,81 @@ console.log('\n# satin density means what the trade means by it')
   for (const style of RUN_STYLES.filter((s) => s !== 'motif')) {
     const tiny = runStyleStitches([{ x: 0, y: 0 }, { x: 0.4, y: 0 }], { ...base, style })
     ok(tiny.length >= 2, `${style}: a path shorter than one stitch still sews`, `${tiny.length} penetrations`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Manual stitch (src/manual.ts) — the one type where points ARE stitches
+// ---------------------------------------------------------------------------
+{
+  console.log('\nmanual stitch')
+  const pts = [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }]
+  const o = newObject({ name: 'hand', color: '#000', type: 'manual', paths: [pts] })
+
+  ok(manualPenetrations(o).length === 4, 'an object with no nodes falls back to its path points')
+
+  // Nodes are the stitches, and a curve must NOT invent any between them.
+  o.shapes = [{ closed: false, nodes: pts.map((p) => ({ ...p, hIn: { x: -1, y: 0 }, hOut: { x: 1, y: 0 } })) }]
+  const fromNodes = manualPenetrations(o)
+  ok(fromNodes.length === 4, 'nodes are read, not the flattened curve between them',
+    `${fromNodes.length} penetrations from 4 nodes`)
+
+  // A closed manual outline comes back to its first hole; it must not repeat it.
+  o.shapes = [{ closed: true, nodes: pts.map((p) => ({ ...p })) }]
+  const closed = manualPenetrations(o)
+  ok(closed.length === 5 && closed[4].x === closed[0].x && closed[4].y === closed[0].y,
+    'a closed manual path returns to its first penetration', `${closed.length} points`)
+
+  // Nothing is resampled: deliberate spacing survives exactly.
+  const uneven = manualStitches([{ x: 0, y: 0 }, { x: 7, y: 0 }, { x: 8, y: 0 }])
+  ok(uneven.stitches.length === 3, 'placed points are never resampled', 'a 7 mm and a 1 mm stitch both survive')
+
+  // The machine limits still apply, but the digitizer is TOLD.
+  const long = manualStitches([{ x: 0, y: 0 }, { x: 25, y: 0 }])
+  ok(long.tooLong === 1, 'a stitch the machine cannot sew is counted')
+  ok(manualWarnings('hand', long)[0].includes('over 10 mm'), 'and reported in words, not silently fixed',
+    manualWarnings('hand', long)[0])
+
+  const close = manualStitches([{ x: 0, y: 0 }, { x: 0.1, y: 0 }, { x: 5, y: 0 }])
+  ok(close.tooClose === 1, 'two penetrations in one hole are counted')
+  ok(manualWarnings('hand', close)[0].includes('dropped'),
+    'and the digitizer is told their work will be changed')
+
+  ok(manualWarnings('hand', manualStitches(pts)).length === 0,
+    'a sewable manual object says nothing at all')
+
+  // End to end: the placed points reach the plan, and the safety pass does
+  // apply — a manual object is not exempt from the machine's limits.
+  {
+    const doc = emptyDoc()
+    doc.objects = [newObject({
+      name: 'M', color: '#000', type: 'manual',
+      paths: [[{ x: 0, y: 0 }, { x: 25, y: 0 }]],
+    })]
+    const { plan, warnings } = digitize(doc)
+    const sewn = plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+    let longest = 0
+    for (let i = 1; i < sewn.length; i++) longest = Math.max(longest, dist(sewn[i - 1], sewn[i]))
+    ok(longest <= 10 + 1e-6, 'a manual object still obeys the machine stitch limit',
+      `longest ${longest.toFixed(2)} mm`)
+    ok(warnings.some((w) => w.includes('over 10 mm')), 'and the warning reaches the caller')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Saved stitch type survives a round trip (regression)
+// ---------------------------------------------------------------------------
+{
+  console.log('\nstitch type round-trip')
+  // project.ts validated against its own hand-written list, which omitted
+  // 'applique' and 'knockdown' — so reopening an appliqué design turned it
+  // into a FILL and lost its machine stops. One list now, checked here.
+  for (const t of STITCH_TYPES) {
+    const doc = emptyDoc()
+    doc.objects = [newObject({ name: t, color: '#000', type: t, paths: [[{ x: 0, y: 0 }, { x: 5, y: 0 }]] })]
+    const back = deserialize(serialize(doc))
+    ok(back.objects[0].type === t, `a saved '${t}' object reopens as '${t}'`,
+      back.objects[0].type === t ? '' : `became '${back.objects[0].type}'`)
   }
 }
 

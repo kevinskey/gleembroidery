@@ -80,6 +80,7 @@ import {
   RUN_STYLES,
   RUN_STYLE_LABEL,
 } from './model'
+import { manualPenetrations, manualStitches, manualWarnings } from './manual'
 import {
   DEFAULT_MACHINE,
   packageStats,
@@ -127,7 +128,7 @@ const allClosed = (paths: readonly Pt[][]): boolean =>
  * — so both show the same marker. Everything else drags out a whole shape,
  * where there is no per-node choice to preview.
  */
-const NODE_MARKER_TOOLS = new Set<Tool>(['pen', 'column'])
+const NODE_MARKER_TOOLS = new Set<Tool>(['pen', 'column', 'manual'])
 
 /** The picker's escape hatch: any face installed on this computer. */
 const OTHER_FAMILY = '\u0000other'
@@ -197,7 +198,7 @@ interface ParkedDoc {
 }
 
 /** Canvas tools. 'select' picks/moves/resizes; empty space still pans. */
-type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'arc' | 'column' | 'angle' | 'wand' | 'text' | 'stitch'
+type Tool = 'select' | 'node' | 'rect' | 'ellipse' | 'polygon' | 'freehand' | 'pen' | 'manual' | 'arc' | 'column' | 'angle' | 'wand' | 'text' | 'stitch'
 
 const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
   {
@@ -213,6 +214,20 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
         <path d="M3 12c5 0 5-8 10-8s5 8 6 8" stroke="currentColor" strokeWidth="1.3" fill="none" />
         <rect x="1" y="10" width="4" height="4" fill="currentColor" />
         <rect x="11" y="2" width="4" height="4" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
+    id: 'manual', label: 'Manual',
+    hint: 'Manual stitch: click each needle penetration in turn, Enter to finish. Edit them afterwards with the Node tool (M)',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M2 12l5-4 5 3 4-6 4 3" stroke="currentColor" strokeWidth="1.1" fill="none" strokeDasharray="0.1 3.2" strokeLinecap="round" />
+        <circle cx="2" cy="12" r="1.5" fill="currentColor" />
+        <circle cx="7" cy="8" r="1.5" fill="currentColor" />
+        <circle cx="12" cy="11" r="1.5" fill="currentColor" />
+        <circle cx="16" cy="5" r="1.5" fill="currentColor" />
+        <circle cx="20" cy="8" r="1.5" fill="currentColor" />
       </svg>
     ),
   },
@@ -321,6 +336,7 @@ const TYPE_WORD: Record<StitchType, string> = {
   fill: 'fill',
   applique: 'appliqué',
   knockdown: 'knockdown',
+  manual: 'manual',
   none: 'off',
 }
 
@@ -2039,14 +2055,14 @@ export default function App() {
    * Add an object from editable nodes. The flattened polyline is derived here
    * and kept in `paths` so the stitch engine never has to know about curves.
    */
-  const addShape = useCallback((shape: Shape, label: string) => {
+  const addShape = useCallback((shape: Shape, label: string, type?: StitchType) => {
     const n = doc.objects.length
     const paths = shapesToPaths([shape])
     if (!paths[0] || paths[0].length < 2) return
     const obj = newObject({
       name: `${label} ${n + 1}`,
       color: PALETTE[n % PALETTE.length],
-      type: shape.closed ? 'fill' : 'run',
+      type: type ?? (shape.closed ? 'fill' : 'run'),
       paths,
       shapes: [shape],
     })
@@ -2062,6 +2078,22 @@ export default function App() {
     penDrag.current = null
     setDraft(null)
     if (nodes.length >= 2) addShape({ nodes: autoSmooth(nodes, closed), closed }, closed ? 'Shape' : 'Path')
+  }, [addShape])
+
+  /**
+   * Finish a hand-placed stitch sequence.
+   *
+   * Corners only, deliberately: these nodes are needle penetrations, and a
+   * Bezier handle between two of them would imply stitches that do not
+   * exist. Everything after this is the ordinary node machinery, so move,
+   * insert and delete come from there and stay tested in one place.
+   */
+  const finishManual = useCallback(() => {
+    const nodes = penNodes.current.map((n) => ({ x: n.x, y: n.y }))
+    penNodes.current = []
+    penDrag.current = null
+    setDraft(null)
+    if (nodes.length >= 2) addShape({ nodes, closed: false }, 'Manual', 'manual')
   }, [addShape])
 
   /**
@@ -2787,11 +2819,11 @@ export default function App() {
       pickDrag.current = { start: p, moved: false }
       return
     }
-    if (tool === 'pen' || tool === 'column') {
+    if (tool === 'pen' || tool === 'manual' || tool === 'column') {
       // Clicking the first node closes the path — the standard way to finish a
       // region, and the only one that does not need a separate control.
       // A rail is an open edge; only the pen closes a path on its first node.
-      if (tool === 'pen' && penNodes.current.length >= 2) {
+      if ((tool === 'pen' || tool === 'manual') && penNodes.current.length >= 2) {
         const first = penNodes.current[0]
         if (Math.hypot(p.x - first.x, p.y - first.y) <= PICK_PX / view.scale) {
           finishPen(true)
@@ -3061,7 +3093,7 @@ export default function App() {
       setDraft(paths.length ? { paths, closed: false } : null)
       return
     }
-    if (tool === 'pen') {
+    if (tool === 'pen' || tool === 'manual') {
       const p = atMm(e)
       const d = penDrag.current
       if (d) {
@@ -3185,7 +3217,7 @@ export default function App() {
       }
       return
     }
-    if (tool === 'pen') {
+    if (tool === 'pen' || tool === 'manual') {
       if (penDrag.current) { penNodes.current = [...penNodes.current, penDrag.current]; penDrag.current = null }
       return
     }
@@ -3280,6 +3312,7 @@ export default function App() {
       }
       if (e.key === 'Enter') {
         if (tool === 'polygon') finishPolygon()
+        else if (tool === 'manual') finishManual()
         else if (tool === 'pen') finishPen(false)
         else if (tool === 'column') finishColumn()
         return
@@ -3329,7 +3362,7 @@ export default function App() {
       }
       if (e.metaKey || e.ctrlKey) return
       const pick: Record<string, Tool> = {
-        v: 'select', n: 'node', b: 'pen', a: 'arc', c: 'column', g: 'angle', w: 'wand', t: 'text', s: 'stitch',
+        v: 'select', n: 'node', b: 'pen', m: 'manual', a: 'arc', c: 'column', g: 'angle', w: 'wand', t: 'text', s: 'stitch',
         r: 'rect', e: 'ellipse', p: 'polygon', d: 'freehand',
       }
       const t = pick[e.key.toLowerCase()]
@@ -3337,7 +3370,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [tool, finishPolygon, finishPen, finishColumn, cancelDraw, history, selected, activeNode, shapesOf, setShapes, picked, editStitches])
+  }, [tool, finishPolygon, finishPen, finishManual, finishColumn, cancelDraw, history, selected, activeNode, shapesOf, setShapes, picked, editStitches])
 
 
   // --- render -------------------------------------------------------------
@@ -3826,6 +3859,7 @@ export default function App() {
           }}
           onDoubleClick={(e) => {
             if (tool === 'polygon') { finishPolygon(); return }
+            if (tool === 'manual') { finishManual(); return }
             if (tool === 'pen') { finishPen(false); return }
             if (tool === 'column') { finishColumn(); return }
             if (tool !== 'node' || !selected) return
@@ -4427,6 +4461,7 @@ export default function App() {
                   <option value="fill">Fill — tatami area</option>
                   <option value="applique">Appliqué — fabric, with stops</option>
                   <option value="knockdown">Knockdown — flatten pile first</option>
+                  <option value="manual">Manual — every stitch placed by hand</option>
                   <option value="none">Off — stitches nothing</option>
                 </select>
               </div>
@@ -4482,6 +4517,29 @@ export default function App() {
                   </div>
                 </div>
               </fieldset>
+
+              {selected.type === 'manual' && (() => {
+                const report = manualStitches(manualPenetrations(selected))
+                const notes = manualWarnings(selected.name, report)
+                return (
+                  <fieldset>
+                    <legend>Manual stitch</legend>
+                    <p className="hint">
+                      {report.stitches.length} placed penetration{report.stitches.length === 1 ? '' : 's'}.
+                      {' '}Nothing is resampled — the points are the stitches.
+                    </p>
+                    <p className="hint">
+                      Edit with the Node tool: drag to move, click a segment to insert, Delete to remove.
+                    </p>
+                    {/* The machine's limits still apply to hand-placed work.
+                        Saying so here is the point of the panel — otherwise
+                        the correction is discovered on the garment. */}
+                    {notes.map((n, i) => (
+                      <p key={i} className="hint warn">{n.replace(`${selected.name}: `, '')}</p>
+                    ))}
+                  </fieldset>
+                )
+              })()}
 
               {(selected.type === 'run' || selected.type === 'bean') && (
                 <fieldset>

@@ -847,3 +847,6 @@ legend { font-size: 11px; color: var(--muted); text-transform: uppercase; letter
   color: var(--muted);
   white-space: normal;
 }
+
+/* A hint that is a warning: the machine will change what was placed. */
+.panel p.hint.warn { color: var(--accent); }

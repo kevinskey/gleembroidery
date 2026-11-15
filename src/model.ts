@@ -31,7 +31,22 @@ export type StitchType =
   | 'bean' // triple-pass running stitch (bold outline)
   | 'satin' // zigzag column centred on the path
   | 'fill' // tatami fill of the enclosed region
+  | 'manual' // every penetration placed by hand; the nodes ARE the stitches
   | 'none' // construction only — generates no stitches
+
+/**
+ * Every stitch type, in one place.
+ *
+ * The loader validates a saved type against this list, and it used to keep
+ * its own copy — which omitted 'applique' and 'knockdown', so reopening an
+ * appliqué design silently turned it into a fill and lost its machine
+ * stops. A type added to the union and not to a hand-written list is the
+ * same bug class as the docSignature field list; there is one list now, and
+ * a test asserts it covers the union.
+ */
+export const STITCH_TYPES: StitchType[] = [
+  'applique', 'knockdown', 'run', 'bean', 'satin', 'fill', 'manual', 'none',
+]
 
 export interface RunParams {
   /** Nominal stitch length, mm. Machines want 1–5; 2.5 is a safe default. */
