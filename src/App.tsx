@@ -87,6 +87,7 @@ import {
 import { manualPenetrations, manualStitches, manualWarnings } from './manual'
 import { PROGRAM_KINDS, PROGRAM_LABEL, programCheck, type ProgramKind, type ProgramParams } from './programmotif'
 import { PATCH_CORNERS, PATCH_CORNER_LABEL, patchCheck, type PatchCorner, type PatchParams } from './patch'
+import { LACE_PATTERNS, LACE_PATTERN_LABEL, laceCheck, type LacePattern, type LaceParams } from './lace'
 import {
   DEFAULT_MACHINE,
   packageStats,
@@ -345,6 +346,7 @@ const TYPE_WORD: Record<StitchType, string> = {
   manual: 'manual',
   program: 'motif',
   patch: 'patch',
+  lace: 'lace',
   none: 'off',
 }
 
@@ -4472,6 +4474,7 @@ export default function App() {
                   <option value="manual">Manual — every stitch placed by hand</option>
                   <option value="program">Program motif — knots, candlewick, eyelets</option>
                   <option value="patch">Patch edge — wrapped border for a cut patch</option>
+                  <option value="lace">Freestanding lace — a mesh that holds itself</option>
                   <option value="none">Off — stitches nothing</option>
                 </select>
               </div>
@@ -4527,6 +4530,44 @@ export default function App() {
                   </div>
                 </div>
               </fieldset>
+
+              {selected.type === 'lace' && (() => {
+                const L = selected.lace
+                const notes = laceCheck(toRegions(selected.paths)[0] ?? [], L)
+                const set = (fn: (q: LaceParams) => LaceParams, tag?: string) =>
+                  patch(selected.id, (o) => ({ ...o, lace: fn(o.lace) }), tag)
+                return (
+                  <fieldset>
+                    <legend>Freestanding lace</legend>
+                    <div className="row wide">
+                      <label>Mesh</label>
+                      <select value={L.pattern}
+                        onChange={(e) => set((q) => ({ ...q, pattern: e.target.value as LacePattern }))}>
+                        {LACE_PATTERNS.map((k) => (
+                          <option key={k} value={k}>{LACE_PATTERN_LABEL[k]}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <Num label="Mesh spacing (mm)" value={L.spacingMm} min={0.5} max={8} step={0.1}
+                      onChange={(v) => set((q) => ({ ...q, spacingMm: v }), 'lace.spacing')} />
+                    <Num label="Mesh angle (deg)" value={L.angle} min={0} max={180}
+                      onChange={(v) => set((q) => ({ ...q, angle: v }), 'lace.angle')} />
+                    <Num label="Passes per thread" value={L.passes} min={1} max={8}
+                      onChange={(v) => set((q) => ({ ...q, passes: v }), 'lace.passes')} />
+                    <Num label="Border passes" value={L.borderPasses} min={1} max={10}
+                      onChange={(v) => set((q) => ({ ...q, borderPasses: v }), 'lace.border')} />
+                    {/* The one stitch type where a correct-looking preview is
+                        dangerous: everything else is held up by fabric, and
+                        this is the fabric. */}
+                    <p className="hint warn">
+                      Freestanding lace holds itself together once the backing washes out. These
+                      checks catch the mesh that cannot — they cannot promise that one can. Sew a
+                      test piece and wash it before trusting a design to this.
+                    </p>
+                    {notes.map((n, i) => <p key={i} className="hint warn">{n}</p>)}
+                  </fieldset>
+                )
+              })()}
 
               {selected.type === 'patch' && (() => {
                 const notes = patchCheck(selected.patch)

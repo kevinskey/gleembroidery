@@ -22,6 +22,7 @@ import type { AngleGuide } from './satin'
 import { DEFAULT_MOTIF, MOTIF_IDS } from './decorative'
 import { DEFAULT_PROGRAM, PROGRAM_KINDS } from './programmotif'
 import { DEFAULT_PATCH, PATCH_CORNERS } from './patch'
+import { DEFAULT_LACE, LACE_PATTERNS } from './lace'
 import type { FrozenPlan } from './stitchedit'
 import type { Stitch } from './stitches'
 import {
@@ -144,6 +145,7 @@ export function settingsOut(o: EmbObject) {
     run: { ...o.run },
     program: { ...o.program },
     patch: { ...o.patch },
+    lace: { ...o.lace },
     motif: { ...o.motif },
     satin: { ...o.satin, split: { ...o.satin.split } },
     fill: { ...o.fill, border: { ...o.fill.border } },
@@ -191,6 +193,7 @@ export function objectOut(o: EmbObject) {
     run: { ...o.run },
     program: { ...o.program },
     patch: { ...o.patch },
+    lace: { ...o.lace },
     motif: { ...o.motif },
     satin: { ...o.satin, split: { ...o.satin.split } },
     fill: { ...o.fill, border: { ...o.fill.border } },
@@ -522,12 +525,13 @@ function objectIn(v: unknown, index: number): EmbObject | null {
   const run = isObj(v.run) ? v.run : {}
   const prog = isObj(v.program) ? v.program : {}
   const pat = isObj(v.patch) ? v.patch : {}
+  const lac = isObj(v.lace) ? v.lace : {}
   const satin = isObj(v.satin) ? v.satin : {}
   const fill = isObj(v.fill) ? v.fill : {}
   const border = isObj(fill.border) ? fill.border : {}
   const ap = isObj(v.applique) ? v.applique : {}
   const dRun = DEFAULT_RUN(), dSatin = DEFAULT_SATIN(), dFill = DEFAULT_FILL()
-  const dProg = DEFAULT_PROGRAM(), dPatch = DEFAULT_PATCH()
+  const dProg = DEFAULT_PROGRAM(), dPatch = DEFAULT_PATCH(), dLace = DEFAULT_LACE()
   const pf = isObj(v.puff) ? v.puff : {}
   const dApp = DEFAULT_APPLIQUE()
   const kd = isObj(v.knockdown) ? v.knockdown : {}
@@ -612,6 +616,13 @@ function objectIn(v: unknown, index: number): EmbObject | null {
           : undefined,
       },
     } : {}),
+    lace: {
+      pattern: oneOf(lac.pattern, LACE_PATTERNS, dLace.pattern),
+      spacingMm: num(lac.spacingMm, dLace.spacingMm),
+      angle: num(lac.angle, dLace.angle),
+      passes: num(lac.passes, dLace.passes),
+      borderPasses: num(lac.borderPasses, dLace.borderPasses),
+    },
     patch: {
       widthMm: num(pat.widthMm, dPatch.widthMm),
       density: num(pat.density, dPatch.density),

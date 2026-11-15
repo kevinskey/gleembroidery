@@ -175,6 +175,34 @@ const FIXTURES: Fixture[] = [
     ],
   },
   {
+    // Freestanding lace and cross-stitch on the shared grid. THE LACE PANEL
+    // IS THE ONE TO WASH-TEST: nothing in software can tell you whether a
+    // mesh survives the sink.
+    name: 'lace-and-counted',
+    note: 'Freestanding lace mesh (diamond) and two cross-stitched shapes on one grid',
+    objects: [
+      newObject({
+        name: 'lace-panel', color: '#c0392b', type: 'lace',
+        paths: [circle(-16, 0, 15)],
+        lace: { pattern: 'diamond', spacingMm: 2.5, angle: 0, passes: 3, borderPasses: 4 },
+      }),
+      newObject({
+        name: 'counted-a', color: '#1f6feb', type: 'fill',
+        paths: [rect(6, -14, 18, 12)],
+        fill: { style: 'crossstitch', angle: 0, spacing: 0.4, length: 3, stagger: 0.5,
+          crossPasses: 1, underlay: [], border: { enabled: false, width: 2, density: 0.4 } },
+      }),
+      newObject({
+        // Deliberately NOT aligned to its neighbour's bounding box: the
+        // crosses must still land on the same lattice.
+        name: 'counted-b', color: '#16a34a', type: 'fill',
+        paths: [rect(7.3, 2.6, 18, 12)],
+        fill: { style: 'crossstitch', angle: 0, spacing: 0.4, length: 3, stagger: 0.5,
+          crossPasses: 2, underlay: [], border: { enabled: false, width: 2, density: 0.4 } },
+      }),
+    ],
+  },
+  {
     // Hand-placed penetrations, deliberately including work the machine
     // cannot sew as given: six steps over 10 mm that must be subdivided, and
     // a 0.2 mm pair that must be dropped. 10 placed points leave as 22. The

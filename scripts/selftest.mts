@@ -52,6 +52,7 @@ import { railsFromClosedPath } from '../src/satin'
 import { DEFAULT_PROGRAM, candlewickRun, eyelet, frenchKnot, programCheck } from '../src/programmotif'
 import { DEFAULT_PATCH, patchCheck, patchEdge } from '../src/patch'
 import { crossStitchFill, crossStitchRun } from '../src/decorative'
+import { DEFAULT_LACE, laceCheck, laceStitches } from '../src/lace'
 import { blanketEdge, eStitchEdge, zigzagEdge } from '../src/runstyles'
 import { longestStep, runStyleStitches, shortestStep } from '../src/runstyles'
 import { manualPenetrations, manualStitches, manualWarnings } from '../src/manual'
@@ -497,6 +498,7 @@ console.log('\n# project save / reopen')
   doc.objects[0].knockdown = { spacing: 2.6, margin: 2.1, angle: 20, length: 3.5 }
   doc.objects[1].program = { kind: 'eyelet', sizeMm: 4.5, holeMm: 1.8, passes: 9, spacingMm: 5.5 }
   doc.objects[0].patch = { widthMm: 3.4, density: 0.33, overhangMm: 0.7, corner: 'square' }
+  doc.objects[0].lace = { pattern: 'hex', spacingMm: 2.1, angle: 12, passes: 4, borderPasses: 5 }
   doc.objects[1].visible = false
   // Entry/exit and the appliqué recipe, so a dropped field cannot hide here
   // either.
@@ -5313,6 +5315,82 @@ console.log('\n# satin density means what the trade means by it')
     }
     ok(centres.size === pts.length / 4, 'a cell gets one cross however often the path crosses it',
       `${centres.size} cells for ${pts.length / 4} crosses`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Freestanding lace (src/lace.ts) — the mesh IS the fabric
+// ---------------------------------------------------------------------------
+{
+  console.log('\nfreestanding lace')
+  const L = DEFAULT_LACE()
+  const square: Pt[][] = [[
+    { x: -20, y: -20 }, { x: 20, y: -20 }, { x: 20, y: 20 }, { x: -20, y: 20 }, { x: -20, y: -20 },
+  ]]
+
+  {
+    const st = laceStitches(square, { ...L, pattern: 'grid', spacingMm: 3, passes: 3, borderPasses: 3 })
+    // 40 mm at 3 mm spacing is ~14 threads per direction; two directions at
+    // 3 passes is ~112 penetrations, plus the border. Assert the RELATIONSHIP
+    // rather than a number guessed at: halving the spacing must roughly
+    // double the threads.
+    const coarse = laceStitches(square, { ...L, pattern: 'grid', spacingMm: 6, passes: 3, borderPasses: 3 })
+    // The border is a FIXED cost in both counts, so comparing totals
+    // understates the ratio. Take it off: a square border at 3 passes is
+    // 3 x 5 points plus its jump.
+    const border = 3 * 5 + 1
+    const ratio = (st.length - border) / (coarse.length - border)
+    ok(ratio >= 1.75, 'mesh density follows the spacing',
+      `${coarse.length - border} threads-worth at 6 mm -> ${st.length - border} at 3 mm (${ratio.toFixed(2)}x)`)
+    const inside = st.filter((p) => !p.jump)
+      .every((p) => p.x >= -20.01 && p.x <= 20.01 && p.y >= -20.01 && p.y <= 20.01)
+    ok(inside, 'every mesh thread stays inside the shape')
+
+    // Threads must run in BOTH directions, or there are no crossings and
+    // nothing locks: that is the difference between lace and fringe.
+    const horiz = st.filter((p, i) => i > 0 && Math.abs(p.y - st[i - 1].y) < 0.01 && Math.abs(p.x - st[i - 1].x) > 1).length
+    const vert = st.filter((p, i) => i > 0 && Math.abs(p.x - st[i - 1].x) < 0.01 && Math.abs(p.y - st[i - 1].y) > 1).length
+    ok(horiz > 10 && vert > 10, 'threads run in both directions, so they cross and lock',
+      `${horiz} across, ${vert} down`)
+  }
+
+  {
+    // The border goes LAST, over every thread end. If it went first, every
+    // end would sit on top of it anchored by nothing.
+    const st = laceStitches(square, { ...L, pattern: 'grid', spacingMm: 4, passes: 2, borderPasses: 3 })
+    const tailOnEdge = st.slice(-12).filter((p) =>
+      Math.abs(Math.abs(p.x) - 20) < 0.01 || Math.abs(Math.abs(p.y) - 20) < 0.01).length
+    ok(tailOnEdge >= 8, 'the border is sewn last, trapping the thread ends under it',
+      `${tailOnEdge} of the last 12 penetrations are on the outline`)
+  }
+
+  {
+    const hex = laceStitches(square, { ...L, pattern: 'hex', spacingMm: 3 })
+    const grid = laceStitches(square, { ...L, pattern: 'grid', spacingMm: 3 })
+    ok(hex.length > grid.length, 'hex lays three directions, so more thread than a grid',
+      `${hex.length} vs ${grid.length}`)
+  }
+
+  // The judgement. These are the checks that decide whether it survives a sink.
+  ok(laceCheck(square, { ...L, spacingMm: 6 }).some((w) => w.includes('limp')),
+    'cells too big to hold themselves open are reported')
+  ok(laceCheck(square, { ...L, passes: 1 }).some((w) => w.includes('single strand')),
+    'a one-pass mesh thread is reported — nothing grips at a crossing')
+  ok(laceCheck(square, { ...L, borderPasses: 1 }).some((w) => w.includes('hangs from')),
+    'a weak border is reported — it is what the mesh hangs from')
+  ok(laceCheck([[{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 5 }, { x: 0, y: 5 }, { x: 0, y: 0 }]], L)
+    .some((w) => w.includes('too small')),
+    'a piece too small to hold itself open is reported')
+  ok(laceCheck(square, L).length === 0, 'and sensible lace reports nothing')
+
+  // End to end.
+  {
+    const doc = emptyDoc()
+    doc.objects = [newObject({ name: 'panel', color: '#000', type: 'lace', paths: square })]
+    const { plan, warnings } = digitize(doc)
+    const sewn = plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+    ok(sewn.length > 200, 'a lace object reaches the plan', `${sewn.length} penetrations`)
+    ok(warnings.length === 0, 'with no complaints at the defaults')
   }
 }
 

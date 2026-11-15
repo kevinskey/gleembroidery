@@ -24,6 +24,7 @@ import { blanketEdge, eStitchEdge, runStyleStitches, zigzagEdge } from './runsty
 import { manualPenetrations, manualStitches, manualWarnings } from './manual'
 import { programCheck, programStitches } from './programmotif'
 import { patchCheck, patchStitches } from './patch'
+import { laceCheck, laceStitches } from './lace'
 import { resolveComp, withComp } from './compensate'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
@@ -466,6 +467,23 @@ function stitchObject(
     case 'bean':
       for (const path of planPaths(obj.paths, out)) push(beanStitch(path, obj.run))
       break
+
+    case 'lace': {
+      // Judged every time, not once at creation: spacing and passes are what
+      // decide whether this survives the wash, and both are live controls.
+      // The warnings are not a formality — a mesh that fails them looks
+      // perfect on screen and perfect on the machine.
+      const reg = toRegions(obj.paths)
+      for (const region of reg) {
+        for (const why of laceCheck(region, obj.lace)) warnings.push(`${obj.name}: ${why}`)
+      }
+      if (!reg.length) {
+        warnings.push(`${obj.name}: NOT STITCHED — lace needs a closed shape`)
+        break
+      }
+      for (const region of reg) push(laceStitches(region, obj.lace))
+      break
+    }
 
     case 'patch': {
       // Closed only: a patch edge wraps a cut outline, and an open path has

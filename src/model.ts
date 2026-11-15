@@ -17,6 +17,7 @@ import type { AngleGuide } from './satin'
 import { DEFAULT_MOTIF, type MotifParams } from './decorative'
 import { DEFAULT_PROGRAM, type ProgramParams } from './programmotif'
 import { DEFAULT_PATCH, type PatchParams } from './patch'
+import { DEFAULT_LACE, type LaceParams } from './lace'
 
 export interface Pt {
   x: number
@@ -36,6 +37,7 @@ export type StitchType =
   | 'manual' // every penetration placed by hand; the nodes ARE the stitches
   | 'program' // French knots, candlewicking, eyelets — piled, not looped
   | 'patch' // wrapped border that encases a cut edge
+  | 'lace' // freestanding mesh — it IS the fabric once the backing washes out
   | 'none' // construction only — generates no stitches
 
 /**
@@ -49,7 +51,7 @@ export type StitchType =
  * a test asserts it covers the union.
  */
 export const STITCH_TYPES: StitchType[] = [
-  'applique', 'knockdown', 'run', 'bean', 'satin', 'fill', 'manual', 'program', 'patch', 'none',
+  'applique', 'knockdown', 'run', 'bean', 'satin', 'fill', 'manual', 'program', 'patch', 'lace', 'none',
 ]
 
 export interface RunParams {
@@ -538,6 +540,8 @@ export interface EmbObject {
   program: ProgramParams
   /** Patch-edge settings — the wrapped border of a cut patch. */
   patch: PatchParams
+  /** Freestanding lace mesh settings. */
+  lace: LaceParams
   /** The repeated drawing, for a motif run or a motif fill. */
   motif: MotifParams
 }
@@ -903,6 +907,7 @@ export function newObject(partial: Partial<EmbObject> = {}): EmbObject {
     knockdown: DEFAULT_KNOCKDOWN(),
     program: DEFAULT_PROGRAM(),
     patch: DEFAULT_PATCH(),
+    lace: DEFAULT_LACE(),
     motif: DEFAULT_MOTIF(),
     ...partial,
   }
