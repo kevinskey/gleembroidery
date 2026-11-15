@@ -135,8 +135,15 @@ export function candlewickRun(path: Pt[], p: ProgramParams): Stitch[] {
  * geometrically an eyelet, visually a star. One function so the generator
  * and programCheck cannot disagree about how many there are.
  */
-function eyeletBars(outerR: number, passes: number): number {
-  return Math.max(MIN_PASSES * 2, Math.round(passes * 2), Math.round((2 * Math.PI * outerR) / 0.6))
+function eyeletBars(outerR: number, innerR: number, passes: number): number {
+  // Dense enough on the OUTSIDE to read as a ring...
+  const want = Math.max(MIN_PASSES * 2, Math.round(passes * 2), Math.round((2 * Math.PI * outerR) / 0.6))
+  // ...but the INNER rim is the binding constraint, and it is the one that
+  // breaks needles. Its circumference is the small one, so bars that look
+  // comfortable round the outside can land 0.2 mm apart round the hole.
+  // Asking for more is asking for a bigger hole, which is what the check says.
+  const cap = Math.floor((2 * Math.PI * innerR) / 0.35)
+  return Math.max(MIN_PASSES * 2, Math.min(want, Math.max(MIN_PASSES * 2, cap)))
 }
 
 export function eyelet(c: Pt, p: ProgramParams): Stitch[] {
@@ -147,7 +154,7 @@ export function eyelet(c: Pt, p: ProgramParams): Stitch[] {
   // them — geometrically an eyelet, visually a star, and nothing like the
   // solid ring an eyelet is supposed to be. Spacing round the outside is
   // what decides whether it reads as a ring, exactly as it does for satin.
-  const bars = eyeletBars(outer, p.passes)
+  const bars = eyeletBars(outer, inner, p.passes)
   const out: Stitch[] = []
   for (let k = 0; k <= bars; k++) {
     const a = (k / bars) * Math.PI * 2
@@ -183,10 +190,16 @@ export function programCheck(p: ProgramParams): string[] {
     if (inner >= outer - 0.3) {
       out.push(`the hole is too close to the outside: ${(outer * 2).toFixed(1)} mm eyelet needs a hole under ${((outer - 0.3) * 2).toFixed(1)} mm`)
     }
-    const bars = eyeletBars(outer, p.passes)
+    const bars = eyeletBars(outer, inner, p.passes)
+    const asked = Math.max(MIN_PASSES * 2, Math.round(p.passes * 2))
+    // The cap is geometry, not a preference — but a request that gets
+    // reduced must be SAID, or the control silently stops meaning anything.
+    if (bars < asked) {
+      out.push(`${asked} bars would crowd the hole; sewing ${bars}. A bigger hole is what buys more bars`)
+    }
     const innerPitch = (2 * Math.PI * inner) / bars
     if (innerPitch < 0.3) {
-      out.push(`${bars} bars put the inner penetrations ${innerPitch.toFixed(2)} mm apart — fewer bars, or a bigger hole`)
+      out.push(`the inner penetrations land ${innerPitch.toFixed(2)} mm apart even at ${bars} bars — the hole is too small for an eyelet this size`)
     }
   }
   if (Math.round(p.passes) < MIN_PASSES) {

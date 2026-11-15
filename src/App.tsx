@@ -352,7 +352,19 @@ const TYPE_WORD: Record<StitchType, string> = {
   none: 'off',
 }
 
-const TYPES: { id: StitchType; label: string; hint: string; icon: ReactElement }[] = [
+/**
+ * The quick stitch picker.
+ *
+ * It must list EVERY type the Properties selector does. It drifted to five
+ * entries while appliqué, knockdown, manual, program motifs, patch edge and
+ * lace were added, so those features existed and could not be reached from
+ * the toolbar — the same complaint satin itself drew twice.
+ *
+ * Satin appears as two buttons because a band ALONG a line and bars ACROSS a
+ * shape are two tools to a digitizer, even though both are type 'satin' with
+ * a mode underneath.
+ */
+const TYPES: { id: StitchType; mode?: SatinMode; label: string; hint: string; icon: ReactElement }[] = [
   {
     id: 'run', label: 'Run', hint: 'Single running stitch along the path',
     icon: (
@@ -366,9 +378,22 @@ const TYPES: { id: StitchType; label: string; hint: string; icon: ReactElement }
     ),
   },
   {
-    id: 'satin', label: 'Satin', hint: 'Zigzag column centred on the path',
+    id: 'satin', mode: 'border', label: 'Border',
+    hint: 'Satin border — a band laid ALONG the line, width from the setting',
     icon: (
       <svg width="22" height="16" viewBox="0 0 22 16"><path d="M1 13L4 3L7 13L10 3L13 13L16 3L19 13L21 6" stroke="currentColor" strokeWidth="1.3" fill="none" /></svg>
+    ),
+  },
+  {
+    id: 'satin', mode: 'column', label: 'Column',
+    hint: 'Satin column — bars span ACROSS a closed shape and fill it',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M2 2.5v11M20 2.5v11" stroke="currentColor" strokeWidth="1.1" fill="none" />
+        {[4, 6.5, 9, 11.5, 14, 16.5].map((x) => (
+          <path key={x} d={`M${x} 3v10`} stroke="currentColor" strokeWidth="1.5" opacity="0.85" />
+        ))}
+      </svg>
     ),
   },
   {
@@ -377,6 +402,66 @@ const TYPES: { id: StitchType; label: string; hint: string; icon: ReactElement }
       <svg width="22" height="16" viewBox="0 0 22 16">
         <rect x="1.5" y="2.5" width="19" height="11" stroke="currentColor" strokeWidth="1" fill="none" />
         {[4, 6, 8, 10, 12].map((y) => <path key={y} d={`M2 ${y}h18`} stroke="currentColor" strokeWidth="0.8" opacity="0.7" />)}
+      </svg>
+    ),
+  },
+  {
+    id: 'applique', label: 'Appliqué', hint: 'Fabric laid on, with machine stops between the phases',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <rect x="2" y="3" width="12" height="10" stroke="currentColor" strokeWidth="1" fill="none" />
+        <path d="M14 5h6M14 8h6M14 11h6" stroke="currentColor" strokeWidth="1.1" />
+      </svg>
+    ),
+  },
+  {
+    id: 'patch', label: 'Patch', hint: 'Wrapped border that encases a cut edge',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <rect x="4" y="4" width="14" height="8" stroke="currentColor" strokeWidth="1" fill="none" />
+        {[5, 7.5, 10, 12.5, 15].map((x) => (
+          <g key={x}><path d={`M${x} 2.5v3`} stroke="currentColor" strokeWidth="1.1" /><path d={`M${x} 10.5v3`} stroke="currentColor" strokeWidth="1.1" /></g>
+        ))}
+      </svg>
+    ),
+  },
+  {
+    id: 'lace', label: 'Lace', hint: 'Freestanding mesh — it holds itself once the backing washes out',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <circle cx="11" cy="8" r="6.2" stroke="currentColor" strokeWidth="1" fill="none" />
+        <path d="M6 3.5l10 9M16 3.5l-10 9M11 1.8v12.4M4.8 8h12.4" stroke="currentColor" strokeWidth="0.8" opacity="0.85" />
+      </svg>
+    ),
+  },
+  {
+    id: 'program', label: 'Motif', hint: 'French knots, candlewicking, eyelets',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        {[0, 45, 90, 135].map((a) => (
+          <path key={a} d="M11 2.5v11" stroke="currentColor" strokeWidth="1.1"
+            transform={`rotate(${a} 11 8)`} />
+        ))}
+      </svg>
+    ),
+  },
+  {
+    id: 'knockdown', label: 'Knock', hint: 'Coarse net laid FIRST to flatten a pile fabric',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <rect x="2" y="3" width="18" height="10" stroke="currentColor" strokeWidth="1" fill="none" />
+        {[5, 9, 13].map((y) => <path key={y} d={`M3 ${y}h16`} stroke="currentColor" strokeWidth="0.9" opacity="0.6" />)}
+      </svg>
+    ),
+  },
+  {
+    id: 'manual', label: 'Manual', hint: 'Every needle penetration placed by hand',
+    icon: (
+      <svg width="22" height="16" viewBox="0 0 22 16">
+        <path d="M2 12l5-4 5 3 4-6 4 3" stroke="currentColor" strokeWidth="0.9" fill="none" strokeDasharray="0.1 3" strokeLinecap="round" />
+        {[[2, 12], [7, 8], [12, 11], [16, 5], [20, 8]].map(([x, y]) => (
+          <circle key={`${x}`} cx={x} cy={y} r="1.4" fill="currentColor" />
+        ))}
       </svg>
     ),
   },
@@ -3845,11 +3930,23 @@ export default function App() {
             <label>Stitch</label>
             {TYPES.map((t) => (
               <button
-                key={t.id}
-                className={`tool${selected?.type === t.id ? ' on' : ''}`}
+                key={`${t.id}:${t.mode ?? ''}`}
+                className={`tool${selected?.type === t.id
+                  && (!t.mode || (selected.satin.mode ?? 'border') === t.mode) ? ' on' : ''}`}
                 title={t.hint}
                 disabled={!selected}
-                onClick={() => selected && patch(selected.id, (o) => ({ ...o, type: t.id }))}
+                onClick={() => {
+                  if (!selected) return
+                  // Same gate as the Properties selector: a conversion that
+                  // cannot work is refused with the reason, not half-applied.
+                  const r = convertCheck(selected, t.id)
+                  if (!r.allowed) { setNote(r.notes[0]); return }
+                  patch(selected.id, (o) => {
+                    const next = convertObject(o, t.id)
+                    return t.mode ? { ...next, satin: { ...next.satin, mode: t.mode } } : next
+                  })
+                  if (r.notes.length) setNote(r.notes.join(' · '))
+                }}
               >
                 {t.icon}
                 <span>{t.label}</span>

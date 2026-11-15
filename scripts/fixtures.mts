@@ -290,6 +290,19 @@ FIXTURES.push({
       satin: { width: 3, density: 0.4, pullComp: 0.2, underlay: ['center'], lean: 0,
         mode: 'column', split: { enabled: false, maxLength: 6, stagger: 0.7 } } }),
 
+    // THE TWO SATINS, side by side, same width setting, so they can be
+    // compared on cloth: a BORDER lays a band along the outline and leaves
+    // the middle bare; a COLUMN spans bars across and fills the shape. Same
+    // rectangle, so the only difference is the construction.
+    newObject({ name: 's-satin-border-rect', color: '#1f6feb', type: 'satin',
+      paths: [rect(26, -8, 22, 9)],
+      satin: { width: 2.5, density: 0.4, pullComp: 0.2, underlay: ['center'], lean: 0,
+        mode: 'border', split: { enabled: false, maxLength: 6, stagger: 0.7 } } }),
+    newObject({ name: 's-satin-column-rect', color: '#1f6feb', type: 'satin',
+      paths: [rect(26, 4, 22, 9)],
+      satin: { width: 2.5, density: 0.4, pullComp: 0.2, underlay: ['center'], lean: 0,
+        mode: 'column', split: { enabled: false, maxLength: 6, stagger: 0.7 } } }),
+
     // A CONCAVE fill WITH A HOLE that must stay empty.
     newObject({ name: 's-fill-hole', color: '#16a34a', type: 'fill',
       paths: [
@@ -335,7 +348,7 @@ FIXTURES.push({
 
     // Freestanding lace and an appliqué with its machine stops.
     newObject({ name: 's-lace', color: '#db2777', type: 'lace',
-      paths: [circle(34, 16, 11)],
+      paths: [circle(34, 26, 11)],
       lace: { pattern: 'diamond', spacingMm: 2.5, angle: 0, passes: 3, borderPasses: 4 } }),
     newObject({ name: 's-applique', color: '#0f766e', type: 'applique',
       paths: [circle(-40, 28, 10)],

@@ -5166,9 +5166,21 @@ console.log('\n# satin density means what the trade means by it')
     'a knot under the floor is reported')
   ok(programCheck({ ...P, kind: 'eyelet', sizeMm: 6, holeMm: 0.2 }).some((w) => w.includes('closes up')),
     'an eyelet hole that would close up is reported')
+  // The bar count is CAPPED by the inner rim — that is the one that breaks
+  // needles — and a request that gets reduced is said out loud.
   ok(programCheck({ ...P, kind: 'eyelet', sizeMm: 6, holeMm: 2, passes: 40 })
-    .some((w) => w.includes('apart')),
-    'too many bars for the hole is reported with the spacing it would give')
+    .some((w) => w.includes('crowd the hole')),
+    'a bar count the hole cannot take is reduced, and the reduction is reported')
+  {
+    const e = eyelet({ x: 0, y: 0 }, { ...P, kind: 'eyelet', sizeMm: 6, holeMm: 2, passes: 40 })
+    const inner = e.filter((q) => Math.hypot(q.x, q.y) < 1.5)
+    let closest = Infinity
+    for (let i = 1; i < inner.length; i++) {
+      closest = Math.min(closest, Math.hypot(inner[i].x - inner[i - 1].x, inner[i].y - inner[i - 1].y))
+    }
+    ok(closest >= 0.3, 'and the inner penetrations never crowd below the floor',
+      `closest ${closest.toFixed(2)} mm`)
+  }
   ok(programCheck({ ...P, sizeMm: 3, passes: 7 }).length === 0, 'a sensible knot reports nothing')
 
   // End to end through the real pipeline.
