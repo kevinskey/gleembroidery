@@ -144,12 +144,23 @@ export function analyseDensity(plan: StitchPlan, cellMm = CELL_MM): DensityRepor
   const hotspots = cells.filter((c) => c.ratio >= WARN_RATIO)
   const worst = cells.length ? cells[0].ratio : 0
   const severe = hotspots.filter((c) => c.ratio >= SEVERE_RATIO).length
+
+  // "Check for overlapping objects" sends you hunting for a second object
+  // that may not exist. Thread stacks for two different reasons and the fix
+  // is different for each: objects crossing, or LAYERS WITHIN ONE OBJECT —
+  // a centre underlay, a zigzag underlay and the cover is three layers, and
+  // on a narrow shape that alone reaches 2.3x. When the whole design is one
+  // block there is nothing to overlap, so say the thing that is true.
+  const oneBlock = plan.blocks.length <= 1
+  const cause = oneBlock
+    ? 'nothing here overlaps anything else, so this is layers within the object — usually an underlay set under a narrow column'
+    : 'either objects crossing, or layers within one — an underlay set plus the cover is three layers of thread'
   if (severe) {
     warnings.push(
-      `${severe} area${severe === 1 ? '' : 's'} over ${SEVERE_RATIO}x normal density — expect thread breaks; reduce density or remove an overlap`)
+      `${severe} area${severe === 1 ? '' : 's'} over ${SEVERE_RATIO}x normal density — expect thread breaks. ${cause}`)
   } else if (hotspots.length) {
     warnings.push(
-      `${hotspots.length} area${hotspots.length === 1 ? '' : 's'} over ${WARN_RATIO}x normal density — check for overlapping objects`)
+      `${hotspots.length} area${hotspots.length === 1 ? '' : 's'} over ${WARN_RATIO}x normal density — ${cause}`)
   }
   return { cells, hotspots, worst, penetrations, warnings }
 }
