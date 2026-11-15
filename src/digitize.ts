@@ -573,6 +573,27 @@ function stitchObject(
       // tool's job and left the middle bare.
       if (obj.satin.mode === 'column') {
         const closed = obj.paths.filter((p) => p.length > 2 && dist(p[0], p[p.length - 1]) < 0.05)
+
+        // A SHAPE WITH A COUNTER IS NOT A COLUMN. A column is a band with
+        // two sides; a letter is several of them meeting at junctions, and
+        // the hole in an A or an O is the giveaway that this outline holds
+        // more than one stroke. Handed one, railsFromClosedPath splits the
+        // whole letter on its principal axis and pairs the counter as if it
+        // were a third stroke — which is how an A came back with rails
+        // 21.8 mm apart and 0.20 mm apart in the same object.
+        //
+        // Refused, with the tool that does do it. One column per stroke,
+        // clicked out alternate sides, is how a letter is digitized.
+        const regions = toRegions(closed)
+        const withHoles = regions.filter((r) => r.length > 1).length
+        if (withHoles) {
+          warnings.push(
+            `${obj.name}: NOT STITCHED as a column — this outline has a counter, so it is ` +
+            `several strokes rather than one band. Draw a column per stroke with the Column ` +
+            `tool (C), or sew it as a fill`)
+          break
+        }
+
         if (closed.length === obj.paths.length && closed.length > 0) {
           let handled = 0
           for (const path of closed) {

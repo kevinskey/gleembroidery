@@ -5720,5 +5720,53 @@ console.log('\n# satin density means what the trade means by it')
   }
 }
 
+// ---------------------------------------------------------------------------
+// A shape with a counter is not a column (Kevin's A, 2026-11-15)
+// ---------------------------------------------------------------------------
+{
+  console.log('\na counter means several strokes, not one column')
+  const ring = (cx: number, cy: number, r: number, n = 48): Pt[] =>
+    Array.from({ length: n + 1 }, (_, i) => {
+      const a = (i / n) * Math.PI * 2
+      return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) }
+    })
+
+  // An O: outer ring plus its counter. Asked for as a column, this used to
+  // split the whole letter on its principal axis and pair the counter as a
+  // third stroke — rails 20 mm apart in one place and 0.2 mm in another.
+  const doc = emptyDoc()
+  doc.objects = [newObject({
+    name: 'O', color: '#000', type: 'satin',
+    paths: [ring(0, 0, 14), ring(0, 0, 7)],
+    satin: { ...DEFAULT_SATIN(), mode: 'column' },
+  })]
+  const { plan, warnings } = digitize(doc)
+  const sewn = plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+  ok(sewn.length === 0, 'a counter refuses to be sewn as one column', `${sewn.length} penetrations`)
+  ok(warnings.some((w) => w.includes('counter') && w.includes('Column tool')),
+    'and the refusal names the tool that does digitize a letter',
+    warnings[0]?.slice(0, 80))
+
+  // A plain band still works — the refusal must not catch ordinary columns.
+  const bar = emptyDoc()
+  bar.objects = [newObject({
+    name: 'bar', color: '#000', type: 'satin',
+    paths: [[{ x: -20, y: -3 }, { x: 20, y: -3 }, { x: 20, y: 3 }, { x: -20, y: 3 }, { x: -20, y: -3 }]],
+    satin: { ...DEFAULT_SATIN(), mode: 'column' },
+  })]
+  const barSewn = digitize(bar).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+  ok(barSewn.length > 50, 'a band with no counter is still sewn as a column',
+    `${barSewn.length} penetrations`)
+
+  // And the same letter as a FILL is untouched — the refusal is about
+  // columns, not about shapes with holes.
+  const fill = emptyDoc()
+  fill.objects = [newObject({ name: 'O', color: '#000', type: 'fill', paths: [ring(0, 0, 14), ring(0, 0, 7)] })]
+  const fillSewn = digitize(fill).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+  ok(fillSewn.length > 100, 'and the same outline still fills normally', `${fillSewn.length} penetrations`)
+  const inCounter = fillSewn.filter((p) => Math.hypot(p.x, p.y) < 6).length
+  ok(inCounter < fillSewn.length * 0.02, 'with its counter still empty', `${inCounter} inside`)
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
