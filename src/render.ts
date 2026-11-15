@@ -149,7 +149,17 @@ const DETAIL_MAX_STITCHES = 80_000
  */
 const SHADOW_W = 1.18, SHADOW_A = 0.20, SHADOW_T = -0.38
 const CORD_W = 1.06, CORD_A = 1.0
-const CROWN_W = 0.38, CROWN_A = 0.34, CROWN_T = 0.30
+const CROWN_W = 0.42, CROWN_A = 0.46, CROWN_T = 0.34
+
+/**
+ * How much of each stitch the cord and the crown cover, end to end.
+ *
+ * The ends are left to the shadow pass, which is what darkens a stitch where
+ * it dips into the fabric. Without this the three passes are concentric down
+ * the whole length and the only variation is ACROSS the stitch — which is the
+ * mistake v1 made, and it reads as stripes rather than thread.
+ */
+const BODY_SPAN = 0.9, CROWN_SPAN = 0.52
 
 /**
  * How far a stitch end may wander, as a fraction of a thread width.
@@ -580,23 +590,42 @@ export function render(
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
 
-      const pass = (colour: string, width: number, alpha: number) => {
+      /**
+       * One shading pass.
+       *
+       * `span` shortens each stitch about its own midpoint. THIS IS WHAT
+       * MAKES IT LOOK LIKE THREAD. A stitch dips into the cloth at both ends
+       * and lies proud in the middle, so it is dark where it enters and
+       * bright along its crown — and the banding in real satin therefore runs
+       * PERPENDICULAR to the stitches. Drawing all three passes at full
+       * length, as this did, gives every stitch one flat colour end to end,
+       * and a column of them reads as poster paint.
+       */
+      const pass = (colour: string, width: number, alpha: number, span: number) => {
         ctx.strokeStyle = colour
         ctx.lineWidth = Math.max(0.35, width)
         ctx.globalAlpha = alpha
         ctx.beginPath()
         for (const [x0, y0, x1, y1] of segs) {
-          ctx.moveTo(x0, y0)
-          ctx.lineTo(x1, y1)
+          if (span >= 1) {
+            ctx.moveTo(x0, y0)
+            ctx.lineTo(x1, y1)
+          } else {
+            const mx = (x0 + x1) / 2, my = (y0 + y1) / 2
+            ctx.moveTo(mx + (x0 - mx) * span, my + (y0 - my) * span)
+            ctx.lineTo(mx + (x1 - mx) * span, my + (y1 - my) * span)
+          }
         }
         ctx.stroke()
       }
 
       // Shadow first, spreading under the neighbours so rows merge into one
-      // surface instead of standing apart as separate bars.
-      pass(shade(b.color, SHADOW_T), lay * SHADOW_W, SHADOW_A)
-      pass(b.color, lay * CORD_W, CORD_A)
-      pass(shade(b.color, CROWN_T), lay * CROWN_W, CROWN_A)
+      // surface instead of standing apart as separate bars. Then the cord,
+      // pulled in slightly so each stitch darkens where it enters the cloth,
+      // then the crown over the middle half only.
+      pass(shade(b.color, SHADOW_T), lay * SHADOW_W, SHADOW_A, 1)
+      pass(b.color, lay * CORD_W, CORD_A, BODY_SPAN)
+      pass(shade(b.color, CROWN_T), lay * CROWN_W, CROWN_A, CROWN_SPAN)
       ctx.globalAlpha = 1
     }
 
