@@ -452,13 +452,28 @@ export function crossStitchFill(region: Pt[][], p: FillParams): Stitch[] {
   // "how long a stitch", and an arm of a cross IS one stitch, so that is what
   // sizes the grid.
   const cell = Math.max(1, p.length)
+
+  // THE GRID IS ANCHORED TO THE DOCUMENT ORIGIN, not to this shape's own
+  // bounding box. Two cross-stitched objects beside each other have to share
+  // one grid or their crosses interleave at the seam and the whole point of
+  // counted work is lost — and a bbox-relative grid shifts the moment the
+  // shape is resized or another object is added. Snapping the start of the
+  // scan down to the nearest whole cell from 0 gives every object in the
+  // document, in any order, the same lattice.
+  const snap = (v: number) => Math.floor(v / cell) * cell
+  const startX = snap(minX), startY = snap(minY)
+
+  // Each cross sewn more than once reads bolder without the grid changing —
+  // the counted-work equivalent of a bean stitch.
+  const passes = Math.max(1, Math.round(p.crossPasses ?? 1))
+
   const out: Stitch[] = []
   let prev: Pt | null = null
   let leftToRight = true
 
-  for (let y = minY; y <= maxY; y += cell) {
+  for (let y = startY; y <= maxY; y += cell) {
     const cells: Pt[] = []
-    for (let x = minX; x <= maxX; x += cell) {
+    for (let x = startX; x <= maxX; x += cell) {
       // Every CORNER inside, not just the centre. Testing the centre is the
       // obvious reading and it lets a cross near the edge put half its
       // thread outside the shape — stitching beyond the outline, which on a
@@ -479,8 +494,13 @@ export function crossStitchFill(region: Pt[][], p: FillParams): Stitch[] {
         { x: cx + h, y: cy - h }, { x: cx - h, y: cy + h },
       ].map((q) => rotatePt(q, icos, isin))
       if (prev && dist(prev, arm[0]) > cell * 2.5) out.push({ ...arm[0], jump: true })
-      out.push(...arm)
-      prev = arm[arm.length - 1]
+      for (let k = 0; k < passes; k++) {
+        // Retrace the X rather than re-entering it: a second pass that
+        // started from arm[0] again would need a travel back across the
+        // cross, which shows.
+        out.push(...(k % 2 === 0 ? arm : [...arm].reverse()))
+      }
+      prev = out[out.length - 1]
     }
     leftToRight = !leftToRight
   }
@@ -579,6 +599,55 @@ export function echoFill(
     if (k === MAX_ECHO_RINGS - 1) {
       report?.(`echo fill stopped at ${MAX_ECHO_RINGS} rings — the spacing may be far too tight for this shape`)
     }
+  }
+  return out
+}
+
+/**
+ * Crosses centred along a path, on the SAME lattice the fills use.
+ *
+ * Counted work on a border has to line up with counted work in the area it
+ * borders, so the crosses are not simply spaced along the path: each is
+ * snapped to the document grid, and a cell is used once however many times
+ * the path wanders through it.
+ */
+export function crossStitchRun(path: Pt[], cellMm: number, passes = 1): Stitch[] {
+  const pts = path.filter((q, i) => i === 0 || dist(q, path[i - 1]) > 1e-9)
+  if (pts.length < 2) return []
+  const cell = Math.max(1, cellMm)
+  const n = Math.max(1, Math.round(passes))
+
+  // Walk finely enough that no cell the path crosses is stepped over.
+  const step = cell / 3
+  let total = 0
+  for (let i = 1; i < pts.length; i++) total += dist(pts[i - 1], pts[i])
+  const seen = new Set<string>()
+  const centres: Pt[] = []
+  for (let d = 0; d <= total; d += step) {
+    let walked = 0, i = 1
+    while (i < pts.length - 1 && walked + dist(pts[i - 1], pts[i]) < d) { walked += dist(pts[i - 1], pts[i]); i++ }
+    const a = pts[i - 1], b = pts[i]
+    const seg = dist(a, b) || 1
+    const t = Math.min(1, Math.max(0, (d - walked) / seg))
+    const px = a.x + (b.x - a.x) * t, py = a.y + (b.y - a.y) * t
+    const gx = Math.floor(px / cell), gy = Math.floor(py / cell)
+    const key = `${gx},${gy}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    centres.push({ x: gx * cell + cell / 2, y: gy * cell + cell / 2 })
+  }
+
+  const h = cell / 2
+  const out: Stitch[] = []
+  let prev: Pt | null = null
+  for (const c of centres) {
+    const arm = [
+      { x: c.x - h, y: c.y - h }, { x: c.x + h, y: c.y + h },
+      { x: c.x + h, y: c.y - h }, { x: c.x - h, y: c.y + h },
+    ]
+    if (prev && dist(prev, arm[0]) > cell * 2.5) out.push({ ...arm[0], jump: true })
+    for (let k = 0; k < n; k++) out.push(...(k % 2 === 0 ? arm : [...arm].reverse()))
+    prev = out[out.length - 1]
   }
   return out
 }

@@ -4657,6 +4657,19 @@ export default function App() {
                           onChange={(v) => patch(selected.id,
                             (o) => ({ ...o, run: { ...o.run, passes: v } }), 'run.passes')} />
                       )}
+                      {selected.run.style === 'cross' && (
+                        <Num label="Cross size (mm)" value={selected.run.widthMm ?? 3} min={1} max={10} step={0.5}
+                          onChange={(v) => patch(selected.id,
+                            (o) => ({ ...o, run: { ...o.run, widthMm: v } }), 'run.cross')} />
+                      )}
+                      {(selected.run.style === 'cross' || selected.run.style === 'multipass') && (
+                        <Num label="Passes" value={selected.run.passes ?? 1} min={1} max={9}
+                          onChange={(v) => patch(selected.id,
+                            (o) => ({ ...o, run: { ...o.run, passes: v } }), 'run.passes2') } />
+                      )}
+                      {selected.run.style === 'cross' && (
+                        <p className="hint">Snapped to the document grid, so a counted border lines up with a counted area.</p>
+                      )}
                       {(selected.run.style === 'stem' || selected.run.style === 'chain') && (
                         <Num label="Texture width (mm)" value={selected.run.widthMm ?? 1.2} min={0.2} max={6}
                           onChange={(v) => patch(selected.id,
@@ -4995,8 +5008,16 @@ export default function App() {
                         onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, length: v } }), 'fill.length')} />
                     )}
                     {selected.fill.style === 'crossstitch' && (
-                      <Num label="Cross size (mm)" value={selected.fill.length} step={0.5} min={1} max={10}
-                        onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, length: v } }), 'fill.length')} />
+                      <>
+                        <Num label="Cross size (mm)" value={selected.fill.length} step={0.5} min={1} max={10}
+                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, length: v } }), 'fill.length')} />
+                        <Num label="Passes per cross" value={selected.fill.crossPasses ?? 1} min={1} max={6}
+                          onChange={(v) => patch(selected.id, (o) => ({ ...o, fill: { ...o.fill, crossPasses: v } }), 'fill.crossPasses')} />
+                        <p className="hint">
+                          The grid is anchored to the document, not to this shape — two cross-stitched
+                          objects side by side share one lattice instead of interleaving at the seam.
+                        </p>
+                      </>
                     )}
                     {selected.fill.style === 'tatami' && (
                       <>

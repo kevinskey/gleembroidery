@@ -18,7 +18,7 @@ import { unionSelfChecked } from './boolean'
 import { offsetPathsChecked } from './offset'
 import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
 import { chainPaths, orderPaths, travelIsHidden } from './travel'
-import { MIN_MOTIF_MM, crossStitchFill, echoFill, motifById, motifFill, motifRun, stippleFill } from './decorative'
+import { MIN_MOTIF_MM, crossStitchFill, crossStitchRun, echoFill, motifById, motifFill, motifRun, stippleFill } from './decorative'
 import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck, railsFromClosedPath } from './satin'
 import { blanketEdge, eStitchEdge, runStyleStitches, zigzagEdge } from './runstyles'
 import { manualPenetrations, manualStitches, manualWarnings } from './manual'
@@ -452,6 +452,11 @@ function stitchObject(
               `${obj.name}: too short for one ${motifById(obj.motif.id).label.toLowerCase()} motif — run plain`)
           }
           push(motifRun(path, obj.motif, obj.run))
+        } else if (obj.run.style === 'cross') {
+          // Crosses snap to the SAME document lattice the cross-stitch fill
+          // uses, so a counted border lines up with the counted area it
+          // borders instead of interleaving at the seam.
+          push(crossStitchRun(path, obj.run.widthMm ?? obj.run.length, obj.run.passes ?? 1))
         } else {
           push(runStyleStitches(path, obj.run))
         }

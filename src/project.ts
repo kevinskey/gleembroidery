@@ -660,6 +660,7 @@ function objectIn(v: unknown, index: number): EmbObject | null {
     },
     fill: {
       style: oneOf(fill.style, FILL_STYLES, dFill.style),
+      crossPasses: num(fill.crossPasses, dFill.crossPasses ?? 1),
       angle: num(fill.angle, dFill.angle),
       spacing: num(fill.spacing, dFill.spacing),
       length: num(fill.length, dFill.length),

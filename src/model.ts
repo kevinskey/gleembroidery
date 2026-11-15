@@ -95,9 +95,10 @@ export type RunStyle =
   | 'stem'
   | 'sashiko'
   | 'chain'
+  | 'cross'
 
 export const RUN_STYLES: RunStyle[] = [
-  'plain', 'double', 'multipass', 'backstitch', 'stem', 'sashiko', 'chain', 'motif',
+  'plain', 'double', 'multipass', 'backstitch', 'stem', 'sashiko', 'chain', 'cross', 'motif',
 ]
 
 /**
@@ -112,6 +113,7 @@ export const RUN_STYLE_LABEL: Record<RunStyle, string> = {
   stem: 'Stem — overlapping slants, reads as a rope',
   sashiko: 'Sashiko — long dash, spanned gap (not a true gap)',
   chain: 'Chain — imitated with looped links (no machine chains)',
+  cross: 'Cross-stitch — X’s on the shared grid',
   motif: 'Motif — a shape, repeated',
 }
 
@@ -299,6 +301,11 @@ export interface SatinSplitParams {
 export interface FillParams {
   /** How the area is covered. See FillStyle. */
   style: FillStyle
+  /**
+   * Times each cross is sewn, for the cross-stitch style. More passes read
+   * bolder without changing the grid — the counted-work equivalent of a bean.
+   */
+  crossPasses?: number
   /** Stitch angle in degrees, measured CCW from the +X axis. */
   angle: number
   /** Distance between fill rows, mm. 0.4 is standard commercial density. */
@@ -854,6 +861,7 @@ export const DEFAULT_SATIN = (): SatinParams => ({
 })
 
 export const DEFAULT_FILL = (): FillParams => ({
+  crossPasses: 1,
   style: 'tatami',
   angle: 45,
   spacing: 0.4,

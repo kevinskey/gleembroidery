@@ -51,6 +51,7 @@ import { offsetPathsChecked } from '../src/offset'
 import { railsFromClosedPath } from '../src/satin'
 import { DEFAULT_PROGRAM, candlewickRun, eyelet, frenchKnot, programCheck } from '../src/programmotif'
 import { DEFAULT_PATCH, patchCheck, patchEdge } from '../src/patch'
+import { crossStitchFill, crossStitchRun } from '../src/decorative'
 import { blanketEdge, eStitchEdge, zigzagEdge } from '../src/runstyles'
 import { longestStep, runStyleStitches, shortestStep } from '../src/runstyles'
 import { manualPenetrations, manualStitches, manualWarnings } from '../src/manual'
@@ -483,7 +484,7 @@ console.log('\n# project save / reopen')
     newObject({ name: 'line', color: '#1f6feb', type: 'run', paths: [[{ x: -20, y: 24 }, { x: 20, y: 24 }]] }),
   )
   // Non-default parameters everywhere, so a dropped field cannot hide.
-  doc.objects[0].fill = { style: 'tatami', angle: 17, spacing: 0.37, length: 3.25, stagger: 0.3,
+  doc.objects[0].fill = { style: 'tatami', angle: 17, spacing: 0.37, length: 3.25, stagger: 0.3, crossPasses: 2,
     pullComp: 0.22,
     underlay: ['edge', 'zigzag'], border: { enabled: true, width: 1.8, density: 0.33 } }
   doc.objects[1].run = { length: 1.75, style: 'motif', passes: 5, widthMm: 1.9, gapMm: 2.4 }
@@ -5255,6 +5256,63 @@ console.log('\n# satin density means what the trade means by it')
       `${plan.blocks.length} blocks`)
     ok(/border \(blanket\)/.test(plan.blocks[plan.blocks.length - 1].label),
       'and the label names the finish for the operator', plan.blocks[plan.blocks.length - 1].label)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cross stitch: one grid for the whole document (stage 5)
+// ---------------------------------------------------------------------------
+{
+  console.log('\ncross stitch grid')
+  const F = { ...DEFAULT_FILL(), style: 'crossstitch' as const, length: 3, angle: 0 }
+  const sq = (x: number, y: number, w: number, h: number): Pt[][] =>
+    [[{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }, { x, y }]]
+
+  // Two neighbouring shapes, deliberately NOT aligned to each other's bbox.
+  const a = crossStitchFill(sq(0, 0, 30, 12)[0] ? sq(0, 0, 30, 12) : [], F)
+  const b = crossStitchFill(sq(31.5, 0.7, 30, 12), F)
+  const onGrid = (st: Pt[]) => st.every((p) => {
+    // Every arm endpoint sits on a half-cell of the document lattice.
+    const k = p.x / 1.5
+    return Math.abs(k - Math.round(k)) < 1e-6
+  })
+  ok(a.length > 20 && b.length > 20, 'both shapes are cross-stitched',
+    `${a.length} and ${b.length} penetrations`)
+  ok(onGrid(a) && onGrid(b),
+    'both sit on ONE document lattice, so neighbours do not interleave at the seam')
+
+  // Repeat passes make it bolder without moving the grid.
+  const once = crossStitchFill(sq(0, 0, 30, 12), { ...F, crossPasses: 1 })
+  const twice = crossStitchFill(sq(0, 0, 30, 12), { ...F, crossPasses: 2 })
+  ok(twice.length > once.length * 1.6, 'repeat passes add thread', `${once.length} -> ${twice.length}`)
+  const span = (st: Pt[]) => {
+    const xs = st.map((p) => p.x)
+    return Math.max(...xs) - Math.min(...xs)
+  }
+  ok(Math.abs(span(once) - span(twice)) < 1e-6, 'and do not move the grid or grow the shape')
+
+  // Crosses along a path land on the same lattice as the fill.
+  {
+    const line = [{ x: 0.4, y: 20.3 }, { x: 24, y: 20.3 }]
+    const st = crossStitchRun(line, 3, 1)
+    ok(st.length > 10, 'a path can be cross-stitched too', `${st.length} penetrations`)
+    ok(onGrid(st.filter((p) => !p.jump)),
+      'and lands on the same lattice as the areas, so a border lines up')
+    // A cell is used once, however much the path wanders through it.
+    const wiggle = [{ x: 0.4, y: 20.3 }, { x: 6, y: 20.9 }, { x: 0.6, y: 21.4 }, { x: 6.2, y: 20.1 }]
+    const w = crossStitchRun(wiggle, 3, 1)
+    // A cross is four arm points; its centre is their average. Keying off the
+    // arm endpoints counts each cross up to four times, since an arm reaches
+    // into the neighbouring cell by half a cell.
+    const pts = w.filter((p) => !p.jump)
+    const centres = new Set<string>()
+    for (let i = 0; i + 3 < pts.length; i += 4) {
+      const cx = (pts[i].x + pts[i + 1].x + pts[i + 2].x + pts[i + 3].x) / 4
+      const cy = (pts[i].y + pts[i + 1].y + pts[i + 2].y + pts[i + 3].y) / 4
+      centres.add(`${Math.round(cx / 3)},${Math.round(cy / 3)}`)
+    }
+    ok(centres.size === pts.length / 4, 'a cell gets one cross however often the path crosses it',
+      `${centres.size} cells for ${pts.length / 4} crosses`)
   }
 }
 
