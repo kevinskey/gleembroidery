@@ -42,7 +42,7 @@ import { directionalInset, hasOwnComp, resolveComp, trimEnds, withComp } from '.
 import { ALL_FAMILIES, FONT_GROUPS, SYSTEM_FAMILIES, fontSpec, isWebFont } from '../src/fonts'
 import { DEFAULT_TOLERANCE, floodMask, maskArea, maskColour, maskContours, traceRegionAt, type Raster } from '../src/trace'
 import { DEFAULT_TEXT, shapeOutlines, textOnPath } from '../src/text'
-import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton } from '../src/skeleton'
+import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton, trimAtJunctions } from '../src/skeleton'
 import { MIN_DRAW_MM, bigEnough, ellipsePath, freehandPath, polygonUsable, rectPath } from '../src/draw'
 import { MIN_SIZE_MM, boxCentre, fitPaths, handlePoint, hitHandle, hitObject, movePaths, objectBox, pickObject, resizeBox, rotatePaths, rotationAngle, unionBox, type Box } from '../src/transform'
 import { COALESCE_MS, HISTORY_LIMIT, applyEdit, cancelState, initHistory, redoState, undoState } from '../src/history'
@@ -5766,6 +5766,46 @@ console.log('\n# satin density means what the trade means by it')
   ok(fillSewn.length > 100, 'and the same outline still fills normally', `${fillSewn.length} penetrations`)
   const inCounter = fillSewn.filter((p) => Math.hypot(p.x, p.y) < 6).length
   ok(inCounter < fillSewn.length * 0.02, 'with its counter still empty', `${inCounter} inside`)
+}
+
+// ---------------------------------------------------------------------------
+// Skeleton branches come out of their junctions (src/skeleton.ts)
+// ---------------------------------------------------------------------------
+{
+  console.log('\njunction trimming')
+  const W = 64, H = 16
+  // A synthetic distance field: half-width 5 along a stroke, ballooning to
+  // 13 at the right-hand end where another stroke would meet it.
+  const field = (balloonFrom: number) => {
+    const d = new Float32Array(W * H)
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      d[y * W + x] = x >= balloonFrom ? 13 : 5
+    }
+    return d
+  }
+  const along = (n: number): Pt[] => Array.from({ length: n }, (_, i) => ({ x: i + 1, y: 8 }))
+
+  {
+    const kept = trimAtJunctions(along(50), field(42), W, H)
+    ok(!!kept, 'a stroke with a junction at one end survives')
+    ok(!!kept && kept[kept.length - 1].x < 42,
+      'and is trimmed back out of the junction',
+      kept ? `ends at x=${kept[kept.length - 1].x}` : '')
+    ok(!!kept && kept.length > 30, 'while keeping the stroke itself', `${kept?.length} points`)
+  }
+
+  {
+    // A stub: a few pixels of skeleton left inside a junction, belonging to
+    // no stroke. Rails along it collapse under any satin floor.
+    const flat = new Float32Array(W * H).fill(5)
+    ok(trimAtJunctions(along(6), flat, W, H) === null,
+      'a stub shorter than twice its own width is dropped, not sewn')
+    ok(trimAtJunctions(along(40), flat, W, H) !== null,
+      'and a branch long enough to be a stroke is kept')
+  }
+
+  ok(trimAtJunctions([{ x: 1, y: 1 }], new Float32Array(W * H).fill(5), W, H) === null,
+    'a one-point line is not a stroke')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

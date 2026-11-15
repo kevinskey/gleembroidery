@@ -235,3 +235,55 @@ export function railsAlong(
   }
   return { left, right }
 }
+
+/**
+ * Trim a skeleton branch back out of its junctions, and say whether what is
+ * left is worth sewing.
+ *
+ * THE TWO WAYS A LETTER BREAKS A MEDIAL AXIS, both seen on one traced A:
+ *
+ *   * AT A JUNCTION the shape is locally much thicker than either stroke —
+ *     where an A's crossbar meets a diagonal, the inscribed circle spans
+ *     both. A branch running into that picks up the combined width, and
+ *     rails built from it are metres apart in stitch terms. That A came back
+ *     with rails 21.8 mm apart on a letter 25 mm tall.
+ *
+ *   * A STUB is what the thinning leaves inside a junction: a few pixels of
+ *     skeleton belonging to no stroke. Rails along it collapse — 0.20 mm,
+ *     under any satin floor.
+ *
+ * Both are recognised by the same signal: the distance transform along a
+ * branch is roughly the stroke's half-width over its length, and balloons at
+ * a junction. Trim the ballooning ends; drop what is left if it is too short
+ * to be a stroke in its own right.
+ */
+export function trimAtJunctions(
+  line: Pt[], dist: Float32Array, w: number, h: number,
+  balloon = 1.55, minLengthFactor = 2.2,
+): Pt[] | null {
+  if (line.length < 3) return null
+  const sample = (p: Pt) => {
+    const x = Math.max(0, Math.min(w - 1, Math.round(p.x)))
+    const y = Math.max(0, Math.min(h - 1, Math.round(p.y)))
+    return dist[y * w + x]
+  }
+  const d = line.map(sample)
+  const sorted = [...d].sort((a, b) => a - b)
+  // Median, not mean: a junction at one end would drag a mean upward and
+  // then nothing would look like a balloon relative to it.
+  const med = sorted[sorted.length >> 1]
+  if (!(med > 0)) return null
+
+  let lo = 0, hi = line.length - 1
+  while (lo < hi && d[lo] > med * balloon) lo++
+  while (hi > lo && d[hi] > med * balloon) hi--
+  const kept = line.slice(lo, hi + 1)
+  if (kept.length < 3) return null
+
+  // Shorter than about twice its own width is not a stroke, it is what was
+  // left over inside a junction.
+  let len = 0
+  for (let i = 1; i < kept.length; i++) len += Math.hypot(kept[i].x - kept[i - 1].x, kept[i].y - kept[i - 1].y)
+  if (len < med * 2 * minLengthFactor) return null
+  return kept
+}

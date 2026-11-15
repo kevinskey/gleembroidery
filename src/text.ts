@@ -24,7 +24,7 @@
 // extraction — is tested there.
 
 import { alphaMask, contoursToPaths, maskContours, type Raster } from './trace'
-import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton } from './skeleton'
+import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton, trimAtJunctions } from './skeleton'
 import type { Pt } from './model'
 
 export interface TextSpec {
@@ -173,7 +173,13 @@ export function textToColumns(spec: TextSpec): { columns: LetterColumn[]; warnin
 
   const columns: LetterColumn[] = []
   for (const line of lines) {
-    const smooth = smoothLine(line, 4)
+    // Out of the junctions first, for the reason trimAtJunctions documents:
+    // where two strokes meet the shape is locally as thick as both, and a
+    // branch running in picks up the combined width. This is why small
+    // curved faces forked and came out ragged.
+    const branch = trimAtJunctions(line, dist, w, h)
+    if (!branch) continue
+    const smooth = smoothLine(branch, 4)
     const rails = railsAlong(smooth, dist, w, h, 1 / RASTER_PX_PER_MM)
     if (rails.left.length < 3) continue
     const midPx = smooth[Math.floor(smooth.length / 2)]
@@ -705,8 +711,15 @@ export function outlineToColumns(
   if (!lines.length) return { columns: [], warnings: ['no strokes found in that shape'] }
 
   const columns: { left: Pt[]; right: Pt[] }[] = []
+  let junk = 0
   for (const line of lines) {
-    const rails = railsAlong(smoothLine(line, 4), dist, w, h, 1 / RASTER_PX_PER_MM)
+    // Pull the branch out of its junctions before building rails. Without
+    // this a stroke running into one picks up the COMBINED width of both
+    // strokes meeting there, and the leftover skeleton inside a junction
+    // becomes a column of its own that collapses under the satin floor.
+    const trimmed = trimAtJunctions(line, dist, w, h)
+    if (!trimmed) { junk++; continue }
+    const rails = railsAlong(smoothLine(trimmed, 4), dist, w, h, 1 / RASTER_PX_PER_MM)
     if (rails.left.length < 3) continue
     const back = (pts: Pt[]) => pts.map((p) => ({
       x: (p.x * RASTER_PX_PER_MM - pad) / RASTER_PX_PER_MM + minX,
@@ -714,6 +727,12 @@ export function outlineToColumns(
     }))
     columns.push({ left: back(rails.left), right: back(rails.right) })
   }
-  if (!columns.length) warnings.push('no usable strokes — the shape may be too thin for satin')
+  if (!columns.length) {
+    warnings.push('no usable strokes — the shape may be too thin, or made entirely of junctions')
+  } else if (junk) {
+    // Said out loud: a letter whose crossbar was dropped is a letter with a
+    // missing stroke, and that must not be discovered on the garment.
+    warnings.push(`${junk} piece(s) were junction leftovers and were dropped — check nothing is missing`)
+  }
   return { columns, warnings }
 }
