@@ -19,9 +19,10 @@ import { offsetPathsChecked } from './offset'
 import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
 import { chainPaths, orderPaths, travelIsHidden } from './travel'
 import { MIN_MOTIF_MM, crossStitchFill, echoFill, motifById, motifFill, motifRun, stippleFill } from './decorative'
-import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
+import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck, railsFromClosedPath } from './satin'
 import { runStyleStitches } from './runstyles'
 import { manualPenetrations, manualStitches, manualWarnings } from './manual'
+import { programCheck, programStitches } from './programmotif'
 import { resolveComp, withComp } from './compensate'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
@@ -435,6 +436,16 @@ function stitchObject(
       for (const path of planPaths(obj.paths, out)) push(beanStitch(path, obj.run))
       break
 
+    case 'program': {
+      // Checked BEFORE generating: an eyelet whose bars converge in the hole
+      // is a needle hazard, and a knot under the floor is thread in a pile
+      // with nothing holding it. Warn and still sew — the operator can see
+      // the preview and decide, which is the same trade puff makes.
+      for (const why of programCheck(obj.program)) warnings.push(`${obj.name}: ${why}`)
+      push(programStitches(obj.paths, obj.program))
+      break
+    }
+
     case 'manual': {
       // The points ARE the stitches — no resampling, no chaining, no travel
       // routing. Chaining reorders paths to shorten travel, which on a hand-
@@ -472,6 +483,38 @@ function stitchObject(
         push(satinTwoRailUnderlay(ra, rb, obj.satin, rung))
         push(satinTwoRail(ra, rb, obj.satin, rung))
         break
+      }
+      // A CLOSED outline in column mode is the two sides of a column, not a
+      // centreline: span bars across it and fill the shape. Without this a
+      // rectangle came back with a band round its edge, which is the border
+      // tool's job and left the middle bare.
+      if (obj.satin.mode === 'column') {
+        const closed = obj.paths.filter((p) => p.length > 2 && dist(p[0], p[p.length - 1]) < 0.05)
+        if (closed.length === obj.paths.length && closed.length > 0) {
+          let handled = 0
+          for (const path of closed) {
+            const rails = railsFromClosedPath(path)
+            if (!rails) continue
+            const [ra, rb] = rails
+            const check = twoRailCheck(ra, rb, obj.satin)
+            for (const w of check.warnings) warnings.push(`${obj.name}: ${w}`)
+            if (check.errors.length) {
+              for (const e of check.errors) warnings.push(`${obj.name}: NOT STITCHED — ${e}`)
+              handled++
+              continue
+            }
+            push(satinTwoRailUnderlay(ra, rb, obj.satin))
+            push(satinTwoRail(ra, rb, obj.satin))
+            handled++
+          }
+          if (handled === closed.length) break
+          if (handled === 0) {
+            // No long axis to pair across — a circle or a square. Say so
+            // rather than quietly sewing a border and calling it a column.
+            warnings.push(
+              `${obj.name}: no long axis to run a column across — sewn as a border instead`)
+          }
+        }
       }
       // A satin object can hold several unrelated strokes, so each guide
       // belongs to the ONE nearest it. Without this, every guide would be

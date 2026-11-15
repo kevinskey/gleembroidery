@@ -149,7 +149,13 @@ export function writeDst(plan: StitchPlan, name = 'gleembroidery', trimAt = 3): 
     const dx = tx - sx, dy = ty - sy
     // Split into reachable chunks. Steps are taken as large as possible so a
     // long travel costs the fewest records.
-    const steps = Math.max(1, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / MAX_STEP))
+    const needed = Math.max(1, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / MAX_STEP))
+    // NEVER emit a run of exactly two jump records. Controllers read one jump
+    // as a jump and three or more as a trim; two is neither, and what a given
+    // machine does with it is anyone's guess. A move needing two records is
+    // over 12.1 mm, which is already past the travel-trim threshold, so it IS
+    // a trim and three records is what a trim should look like anyway.
+    const steps = needed === 2 ? 3 : needed
     // A move needing more than one record is longer than 12.1 mm — longer
     // than any machine should sew — so EVERY record of it lifts the needle,
     // the last one included. Keeping the final record "normal" is what turns

@@ -103,6 +103,38 @@ const FIXTURES: Fixture[] = [
     })],
   },
   {
+    // The three program motifs, plus the satin column that started as a bug
+    // report: a rectangle must come back FILLED with bars across it, not
+    // outlined. Sew this one to judge knot height and eyelet hole size.
+    name: 'program-and-column',
+    note: 'French knots, candlewicking, an eyelet, and a satin column filling a rectangle',
+    objects: [
+      newObject({
+        name: 'knots', color: '#c0392b', type: 'program',
+        paths: [[{ x: -26, y: -16 }, { x: -18, y: -16 }, { x: -10, y: -16 }]],
+        program: { kind: 'frenchknot', sizeMm: 3, holeMm: 1.5, passes: 7, spacingMm: 6 },
+      }),
+      newObject({
+        name: 'candlewick', color: '#1f6feb', type: 'program',
+        paths: [[{ x: -26, y: -6 }, { x: -2, y: -6 }]],
+        program: { kind: 'candlewick', sizeMm: 2.5, holeMm: 1.5, passes: 7, spacingMm: 6 },
+      }),
+      newObject({
+        name: 'eyelet', color: '#16a34a', type: 'program',
+        paths: [circle(14, -12, 4)],
+        program: { kind: 'eyelet', sizeMm: 7, holeMm: 2.5, passes: 10, spacingMm: 6 },
+      }),
+      newObject({
+        name: 'column', color: '#7c3aed', type: 'satin',
+        paths: [rect(-26, 4, 52, 8)],
+        satin: {
+          width: 2.5, density: 0.4, pullComp: 0.2, underlay: ['center'],
+          lean: 0, mode: 'column', split: { enabled: false, maxLength: 6, stagger: 0.7 },
+        },
+      }),
+    ],
+  },
+  {
     // Hand-placed penetrations, deliberately including work the machine
     // cannot sew as given: six steps over 10 mm that must be subdivided, and
     // a 0.2 mm pair that must be dropped. 10 placed points leave as 22. The

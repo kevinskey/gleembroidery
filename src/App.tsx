@@ -76,11 +76,13 @@ import {
   type Group,
   type Spacing,
   type StitchType,
+  type SatinMode,
   type RunStyle,
   RUN_STYLES,
   RUN_STYLE_LABEL,
 } from './model'
 import { manualPenetrations, manualStitches, manualWarnings } from './manual'
+import { PROGRAM_KINDS, PROGRAM_LABEL, programCheck, type ProgramKind, type ProgramParams } from './programmotif'
 import {
   DEFAULT_MACHINE,
   packageStats,
@@ -337,6 +339,7 @@ const TYPE_WORD: Record<StitchType, string> = {
   applique: 'appliqué',
   knockdown: 'knockdown',
   manual: 'manual',
+  program: 'motif',
   none: 'off',
 }
 
@@ -4462,6 +4465,7 @@ export default function App() {
                   <option value="applique">Appliqué — fabric, with stops</option>
                   <option value="knockdown">Knockdown — flatten pile first</option>
                   <option value="manual">Manual — every stitch placed by hand</option>
+                  <option value="program">Program motif — knots, candlewick, eyelets</option>
                   <option value="none">Off — stitches nothing</option>
                 </select>
               </div>
@@ -4517,6 +4521,49 @@ export default function App() {
                   </div>
                 </div>
               </fieldset>
+
+              {selected.type === 'program' && (() => {
+                const notes = programCheck(selected.program)
+                const p = selected.program
+                const set = (fn: (q: ProgramParams) => ProgramParams, tag?: string) =>
+                  patch(selected.id, (o) => ({ ...o, program: fn(o.program) }), tag)
+                return (
+                  <fieldset>
+                    <legend>Program motif</legend>
+                    <div className="row wide">
+                      <label>Motif</label>
+                      <select value={p.kind}
+                        onChange={(e) => set((q) => ({ ...q, kind: e.target.value as ProgramKind }))}>
+                        {PROGRAM_KINDS.map((k) => (
+                          <option key={k} value={k}>{PROGRAM_LABEL[k]}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <Num label={p.kind === 'eyelet' ? 'Outside diameter (mm)' : 'Knot size (mm)'}
+                      value={p.sizeMm} min={1} max={12} step={0.1}
+                      onChange={(v) => set((q) => ({ ...q, sizeMm: v }), 'prog.size')} />
+                    {p.kind === 'eyelet' && (
+                      <Num label="Hole diameter (mm)" value={p.holeMm} min={0.5} max={8} step={0.1}
+                        onChange={(v) => set((q) => ({ ...q, holeMm: v }), 'prog.hole')} />
+                    )}
+                    <Num label={p.kind === 'eyelet' ? 'Bars' : 'Chords'} value={p.passes} min={3} max={24}
+                      onChange={(v) => set((q) => ({ ...q, passes: v }), 'prog.passes')} />
+                    {p.kind === 'candlewick' && (
+                      <Num label="Knot spacing (mm)" value={p.spacingMm} min={1} max={30} step={0.5}
+                        onChange={(v) => set((q) => ({ ...q, spacingMm: v }), 'prog.spacing')} />
+                    )}
+                    {/* Say what the machine does. None of these is the hand
+                        stitch it is named after, and a digitizer expecting a
+                        wrapped knot should hear it here, not at the machine. */}
+                    <p className="hint">
+                      {p.kind === 'eyelet'
+                        ? 'Radial bars around a real hole — a satin column bent into a ring.'
+                        : 'Thread piled into a bump. No machine wraps a knot; this stacks chords so it stands proud.'}
+                    </p>
+                    {notes.map((n, i) => <p key={i} className="hint warn">{n}</p>)}
+                  </fieldset>
+                )
+              })()}
 
               {selected.type === 'manual' && (() => {
                 const report = manualStitches(manualPenetrations(selected))
@@ -4626,6 +4673,26 @@ export default function App() {
               {selected.type === 'satin' && (
                 <fieldset>
                   <legend>Satin</legend>
+                  {/* Border vs column is the difference between a band laid
+                      ALONG an outline and bars spanning ACROSS the shape. On
+                      a closed shape the border leaves the middle bare, which
+                      is the border tool's job, not the column's. */}
+                  <div className="row wide">
+                    <label>On a closed shape</label>
+                    <select value={selected.satin.mode ?? 'border'}
+                      onChange={(e) => patch(selected.id,
+                        (o) => ({ ...o, satin: { ...o.satin, mode: e.target.value as SatinMode } }))}>
+                      <option value="column">Column — bars across, fills the shape</option>
+                      <option value="border">Border — a band along the outline</option>
+                    </select>
+                  </div>
+                  {(selected.satin.mode ?? 'border') === 'column' && !selected.twoRail && (
+                    <p className="hint">
+                      The shape's two long sides become the rails. A shape with no long
+                      axis — a circle, a square — has no across to span, and is sewn as a
+                      border with a warning rather than guessed at.
+                    </p>
+                  )}
                   <Num label="Width (mm)" value={selected.satin.width} min={0.4} max={12}
                     onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, width: v } }), 'satin.width')} />
                   <Num label="Stitch spacing (mm)" value={selected.satin.density} step={0.05} min={0.15} max={2}

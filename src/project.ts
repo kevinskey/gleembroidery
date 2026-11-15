@@ -20,6 +20,7 @@ import type { CompDefaults } from './model'
 import type { PathNode, Shape } from './nodes'
 import type { AngleGuide } from './satin'
 import { DEFAULT_MOTIF, MOTIF_IDS } from './decorative'
+import { DEFAULT_PROGRAM, PROGRAM_KINDS } from './programmotif'
 import type { FrozenPlan } from './stitchedit'
 import type { Stitch } from './stitches'
 import {
@@ -139,6 +140,7 @@ export function settingsOut(o: EmbObject) {
       },
     } : {}),
     run: { ...o.run },
+    program: { ...o.program },
     motif: { ...o.motif },
     satin: { ...o.satin, split: { ...o.satin.split } },
     fill: { ...o.fill, border: { ...o.fill.border } },
@@ -184,6 +186,7 @@ export function objectOut(o: EmbObject) {
       })),
     })),
     run: { ...o.run },
+    program: { ...o.program },
     motif: { ...o.motif },
     satin: { ...o.satin, split: { ...o.satin.split } },
     fill: { ...o.fill, border: { ...o.fill.border } },
@@ -513,11 +516,13 @@ function objectIn(v: unknown, index: number): EmbObject | null {
   if (!isObj(v)) return null
   const paths = pathsIn(v.paths)
   const run = isObj(v.run) ? v.run : {}
+  const prog = isObj(v.program) ? v.program : {}
   const satin = isObj(v.satin) ? v.satin : {}
   const fill = isObj(v.fill) ? v.fill : {}
   const border = isObj(fill.border) ? fill.border : {}
   const ap = isObj(v.applique) ? v.applique : {}
   const dRun = DEFAULT_RUN(), dSatin = DEFAULT_SATIN(), dFill = DEFAULT_FILL()
+  const dProg = DEFAULT_PROGRAM()
   const pf = isObj(v.puff) ? v.puff : {}
   const dApp = DEFAULT_APPLIQUE()
   const kd = isObj(v.knockdown) ? v.knockdown : {}
@@ -602,6 +607,13 @@ function objectIn(v: unknown, index: number): EmbObject | null {
           : undefined,
       },
     } : {}),
+    program: {
+      kind: oneOf(prog.kind, PROGRAM_KINDS, dProg.kind),
+      sizeMm: num(prog.sizeMm, dProg.sizeMm),
+      holeMm: num(prog.holeMm, dProg.holeMm),
+      passes: num(prog.passes, dProg.passes),
+      spacingMm: num(prog.spacingMm, dProg.spacingMm),
+    },
     run: {
       length: num(run.length, dRun.length),
       // A style this build does not know falls back to 'plain' rather than
@@ -624,6 +636,11 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       pushComp: optNum(satin.pushComp),
       underlay: underlayIn(satin.underlay, SATIN_UNDERLAY_ORDER, LEGACY_SATIN_UNDERLAY, dSatin.underlay),
       lean: num(satin.lean, dSatin.lean),
+      // ABSENT means a file older than the field, and those designs were
+      // digitized when a closed satin object meant a band round the outline.
+      // Defaulting them to 'column' would re-sew every one of them
+      // differently the next time they were opened.
+      mode: satin.mode === 'column' ? 'column' : 'border',
       split: {
         enabled: isObj(satin.split) ? satin.split.enabled === true : dSatin.split.enabled,
         maxLength: num(isObj(satin.split) ? satin.split.maxLength : undefined, dSatin.split.maxLength),

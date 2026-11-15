@@ -15,6 +15,7 @@ import type { TextSpec } from './text'
 import type { FrozenPlan } from './stitchedit'
 import type { AngleGuide } from './satin'
 import { DEFAULT_MOTIF, type MotifParams } from './decorative'
+import { DEFAULT_PROGRAM, type ProgramParams } from './programmotif'
 
 export interface Pt {
   x: number
@@ -32,6 +33,7 @@ export type StitchType =
   | 'satin' // zigzag column centred on the path
   | 'fill' // tatami fill of the enclosed region
   | 'manual' // every penetration placed by hand; the nodes ARE the stitches
+  | 'program' // French knots, candlewicking, eyelets — piled, not looped
   | 'none' // construction only — generates no stitches
 
 /**
@@ -45,7 +47,7 @@ export type StitchType =
  * a test asserts it covers the union.
  */
 export const STITCH_TYPES: StitchType[] = [
-  'applique', 'knockdown', 'run', 'bean', 'satin', 'fill', 'manual', 'none',
+  'applique', 'knockdown', 'run', 'bean', 'satin', 'fill', 'manual', 'program', 'none',
 ]
 
 export interface RunParams {
@@ -192,6 +194,25 @@ export interface CompDefaults {
  */
 export const DEFAULT_COMP = (): CompDefaults => ({ satinPull: 0.2, fillPull: 0.15, push: 0 })
 
+/**
+ * What a satin object does with a CLOSED outline.
+ *
+ * 'border' lays a band ALONG the outline — the path is a centreline, the
+ * width is the setting. That is the right reading of an open path and it is
+ * what an outlined edge wants.
+ *
+ * 'column' treats the outline as the two sides of a column and spans bars
+ * ACROSS it, filling the shape. That is what a letter stem is, and what a
+ * drawn rectangle means when someone asks for satin — a border round a
+ * rectangle is just the border tool again.
+ *
+ * Open paths are always 'border': a single open line has no two sides to
+ * span between, and saying so beats silently sewing something else.
+ */
+export type SatinMode = 'border' | 'column'
+
+export const SATIN_MODES: SatinMode[] = ['border', 'column']
+
 export interface SatinParams {
   /** Column width, mm. Over ~10 mm the stitch is too long and snags. */
   width: number
@@ -256,6 +277,12 @@ export interface SatinParams {
    * sews a wide column anyway — an extra penetration partway across, with
    * the split points staggered so they do not line up into a visible seam.
    */
+  /**
+   * Border or column for a closed shape. Optional on purpose: absent means
+   * a file written before this existed, and those must keep sewing exactly
+   * what they sewed — see project.ts, which reads absent as 'border'.
+   */
+  mode?: SatinMode
   split: SatinSplitParams
 }
 
@@ -476,6 +503,8 @@ export interface EmbObject {
   applique: AppliqueParams
   puff: PuffParams
   knockdown: KnockdownParams
+  /** French knot / candlewick / eyelet settings. */
+  program: ProgramParams
   /** The repeated drawing, for a motif run or a motif fill. */
   motif: MotifParams
 }
@@ -788,6 +817,10 @@ export const DEFAULT_SATIN = (): SatinParams => ({
   // document, which is where compensation belongs. See CompDefaults.
   underlay: ['center'],
   lean: 0,
+  // A NEW satin object fills a closed shape, because that is what asking for
+  // satin on a rectangle means. Files written before this field keep
+  // 'border' — see project.ts.
+  mode: 'column',
   // Off by default: a column inside the snag limit needs no split, and an
   // unasked-for extra hole in every bar is a change to the look of the
   // stitching. 6 mm leaves margin under the 10 mm limit for the stagger.
@@ -834,6 +867,7 @@ export function newObject(partial: Partial<EmbObject> = {}): EmbObject {
     applique: DEFAULT_APPLIQUE(),
     puff: DEFAULT_PUFF(),
     knockdown: DEFAULT_KNOCKDOWN(),
+    program: DEFAULT_PROGRAM(),
     motif: DEFAULT_MOTIF(),
     ...partial,
   }

@@ -1216,3 +1216,98 @@ export function satinCheck(path: Pt[], p: SatinParams): SatinCheck {
     )
   return { errors, warnings }
 }
+
+/**
+ * Split a CLOSED outline into the two rails of a satin column.
+ *
+ * A closed shape given to the satin engine used to be treated as a spine, so
+ * a rectangle came back with a narrow band running round its outline — which
+ * is what the BORDER is for. A column is supposed to fill the shape: bars
+ * spanning from one long side to the other.
+ *
+ * The two long sides are found by principal axis. The shape's own longest
+ * direction is its length; the outline's extreme points along that direction
+ * are its two ends; cutting there leaves exactly the two sides between them.
+ * For a letter stem, a rectangle or an oval — which is what gets digitized as
+ * a column — that is the answer a person would give.
+ *
+ * Returns null when the shape has no clear long axis (a square, a circle) or
+ * the cut lands on adjacent vertices, because then there is no honest pairing
+ * and guessing one produces bars across the wrong dimension.
+ */
+export function railsFromClosedPath(path: Pt[]): [Pt[], Pt[]] | null {
+  const pts = path.length > 2 && dist(path[0], path[path.length - 1]) < 1e-6
+    ? path.slice(0, -1)
+    : path.slice()
+  const n = pts.length
+  if (n < 4) return null
+
+  let cx = 0, cy = 0
+  for (const p of pts) { cx += p.x; cy += p.y }
+  cx /= n; cy /= n
+
+  // Principal axis of the vertices: the direction they vary most along.
+  let sxx = 0, syy = 0, sxy = 0
+  for (const p of pts) {
+    const dx = p.x - cx, dy = p.y - cy
+    sxx += dx * dx; syy += dy * dy; sxy += dx * dy
+  }
+  const theta = 0.5 * Math.atan2(2 * sxy, sxx - syy)
+  const ux = Math.cos(theta), uy = Math.sin(theta)
+
+  // Spread along the axis vs across it. Too close to equal and there is no
+  // long direction to speak of — a square has four equally good answers.
+  let along = 0, across = 0
+  for (const p of pts) {
+    const dx = p.x - cx, dy = p.y - cy
+    along = Math.max(along, Math.abs(dx * ux + dy * uy))
+    across = Math.max(across, Math.abs(-dx * uy + dy * ux))
+  }
+  if (along < across * 1.08) return null
+
+  const proj = pts.map((p) => (p.x - cx) * ux + (p.y - cy) * uy)
+  let loV = Infinity, hiV = -Infinity
+  for (const t of proj) { loV = Math.min(loV, t); hiV = Math.max(hiV, t) }
+
+  // Vertices sitting at each end, within a tolerance. A rectangle has TWO at
+  // each end — its end edge — and a cut through a single vertex there would
+  // hand one rail the end edge as if it were a side. That is what left a
+  // rectangle's column bars running the length of the shape instead of
+  // across it.
+  const eps = Math.max(1e-6, (hiV - loV) * 0.02)
+  const inLo = proj.map((t) => t <= loV + eps)
+  const inHi = proj.map((t) => t >= hiV - eps)
+
+  // An END EDGE has both ends in the same group. Cut the ring there.
+  let cutLo = -1, cutHi = -1
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n
+    if (cutLo < 0 && inLo[i] && inLo[j]) cutLo = i
+    if (cutHi < 0 && inHi[i] && inHi[j]) cutHi = i
+  }
+
+  const walk = (from: number, to: number): Pt[] => {
+    const out: Pt[] = []
+    for (let i = from, guard = 0; guard <= n; i = (i + 1) % n, guard++) {
+      out.push(pts[i])
+      if (i === to) break
+    }
+    return out
+  }
+
+  let a: Pt[], b: Pt[]
+  if (cutLo >= 0 && cutHi >= 0 && cutLo !== cutHi) {
+    // Both ends are edges: the rails are what lies between them.
+    a = walk((cutLo + 1) % n, cutHi)
+    b = walk((cutHi + 1) % n, cutLo).reverse()
+  } else {
+    // A rounded end — an oval, a letter stroke — has a single extreme
+    // vertex, and splitting through it is right: both rails meet there.
+    const lo = proj.indexOf(loV), hi = proj.indexOf(hiV)
+    if (lo === hi) return null
+    a = walk(lo, hi)
+    b = walk(hi, lo).reverse()
+  }
+  if (a.length < 2 || b.length < 2) return null
+  return [a, b]
+}

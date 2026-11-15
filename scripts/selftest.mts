@@ -48,6 +48,8 @@ import { MIN_SIZE_MM, boxCentre, fitPaths, handlePoint, hitHandle, hitObject, mo
 import { COALESCE_MS, HISTORY_LIMIT, applyEdit, cancelState, initHistory, redoState, undoState } from '../src/history'
 import { arcThrough, deleteNode, flattenShape, insertNode, moveHandle, moveNode, nearestSegment, pathToShape, shapesToPaths, toggleSmooth, type Shape } from '../src/nodes'
 import { offsetPathsChecked } from '../src/offset'
+import { railsFromClosedPath } from '../src/satin'
+import { DEFAULT_PROGRAM, candlewickRun, eyelet, frenchKnot, programCheck } from '../src/programmotif'
 import { longestStep, runStyleStitches, shortestStep } from '../src/runstyles'
 import { manualPenetrations, manualStitches, manualWarnings } from '../src/manual'
 
@@ -486,9 +488,11 @@ console.log('\n# project save / reopen')
   doc.objects[1].motif = { id: 'scallop', widthMm: 5.5, heightMm: 2.25, gapMm: 0.75 }
   doc.objects[1].satin = {
     width: 4.2, density: 0.31, pullComp: 0.11, underlay: ['center', 'zigzag'], lean: 18,
+    mode: 'column',
     split: { enabled: true, maxLength: 5.5, stagger: 0.4 },
   }
   doc.objects[0].knockdown = { spacing: 2.6, margin: 2.1, angle: 20, length: 3.5 }
+  doc.objects[1].program = { kind: 'eyelet', sizeMm: 4.5, holeMm: 1.8, passes: 9, spacingMm: 5.5 }
   doc.objects[1].visible = false
   // Entry/exit and the appliqué recipe, so a dropped field cannot hide here
   // either.
@@ -5025,6 +5029,149 @@ console.log('\n# satin density means what the trade means by it')
     const back = deserialize(serialize(doc))
     ok(back.objects[0].type === t, `a saved '${t}' object reopens as '${t}'`,
       back.objects[0].type === t ? '' : `became '${back.objects[0].type}'`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Satin column on a closed shape FILLS it (Kevin, 2026-11-15)
+// ---------------------------------------------------------------------------
+{
+  console.log('\nsatin column fills a closed shape')
+  // The reported case: a long thin rectangle came back as a band round its
+  // outline, with the middle bare — the border tool's behaviour.
+  const rect: Pt[] = [
+    { x: -30, y: -4 }, { x: 30, y: -4 }, { x: 30, y: 4 }, { x: -30, y: 4 }, { x: -30, y: -4 },
+  ]
+  const rails = railsFromClosedPath(rect)
+  ok(!!rails, 'a long rectangle splits into two rails')
+  if (rails) {
+    const [a, b] = rails
+    const ya = a.reduce((m, p) => m + p.y, 0) / a.length
+    const yb = b.reduce((m, p) => m + p.y, 0) / b.length
+    ok(Math.abs(ya - yb) > 6, 'the rails are the two LONG sides, not the ends',
+      `mean y ${ya.toFixed(1)} vs ${yb.toFixed(1)}`)
+  }
+
+  const doc = emptyDoc()
+  doc.objects = [newObject({
+    name: 'stem', color: '#000', type: 'satin', paths: [rect],
+    satin: { ...DEFAULT_SATIN(), mode: 'column', width: 2.5, density: 0.4, underlay: [] },
+  })]
+  const st = digitize(doc).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+
+  // Bars must SPAN the 8 mm height, not hug one edge.
+  const ys = st.map((p) => p.y)
+  ok(Math.max(...ys) > 3 && Math.min(...ys) < -3, 'bars reach both long sides',
+    `${Math.min(...ys).toFixed(1)} … ${Math.max(...ys).toFixed(1)} mm`)
+
+  // And the middle must be covered: sample the centre line and check a bar
+  // crosses nearby. An outline band would leave this empty.
+  let crossings = 0
+  for (let i = 1; i < st.length; i++) {
+    const p = st[i - 1], q = st[i]
+    if ((p.y - 0) * (q.y - 0) <= 0 && Math.abs(p.x) < 20 && Math.abs(q.x) < 20) crossings++
+  }
+  ok(crossings > 40, 'the column crosses its own centre line, so the middle is filled',
+    `${crossings} crossings`)
+
+  // Border mode must still do the old thing, or every existing design changes.
+  const bdoc = emptyDoc()
+  bdoc.objects = [newObject({
+    name: 'edge', color: '#000', type: 'satin', paths: [rect],
+    satin: { ...DEFAULT_SATIN(), mode: 'border', width: 2.5, density: 0.4, underlay: [] },
+  })]
+  const bst = bdoc.objects.length
+    ? digitize(bdoc).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+    : []
+  let bcross = 0
+  for (let i = 1; i < bst.length; i++) {
+    const p = bst[i - 1], q = bst[i]
+    if ((p.y - 0) * (q.y - 0) <= 0 && Math.abs(p.x) < 20 && Math.abs(q.x) < 20) bcross++
+  }
+  ok(bcross < crossings / 4, 'border mode still lays a band along the outline',
+    `${bcross} centre crossings vs ${crossings} for a column`)
+
+  // A square has no long axis; refusing beats bars across a guessed one.
+  ok(railsFromClosedPath([
+    { x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }, { x: 0, y: 0 },
+  ]) === null, 'a square refuses — there is no long axis to span across')
+}
+
+// ---------------------------------------------------------------------------
+// Program motifs (src/programmotif.ts)
+// ---------------------------------------------------------------------------
+{
+  console.log('\nprogram motifs')
+  const P = DEFAULT_PROGRAM()
+  const c = { x: 0, y: 0 }
+
+  {
+    const k = frenchKnot(c, { ...P, sizeMm: 3, passes: 7 })
+    const r = k.map((p) => Math.hypot(p.x, p.y))
+    ok(r.every((d) => Math.abs(d - 1.5) < 1e-6), 'every knot penetration is on the rim, never the centre',
+      'striking the centre repeatedly is how needles break')
+    // Distinct holes: no two penetrations in the same place.
+    let worst = Infinity
+    for (let i = 0; i < k.length; i++) for (let j = i + 1; j < k.length - 1; j++) {
+      worst = Math.min(worst, Math.hypot(k[i].x - k[j].x, k[i].y - k[j].y))
+    }
+    ok(worst > 0.3, 'knot penetrations are distinct holes', `closest ${worst.toFixed(2)} mm`)
+    // Chords cross the middle — that is what piles the thread.
+    let crossing = 0
+    for (let i = 1; i < k.length; i++) {
+      const a = k[i - 1], b = k[i]
+      const t = ((0 - a.x) * (b.x - a.x) + (0 - a.y) * (b.y - a.y)) / ((b.x - a.x) ** 2 + (b.y - a.y) ** 2 || 1)
+      if (t > 0 && t < 1) {
+        const d = Math.hypot(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+        if (d < 0.5) crossing++
+      }
+    }
+    ok(crossing >= 5, 'chords pass near the centre, which is what builds the bump', `${crossing} of ${k.length - 1}`)
+    // An even pass count would close the star early.
+    ok(frenchKnot(c, { ...P, passes: 6 }).length === frenchKnot(c, { ...P, passes: 7 }).length,
+      'an even chord count is raised to the next odd one')
+  }
+
+  {
+    const e = eyelet(c, { ...P, kind: 'eyelet', sizeMm: 6, holeMm: 2, passes: 8 })
+    const r = e.map((p) => Math.hypot(p.x, p.y))
+    const outer = r.filter((d) => d > 2.5), inner = r.filter((d) => d <= 2.5)
+    ok(outer.length > 5 && inner.length > 5, 'an eyelet alternates outer and inner rim',
+      `${outer.length} outer / ${inner.length} inner`)
+    ok(inner.every((d) => d >= 0.99), 'the hole stays open — nothing is sewn across it',
+      `smallest radius ${Math.min(...inner).toFixed(2)} mm`)
+    ok(Math.max(...outer) <= 3 + 1e-6, 'and nothing reaches past the outside diameter')
+  }
+
+  {
+    const path = [{ x: -15, y: 0 }, { x: 15, y: 0 }]
+    const st = candlewickRun(path, { ...P, kind: 'candlewick', sizeMm: 2.5, spacingMm: 6 })
+    const centres = st.filter((_, i) => i % 8 === 0)
+    ok(st.length > 20 && centres.length > 3, 'candlewicking repeats the knot along the path',
+      `${st.length} penetrations`)
+    ok(st.every((p) => p.x >= -16.5 && p.x <= 16.5), 'knots stay on the path they were given')
+  }
+
+  // The checks refuse what will not sew, with the number that explains it.
+  ok(programCheck({ ...P, sizeMm: 0.5 }).some((w) => w.includes('floor')),
+    'a knot under the floor is reported')
+  ok(programCheck({ ...P, kind: 'eyelet', sizeMm: 6, holeMm: 0.2 }).some((w) => w.includes('closes up')),
+    'an eyelet hole that would close up is reported')
+  ok(programCheck({ ...P, kind: 'eyelet', sizeMm: 6, holeMm: 2, passes: 40 })
+    .some((w) => w.includes('apart')),
+    'too many bars for the hole is reported with the spacing it would give')
+  ok(programCheck({ ...P, sizeMm: 3, passes: 7 }).length === 0, 'a sensible knot reports nothing')
+
+  // End to end through the real pipeline.
+  {
+    const doc = emptyDoc()
+    doc.objects = [newObject({
+      name: 'knots', color: '#000', type: 'program',
+      paths: [[{ x: -8, y: 0 }, { x: 0, y: 0 }, { x: 8, y: 0 }]],
+      program: { ...P, kind: 'frenchknot', sizeMm: 3, passes: 7 },
+    })]
+    const sewn = digitize(doc).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+    ok(sewn.length > 20, 'a program object reaches the plan', `${sewn.length} penetrations`)
   }
 }
 
