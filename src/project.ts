@@ -389,6 +389,7 @@ function tieIn(v: unknown): TieParams {
     tieIn: v.tieIn !== false,
     tieOff: v.tieOff !== false,
     style: v.style === 'backtrack' ? 'backtrack' : 'zigzag',
+    trimAtMm: num(v.trimAtMm, 6),
     length: num(v.length, d.length),
     stitches: num(v.stitches, d.stitches),
   }

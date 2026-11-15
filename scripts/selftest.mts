@@ -53,6 +53,7 @@ import { DEFAULT_PROGRAM, candlewickRun, eyelet, frenchKnot, programCheck } from
 import { DEFAULT_PATCH, patchCheck, patchEdge } from '../src/patch'
 import { crossStitchFill, crossStitchRun } from '../src/decorative'
 import { DEFAULT_LACE, laceCheck, laceStitches } from '../src/lace'
+import { convertCheck, convertObject } from '../src/convert'
 import { blanketEdge, eStitchEdge, zigzagEdge } from '../src/runstyles'
 import { longestStep, runStyleStitches, shortestStep } from '../src/runstyles'
 import { manualPenetrations, manualStitches, manualWarnings } from '../src/manual'
@@ -5464,6 +5465,89 @@ console.log('\n# satin density means what the trade means by it')
     ok(onSpine > 5, 'the centre underlay is still a clean line under a feathered cover',
       `${onSpine} penetrations on the spine`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Converting between stitch types (stage 8)
+// ---------------------------------------------------------------------------
+{
+  console.log('\ntype conversion')
+  const closed: Pt[] = [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 10 }, { x: 0, y: 10 }, { x: 0, y: 0 }]
+  const open: Pt[] = [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 10 }]
+
+  // Geometry survives, and so do the settings of the type left behind.
+  {
+    const o = newObject({ name: 'o', color: '#000', type: 'fill', paths: [closed] })
+    o.fill = { ...o.fill, angle: 33, spacing: 0.55 }
+    o.satin = { ...o.satin, width: 7.5 }
+    const sat = convertObject(o, 'satin')
+    ok(sat.paths === o.paths || JSON.stringify(sat.paths) === JSON.stringify(o.paths),
+      'the outline is untouched by a type change')
+    ok(sat.fill.angle === 33 && sat.fill.spacing === 0.55,
+      'and the settings of the type left behind are kept, so switching back restores them')
+    ok(convertObject(sat, 'fill').satin.width === 7.5, 'in both directions')
+  }
+
+  // An open outline cannot be an area type, and says so rather than sewing nothing.
+  for (const t of ['fill', 'applique', 'lace', 'patch'] as const) {
+    const r = convertCheck(newObject({ name: 'x', color: '#000', type: 'run', paths: [open] }), t)
+    ok(!r.allowed && r.notes[0].includes('closed'), `an open outline refuses to become a ${t}`)
+  }
+  ok(convertCheck(newObject({ name: 'x', color: '#000', type: 'run', paths: [closed] }), 'fill').allowed,
+    'and a closed one is allowed')
+
+  // The things that are genuinely lost are named BEFORE the change.
+  {
+    const col = newObject({ name: 'c', color: '#000', type: 'satin', paths: [closed, closed] })
+    col.twoRail = true
+    const r = convertCheck(col, 'fill')
+    ok(r.notes.some((n) => n.includes('pairing')), 'converting a column away warns that the pairing is lost')
+    ok(!convertObject(col, 'fill').twoRail,
+      'and the flag is cleared, so switching back cannot claim a pairing that was edited away')
+  }
+  {
+    const m = newObject({ name: 'm', color: '#000', type: 'manual', paths: [open] })
+    ok(convertCheck(m, 'run').notes.some((n) => n.includes('needle positions are lost')),
+      'converting hand-placed stitches away warns the positions go')
+    ok(convertCheck(newObject({ name: 'r', color: '#000', type: 'run', paths: [open] }), 'manual')
+      .notes.some((n) => n.includes('becomes a needle penetration')),
+      'and converting TO manual says every point becomes a penetration')
+  }
+  {
+    const ap = newObject({ name: 'a', color: '#000', type: 'applique', paths: [closed] })
+    ok(convertCheck(ap, 'fill').notes.some((n) => n.includes('machine stops')),
+      'leaving appliqué warns that the stops go with it')
+  }
+  ok(convertCheck(newObject({ name: 'l', color: '#000', type: 'lace', paths: [closed] }), 'fill')
+    .notes.some((n) => n.includes('freestanding')),
+    'leaving lace warns it stops being a structure')
+
+  // A clean swap says nothing.
+  ok(convertCheck(newObject({ name: 'r', color: '#000', type: 'run', paths: [open] }), 'bean').notes.length === 0,
+    'a run to a bean is a clean swap and says nothing')
+}
+
+// ---------------------------------------------------------------------------
+// Trim distance is a setting, not a constant
+// ---------------------------------------------------------------------------
+{
+  console.log('\ntrim distance')
+  const far = (gap: number) => {
+    const doc = emptyDoc()
+    doc.objects = [
+      newObject({ name: 'a', color: '#000', type: 'run', paths: [[{ x: 0, y: 0 }, { x: 10, y: 0 }]] }),
+      newObject({ name: 'b', color: '#000', type: 'run', paths: [[{ x: 10 + gap, y: 0 }, { x: 20 + gap, y: 0 }]] }),
+    ]
+    return doc
+  }
+  const tight = far(8)
+  tight.tie = { ...tight.tie, trimAtMm: 4 }
+  const loose = far(8)
+  loose.tie = { ...loose.tie, trimAtMm: 20 }
+  const trims = (d: ReturnType<typeof far>) =>
+    digitize(d).plan.blocks.flatMap((b) => b.stitches).filter((s) => s.trim).length
+  ok(trims(tight) > trims(loose), 'a shorter trim distance cuts travel a longer one sews across',
+    `${trims(tight)} trim(s) at 4 mm vs ${trims(loose)} at 20 mm`)
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

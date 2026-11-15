@@ -88,6 +88,7 @@ import { manualPenetrations, manualStitches, manualWarnings } from './manual'
 import { PROGRAM_KINDS, PROGRAM_LABEL, programCheck, type ProgramKind, type ProgramParams } from './programmotif'
 import { PATCH_CORNERS, PATCH_CORNER_LABEL, patchCheck, type PatchCorner, type PatchParams } from './patch'
 import { DEFAULT_FEATHER, DEFAULT_FRINGE } from './satin'
+import { convertCheck, convertObject } from './convert'
 import { LACE_PATTERNS, LACE_PATTERN_LABEL, laceCheck, type LacePattern, type LaceParams } from './lace'
 import {
   DEFAULT_MACHINE,
@@ -4211,6 +4212,12 @@ export default function App() {
                       onClick={() => setDocTie({ style: 'backtrack' })}>Backtrack</button>
                   </div>
                 </div>
+                <Num label="Trim travel longer than (mm)" value={doc.tie.trimAtMm ?? 6} step={0.5} min={2} max={30}
+                  onChange={(v) => setDocTie({ trimAtMm: v })} />
+                <p className="hint">
+                  How far thread may lie loose on the face of the garment before it is cut and
+                  restarted. Not the stitch-length cap — that asks how long one stitch may be.
+                </p>
                 <Num label="Tie stitch length (mm)" value={doc.tie.length} step={0.1} min={0.5} max={4}
                   onChange={(v) => setDocTie({ length: v })} />
                 <Num label="Tie stitches" value={doc.tie.stitches} step={1} min={2} max={8}
@@ -4465,7 +4472,14 @@ export default function App() {
               <div className="row">
                 <label>Stitch type</label>
                 <select value={selected.type}
-                  onChange={(e) => patch(selected.id, (o) => ({ ...o, type: e.target.value as StitchType }))}>
+                  onChange={(e) => {
+                    const to = e.target.value as StitchType
+                    const r = convertCheck(selected, to)
+                    if (!r.allowed) { setNote(r.notes[0]); return }
+                    patch(selected.id, (o) => convertObject(o, to))
+                    // Say what the change costs, where the change was made.
+                    if (r.notes.length) setNote(r.notes.join(' · '))
+                  }}>
                   <option value="run">Run — single line</option>
                   <option value="bean">Bean — triple-pass line</option>
                   <option value="satin">Satin — zigzag column</option>

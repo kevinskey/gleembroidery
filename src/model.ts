@@ -695,6 +695,15 @@ export function hoopsForSpacing(spacing: Spacing): Hoop[] {
  * of setting that only ever gets found on the garment.
  */
 export interface TieParams {
+  /**
+   * Travel beyond this is cut and restarted rather than sewn across, mm.
+   *
+   * NOT the same number as the stitch-length cap, though the two are easy to
+   * confuse: the cap asks how long one stitch may be, this asks how far
+   * thread may lie loose on the face of the garment. Optional because files
+   * written before it exists must keep the 6 mm they were digitized with.
+   */
+  trimAtMm?: number
   /** Anchor the thread when a colour or a trim STARTS. */
   tieIn: boolean
   /** Anchor it before a trim and at the end of a colour. */
@@ -718,6 +727,7 @@ export interface TieParams {
 }
 
 export const DEFAULT_TIE = (): TieParams => ({
+  trimAtMm: 6,
   tieIn: true,
   tieOff: true,
   style: 'zigzag',

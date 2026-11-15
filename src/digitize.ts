@@ -212,7 +212,7 @@ const POINTLESS_JUMP_MM = 1.0
  * bird's nest under the throat plate. So every travel long enough to be cut
  * is wrapped: tie off, trim, travel, tie back in.
  */
-function applyTrimsAndLocks(stitches: Stitch[], tie: TieParams, travel = TRAVEL_TRIM_MM): Stitch[] {
+function applyTrimsAndLocks(stitches: Stitch[], tie: TieParams, travel = tie.trimAtMm ?? TRAVEL_TRIM_MM): Stitch[] {
   const out: Stitch[] = []
   for (let i = 0; i < stitches.length; i++) {
     const s = stitches[i]
@@ -407,7 +407,7 @@ function stitchObject(
       const gap = dist(out[out.length - 1], parts[0])
       // Anything past the travel threshold lifts the needle; applyTrimsAndLocks
       // then decides whether it also gets cut.
-      if (gap > TRAVEL_TRIM_MM) out.push({ ...parts[0], jump: true })
+      if (gap > (tie.trimAtMm ?? TRAVEL_TRIM_MM)) out.push({ ...parts[0], jump: true })
     }
     out.push(...parts)
   }
@@ -852,7 +852,7 @@ export function digitize(doc: Doc): DigitizeResult {
           return toRegions(grown && !grown.failed && grown.paths.length ? grown.paths : q.paths)
         })
       const hidden = travelIsHidden(cover, from, to)
-      if (gap <= TRAVEL_TRIM_MM || hidden) {
+      if (gap <= (doc.tie.trimAtMm ?? TRAVEL_TRIM_MM) || hidden) {
         // No cut, so the tie-off that ended the last object and the tie-in
         // that starts this one are both waste — a knot of short stitches in
         // the middle of one continuous thread. Drop them.
