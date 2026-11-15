@@ -89,6 +89,7 @@ import { PROGRAM_KINDS, PROGRAM_LABEL, programCheck, type ProgramKind, type Prog
 import { PATCH_CORNERS, PATCH_CORNER_LABEL, patchCheck, type PatchCorner, type PatchParams } from './patch'
 import { DEFAULT_FEATHER, DEFAULT_FRINGE } from './satin'
 import { convertCheck, convertObject } from './convert'
+import { columnsFromRungs } from './rungs'
 import { LACE_PATTERNS, LACE_PATTERN_LABEL, laceCheck, type LacePattern, type LaceParams } from './lace'
 import {
   DEFAULT_MACHINE,
@@ -2518,6 +2519,50 @@ export default function App() {
       : `${made.length} satin stroke(s) — the traced fill is kept but switched off`)
   }, [doc.objects, setDoc, history])
 
+  /**
+   * Fill + rungs -> satin columns.
+   *
+   * The model Ink/Stitch arrived at after years, and the reason is in
+   * rungs.ts: junction topology is not recoverable from an outline, so the
+   * digitizer states it. A rung drawn across the shape says which two sides
+   * pair; two rungs delimit a section; a section's sides are a column's
+   * rails.
+   *
+   * Rungs are the ANGLE GUIDES this app already has — the Angle tool draws a
+   * line across a shape, which is exactly a rung. Nothing new to learn, and
+   * the guides stay on the original object so the conversion can be redone
+   * after moving one.
+   */
+  const rungsToSatin = useCallback((id: string) => {
+    const o = doc.objects.find((q) => q.id === id)
+    if (!o) return
+    const ring = o.paths[0]
+    if (!ring || ring.length < 3) { setNote('that object has no closed outline'); return }
+    const { columns, warnings } = columnsFromRungs(ring, o.guides ?? [])
+    for (const w of warnings) setNote(w)
+    if (!columns.length) return
+    const made = columns.map((c, i) => newObject({
+      name: `${o.name} section ${i + 1}`,
+      color: o.color,
+      type: 'satin',
+      twoRail: true,
+      satin: { ...o.satin, mode: 'border' },
+      paths: [c.left, c.right],
+    }))
+    history.begin()
+    setDoc((d) => ({
+      ...d,
+      // The fill is kept and switched off, as the traced conversion does:
+      // the rungs live on it, and losing them would mean drawing them again
+      // to change anything.
+      objects: [...d.objects.map((q) => (q.id === id ? { ...q, visible: false } : q)), ...made],
+    }))
+    history.end()
+    setSelectedIds(made.map((q) => q.id))
+    setSim(null)
+    setNote(`${made.length} column(s) from ${(o.guides ?? []).length} rung(s) — the fill is kept but switched off`)
+  }, [doc.objects, setDoc, history])
+
   /** Place a new line of lettering. */
   const addText = useCallback((at: Pt) => {
     const spec = DEFAULT_TEXT()
@@ -3604,10 +3649,15 @@ export default function App() {
               and everything produces objects that can still be node-edited. */}
           <Menu label="Shape" width={290}>
             <MenuLabel>Convert</MenuLabel>
+            <MenuItem disabled={!selected || (selected.guides?.length ?? 0) < 2}
+              onClick={() => selected && rungsToSatin(selected.id)}
+              hint="Draw rungs ACROSS the shape with the Angle tool (G) first — two rungs make one column. This is how a letter is digitized; the automatic route cannot read a junction">
+              Fill + rungs → satin columns
+            </MenuItem>
             <MenuItem disabled={!selectedObjs.length}
               onClick={() => outlineToSatin(selectedObjs.map((o) => o.id))}
-              hint="Traced artwork comes in as a fill; letters usually want satin. The fill is kept and switched off, not deleted">
-              Traced shape → satin columns
+              hint="Automatic, and only good on bold simple strokes — a letter's junctions defeat it. Prefer rungs above for lettering">
+              Traced shape → satin columns (automatic)
             </MenuItem>
             <MenuLabel>Combine</MenuLabel>
             {BOOL_OPS.map((op) => (

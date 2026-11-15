@@ -54,6 +54,7 @@ import { DEFAULT_PATCH, patchCheck, patchEdge } from '../src/patch'
 import { crossStitchFill, crossStitchRun } from '../src/decorative'
 import { DEFAULT_LACE, laceCheck, laceStitches } from '../src/lace'
 import { convertCheck, convertObject } from '../src/convert'
+import { columnsFromRungs } from '../src/rungs'
 import { blanketEdge, eStitchEdge, zigzagEdge } from '../src/runstyles'
 import { longestStep, runStyleStitches, shortestStep } from '../src/runstyles'
 import { manualPenetrations, manualStitches, manualWarnings } from '../src/manual'
@@ -5806,6 +5807,55 @@ console.log('\n# satin density means what the trade means by it')
 
   ok(trimAtJunctions([{ x: 1, y: 1 }], new Float32Array(W * H).fill(5), W, H) === null,
     'a one-point line is not a stroke')
+}
+
+// ---------------------------------------------------------------------------
+// Fill + rungs -> satin columns (src/rungs.ts)
+// ---------------------------------------------------------------------------
+{
+  console.log('\nrungs delimit columns')
+  // A horizontal strip 60 x 8. Rungs run ACROSS it, top to bottom.
+  const strip: Pt[] = [
+    { x: -30, y: -4 }, { x: 30, y: -4 }, { x: 30, y: 4 }, { x: -30, y: 4 }, { x: -30, y: -4 },
+  ]
+  const rung = (x: number): { a: Pt; b: Pt } => ({ a: { x, y: -6 }, b: { x, y: 6 } })
+
+  {
+    const r = columnsFromRungs(strip, [rung(-25), rung(0), rung(25)])
+    ok(r.columns.length === 2, 'three rungs delimit two columns', `${r.columns.length}`)
+    ok(r.warnings.length === 0, 'with nothing to report', r.warnings[0] ?? '')
+    const [c0] = r.columns
+    // The rails must be the two LONG sides, one at each y, not an end.
+    const meanY = (p: Pt[]) => p.reduce((n, q) => n + q.y, 0) / p.length
+    ok(Math.abs(meanY(c0.left) - meanY(c0.right)) > 6,
+      'the rails are opposite sides of the strip',
+      `${meanY(c0.left).toFixed(1)} vs ${meanY(c0.right).toFixed(1)}`)
+    // And the section spans exactly between its two rungs.
+    const xs = [...c0.left, ...c0.right].map((q) => q.x)
+    ok(Math.min(...xs) >= -25.01 && Math.max(...xs) <= 0.01,
+      'and the section runs from one rung to the next',
+      `${Math.min(...xs).toFixed(1)} … ${Math.max(...xs).toFixed(1)}`)
+  }
+
+  {
+    // A rung that misses is reported, not quietly dropped: it is a statement
+    // the digitizer made, and ignoring it in silence loses a stroke.
+    const r = columnsFromRungs(strip, [rung(-25), rung(0), { a: { x: 50, y: -6 }, b: { x: 60, y: 6 } }])
+    ok(r.columns.length === 1, 'a missing rung leaves the rest working')
+    ok(r.warnings.some((w) => w.includes('did not cross')), 'and is reported', r.warnings[0]?.slice(0, 60))
+  }
+
+  {
+    // One drawn ALONG the shape rather than across it crosses twice at the
+    // ends; it is not a rung and must not be read as one.
+    const along = { a: { x: -40, y: 0 }, b: { x: 40, y: 0 } }
+    const r = columnsFromRungs(strip, [rung(-20), along, rung(20)])
+    ok(r.columns.length >= 1, 'a rung drawn along the shape does not break the others')
+  }
+
+  ok(columnsFromRungs(strip, [rung(0)]).warnings.some((w) => w.includes('at least two rungs')),
+    'one rung is not a section, and says so')
+  ok(columnsFromRungs(strip, []).columns.length === 0, 'and no rungs makes nothing')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
