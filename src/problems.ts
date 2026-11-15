@@ -36,6 +36,19 @@ export type Fix =
   | 'thread'
   /** Show the object on the canvas. */
   | 'select'
+  /**
+   * Sew this object as a FILL instead.
+   *
+   * The advice a refusal already gives in words — "use a fill" — as a thing
+   * that can be pressed. A panel that only diagnoses leaves the digitizer to
+   * translate a sentence into a menu action, and the translation is the part
+   * that is easy to get wrong.
+   */
+  | 'toFill'
+  /** Sew it as a bean run instead: for rails too close to be satin. */
+  | 'toBean'
+  /** Turn on satin splitting: for a column wider than one stitch may be. */
+  | 'splitSatin'
 
 export interface Problem {
   id: string
@@ -71,6 +84,16 @@ function fixesFor(text: string, hasObject: boolean, manyObjects: boolean): Fix[]
     if (manyObjects) out.push('overlap')
   }
   if (/no thread assigned|UNASSIGNED/i.test(text)) out.push('thread')
+  // The refusals carry their own remedy in the sentence; offer it as a
+  // button. Matched on the measured cause rather than the whole message so
+  // a reworded warning does not silently lose its fix.
+  if (hasObject) {
+    if (/over the \d+(\.\d+)? ?mm limit|rails are .* apart/i.test(text)) {
+      out.push('toFill', 'splitSatin')
+    }
+    if (/below the .*floor|close to \d/i.test(text)) out.push('toBean')
+    if (/has a counter/i.test(text)) out.push('toFill')
+  }
   if (hasObject) out.push('select')
   return out
 }

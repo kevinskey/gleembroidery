@@ -84,6 +84,81 @@ function arc(ring: Pt[], t0: number, t1: number, p0: Pt, p1: Pt): Pt[] {
   return out.filter((q, k) => k === 0 || Math.hypot(q.x - out[k - 1].x, q.y - out[k - 1].y) > 1e-6)
 }
 
+/** Is this point inside the ring? Even-odd, like everything else here. */
+function inside(ring: Pt[], p: Pt): boolean {
+  let hit = false
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j]
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) hit = !hit
+  }
+  return hit
+}
+
+/**
+ * Join columns that a BRIDGE says belong together.
+ *
+ * Ink/Stitch's word, and its idea: at a junction the sections either side
+ * are separate columns, and "unbridged intersections simply leave a gap".
+ * A bridge is the digitizer saying these two are one run of thread.
+ *
+ * A bridge needs no new tool. A guide drawn ACROSS the shape crosses the
+ * outline twice and is a rung; one drawn INSIDE it crosses nothing and is a
+ * bridge. The geometry tells them apart, so there is nothing to choose.
+ *
+ * Joining means concatenating rails, which is why the ENDS have to be
+ * matched first: rail A of one column may have been built from the side
+ * that meets rail B of the other, and welding them the wrong way round
+ * crosses every bar in the joint.
+ */
+function joinAcrossBridges(
+  columns: { left: Pt[]; right: Pt[] }[], bridges: Rung[],
+): { left: Pt[]; right: Pt[] }[] {
+  if (!bridges.length || columns.length < 2) return columns
+  const mid = (r: Rung) => ({ x: (r.a.x + r.b.x) / 2, y: (r.a.y + r.b.y) / 2 })
+  const endOf = (c: { left: Pt[]; right: Pt[] }, head: boolean) => {
+    const l = head ? c.left[0] : c.left[c.left.length - 1]
+    const r = head ? c.right[0] : c.right[c.right.length - 1]
+    return { x: (l.x + r.x) / 2, y: (l.y + r.y) / 2 }
+  }
+  const out = columns.map((c) => ({ left: [...c.left], right: [...c.right] }))
+  const gone = new Set<number>()
+
+  for (const b of bridges) {
+    const m = mid(b)
+    // The two column ENDS nearest the bridge are the ones it joins.
+    let i1 = -1, h1 = false, d1 = Infinity
+    let i2 = -1, h2 = false, d2 = Infinity
+    for (let i = 0; i < out.length; i++) {
+      if (gone.has(i)) continue
+      for (const head of [true, false]) {
+        const e = endOf(out[i], head)
+        const d = Math.hypot(e.x - m.x, e.y - m.y)
+        if (d < d1) { i2 = i1; h2 = h1; d2 = d1; i1 = i; h1 = head; d1 = d }
+        else if (d < d2 && i !== i1) { i2 = i; h2 = head; d2 = d }
+      }
+    }
+    if (i1 < 0 || i2 < 0 || i1 === i2) continue
+
+    const A = out[i1], B = out[i2]
+    // Run A forwards into B: flip whichever end is facing the wrong way.
+    const a = h1 ? { left: [...A.left].reverse(), right: [...A.right].reverse() } : A
+    const bCol = h2 ? B : { left: [...B.left].reverse(), right: [...B.right].reverse() }
+    // THE BOW TIE AGAIN. If A's left end is nearer B's RIGHT start, the two
+    // columns were built from opposite sides and joining them as-is crosses
+    // every bar in the joint.
+    const al = a.left[a.left.length - 1], ar = a.right[a.right.length - 1]
+    const same = Math.hypot(al.x - bCol.left[0].x, al.y - bCol.left[0].y)
+      + Math.hypot(ar.x - bCol.right[0].x, ar.y - bCol.right[0].y)
+    const swapped = Math.hypot(al.x - bCol.right[0].x, al.y - bCol.right[0].y)
+      + Math.hypot(ar.x - bCol.left[0].x, ar.y - bCol.left[0].y)
+    const bb = swapped < same ? { left: bCol.right, right: bCol.left } : bCol
+
+    out[i1] = { left: [...a.left, ...bb.left], right: [...a.right, ...bb.right] }
+    gone.add(i2)
+  }
+  return out.filter((_, i) => !gone.has(i))
+}
+
 /**
  * Columns delimited by the rungs drawn across a closed outline.
  *
@@ -105,11 +180,17 @@ export function columnsFromRungs(path: Pt[], rungs: Rung[]): RungColumns {
   }
 
   const cuts: { lo: number; hi: number; pLo: Pt; pHi: Pt }[] = []
+  const bridges: Rung[] = []
   let missed = 0
   for (const r of rungs) {
     const x = crossings(ring, r)
-    if (x.length !== 2) { missed++; continue }
-    cuts.push({ lo: x[0].t, hi: x[1].t, pLo: x[0].p, pHi: x[1].p })
+    if (x.length === 2) { cuts.push({ lo: x[0].t, hi: x[1].t, pLo: x[0].p, pHi: x[1].p }); continue }
+    // Crossing NOTHING while lying inside is a bridge, not a failed rung.
+    if (x.length === 0 && inside(ring, { x: (r.a.x + r.b.x) / 2, y: (r.a.y + r.b.y) / 2 })) {
+      bridges.push(r)
+      continue
+    }
+    missed++
   }
   if (missed) {
     warnings.push(`${missed} rung(s) did not cross the outline exactly twice and were ignored — a rung runs ACROSS the shape, side to side`)
@@ -131,5 +212,9 @@ export function columnsFromRungs(path: Pt[], rungs: Rung[]): RungColumns {
     columns.push({ left, right })
   }
   if (!columns.length) warnings.push('the rungs did not delimit any section — are they all across the same stroke?')
-  return { columns, warnings }
+  const joined = joinAcrossBridges(columns, bridges)
+  if (bridges.length) {
+    warnings.push(`${bridges.length} bridge(s) joined ${columns.length} section(s) into ${joined.length} — a guide drawn INSIDE the shape bridges a junction instead of cutting it`)
+  }
+  return { columns: joined, warnings }
 }

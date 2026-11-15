@@ -5470,6 +5470,34 @@ export default function App() {
                         Remove the overlaps
                       </button>
                     )}
+                    {p.fixes.includes('toFill') && (
+                      <button className="primary"
+                        title="Sew this object as a tatami fill. A shape too wide, or made of several strokes, is a fill — that is what the refusal is saying"
+                        onClick={() => {
+                          if (p.objectId) patch(p.objectId, (o) => convertObject(o, 'fill'))
+                          setShowProblems(false)
+                        }}>Make it a fill</button>
+                    )}
+                    {p.fixes.includes('toBean') && (
+                      <button
+                        title="Sew it as a triple-pass run. Rails this close are a line, and a line is what a bean run sews well"
+                        onClick={() => {
+                          if (p.objectId) patch(p.objectId, (o) => convertObject(o, 'bean'))
+                          setShowProblems(false)
+                        }}>Make it a bean run</button>
+                    )}
+                    {p.fixes.includes('splitSatin') && (
+                      <button
+                        title="Keep it satin, but break each bar so no single stitch is longer than the limit"
+                        onClick={() => {
+                          if (p.objectId) {
+                            patch(p.objectId, (o) => ({
+                              ...o, satin: { ...o.satin, split: { ...o.satin.split, enabled: true } },
+                            }))
+                          }
+                          setShowProblems(false)
+                        }}>Turn on satin splitting</button>
+                    )}
                     {p.fixes.includes('thread') && (
                       <button onClick={() => {
                         const b = blocks.find((q) => q.number > 0 && !q.thread)

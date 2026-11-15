@@ -5858,5 +5858,66 @@ console.log('\n# satin density means what the trade means by it')
   ok(columnsFromRungs(strip, []).columns.length === 0, 'and no rungs makes nothing')
 }
 
+// ---------------------------------------------------------------------------
+// A refusal offers its own remedy (src/problems.ts)
+// ---------------------------------------------------------------------------
+{
+  console.log('\nrefusals carry a fix')
+  const objs = [{ id: 'o1', name: 'A' }, { id: 'o2', name: 'B' }]
+  const fixesOf = (msg: string) => classifyProblems([msg], objs)[0].fixes
+
+  ok(fixesOf('A: NOT STITCHED — the rails are 21.8 mm apart at their widest, over the 10 mm limit — use a fill, or turn on satin splitting')
+    .includes('toFill'), 'rails too far apart offers a fill')
+  ok(fixesOf('A: NOT STITCHED — the rails are 21.8 mm apart at their widest, over the 10 mm limit — use a fill, or turn on satin splitting')
+    .includes('splitSatin'), 'and offers splitting, the other remedy the message names')
+  ok(fixesOf('A: NOT STITCHED — the rails close to 0.20 mm, below the 1 mm floor — use a bean run, or pull the rails apart')
+    .includes('toBean'), 'rails too close offers a bean run')
+  ok(fixesOf('A: NOT STITCHED as a column — this outline has a counter, so it is several strokes rather than one band')
+    .includes('toFill'), 'a counter offers a fill')
+
+  // A fix must never be offered where it cannot be applied.
+  ok(!classifyProblems(['Design is wider than the hoop'], objs)[0].fixes.includes('toFill'),
+    'a design-level problem offers no per-object fix')
+  ok(classifyProblems(['A: 25 areas over 1.8x normal density'], objs)[0].fixes.includes('showDensity'),
+    'and the density fix is unchanged')
+}
+
+// ---------------------------------------------------------------------------
+// Bridges join sections across a junction (Ink/Stitch's idea)
+// ---------------------------------------------------------------------------
+{
+  console.log('\nbridges join what rungs cut')
+  const strip: Pt[] = [
+    { x: -30, y: -4 }, { x: 30, y: -4 }, { x: 30, y: 4 }, { x: -30, y: 4 }, { x: -30, y: -4 },
+  ]
+  const rung = (x: number): { a: Pt; b: Pt } => ({ a: { x, y: -6 }, b: { x, y: 6 } })
+  // A bridge lies INSIDE: it crosses the outline nowhere.
+  const bridge = { a: { x: -2, y: -1 }, b: { x: 2, y: 1 } }
+
+  const cut = columnsFromRungs(strip, [rung(-20), rung(0), rung(20)])
+  ok(cut.columns.length === 2, 'three rungs cut two sections', `${cut.columns.length}`)
+
+  const joined = columnsFromRungs(strip, [rung(-20), rung(0), rung(20), bridge])
+  ok(joined.columns.length === 1, 'and a bridge over the cut makes them one column',
+    `${joined.columns.length}`)
+  ok(joined.warnings.some((w) => w.includes('bridge')), 'and says so', joined.warnings[0]?.slice(0, 70))
+
+  // The join must not cross the bars: both rails must stay on their own side.
+  {
+    const c = joined.columns[0]
+    const leftY = c.left.map((p) => p.y), rightY = c.right.map((p) => p.y)
+    const leftSide = leftY.every((y) => y < 0) || leftY.every((y) => y > 0)
+    const rightSide = rightY.every((y) => y < 0) || rightY.every((y) => y > 0)
+    ok(leftSide && rightSide,
+      'the joined rails stay on their own sides — no bow tie at the joint',
+      `left ${Math.min(...leftY).toFixed(1)}…${Math.max(...leftY).toFixed(1)}`)
+  }
+
+  // A guide OUTSIDE the shape is neither rung nor bridge, and is reported.
+  const away = columnsFromRungs(strip, [rung(-20), rung(20), { a: { x: 50, y: 20 }, b: { x: 60, y: 22 } }])
+  ok(away.warnings.some((w) => w.includes('did not cross')),
+    'a guide outside the shape is still reported as a bad rung')
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
