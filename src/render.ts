@@ -149,7 +149,7 @@ const DETAIL_MAX_STITCHES = 80_000
  */
 const SHADOW_W = 1.18, SHADOW_A = 0.20, SHADOW_T = -0.38
 const CORD_W = 1.06, CORD_A = 1.0
-const CROWN_W = 0.42, CROWN_A = 0.46, CROWN_T = 0.34
+const CROWN_W = 0.52, CROWN_A = 0.26, CROWN_T = 0.26
 
 /**
  * How much of each stitch the cord and the crown cover, end to end.
@@ -171,7 +171,11 @@ const BODY_SPAN = 0.9, CROWN_SPAN = 0.52
  * design must draw identically every frame, or the whole fill shimmers while
  * panning.
  */
-const EDGE_WOBBLE = 0.22
+// Serration on a column edge is FINE in real embroidery — a few hundredths
+// of a millimetre, not a scallop. At 0.22 of a thread width every outline
+// came out chewed next to a reference rendering, which is the comparison
+// that settled it.
+const EDGE_WOBBLE = 0.07
 
 function wobble(x: number, y: number): number {
   // Cheap deterministic hash; the exact mixing does not matter, only that it
@@ -583,11 +587,13 @@ export function render(
       // drawn is no longer thread.
       const lay = Math.max(threadPx, Math.min(spacing * 1.35, threadPx * 2))
 
-      // ROUND caps, at the thread's own width. The previous version used butt
-      // caps because it drew strokes far wider than the thread, where a round
-      // cap bulges into a semicircle; at a true thread width a round cap is
-      // simply the end of a cord, which is what it is.
-      ctx.lineCap = 'round'
+      // BUTT caps. The argument for round was that at a true thread width a
+      // round cap is just the end of a cord — true of ONE stitch, and wrong
+      // for a column of them: every bar end adds a half-disc, and a few
+      // hundred of those down an edge is a scallop. Side by side with a
+      // reference rendering ours had chewed outlines and theirs were
+      // straight, which is the whole difference. v2 said butt; v2 was right.
+      ctx.lineCap = 'butt'
       ctx.lineJoin = 'round'
 
       /**
@@ -627,6 +633,11 @@ export function render(
       pass(b.color, lay * CORD_W, CORD_A, BODY_SPAN)
       pass(shade(b.color, CROWN_T), lay * CROWN_W, CROWN_A, CROWN_SPAN)
       ctx.globalAlpha = 1
+      // Put the cap back. Everything drawn after this — jumps, trims, the
+      // density overlay, selection furniture — wants round ends, and a butt
+      // cap left set leaks into all of it. v2 recorded this; it is only not
+      // a bug today because the previous value happened to match the default.
+      ctx.lineCap = 'round'
     }
 
     if (opt.showJumps) {
