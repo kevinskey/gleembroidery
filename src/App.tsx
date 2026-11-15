@@ -3963,7 +3963,13 @@ export default function App() {
                   <span className="trow-name" title={`${o.name}${g ? ` — in “${g.name}”` : ''}`}>
                     {o.name}
                   </span>
-                  <span className="trow-type">{TYPE_WORD[o.type]}</span>
+                  {/* A satin object says WHICH satin it is — the tree is how
+                      you tell two of them apart at a glance. */}
+                  <span className="trow-type">
+                    {o.type === 'satin'
+                      ? (o.twoRail ? 'column' : (o.satin.mode ?? 'border') === 'column' ? 'column' : 'border')
+                      : TYPE_WORD[o.type]}
+                  </span>
                   <button className="eye" title={o.visible ? 'Hide' : 'Show'}
                     onClick={(e) => { e.stopPropagation(); patch(o.id, (x) => ({ ...x, visible: !x.visible })) }}>
                     {o.visible ? '●' : '○'}
@@ -4471,18 +4477,32 @@ export default function App() {
                   while SATIN STITCH itself looked like it did not exist. */}
               <div className="row">
                 <label>Stitch type</label>
-                <select value={selected.type}
+                {/* Satin border and satin column are listed SEPARATELY, even
+                    though both are type 'satin' with a mode. They are two
+                    different things to a digitizer — one lays a band along a
+                    line, the other fills a shape — and a mode buried in the
+                    Satin panel is not where someone looks for a stitch type.
+                    The value carries the mode after a colon. */}
+                <select value={selected.type === 'satin'
+                  ? `satin:${selected.satin.mode ?? 'border'}`
+                  : selected.type}
                   onChange={(e) => {
-                    const to = e.target.value as StitchType
+                    const [raw, mode] = e.target.value.split(':')
+                    const to = raw as StitchType
                     const r = convertCheck(selected, to)
                     if (!r.allowed) { setNote(r.notes[0]); return }
-                    patch(selected.id, (o) => convertObject(o, to))
-                    // Say what the change costs, where the change was made.
+                    patch(selected.id, (o) => {
+                      const next = convertObject(o, to)
+                      return mode
+                        ? { ...next, satin: { ...next.satin, mode: mode as SatinMode } }
+                        : next
+                    })
                     if (r.notes.length) setNote(r.notes.join(' · '))
                   }}>
                   <option value="run">Run — single line</option>
                   <option value="bean">Bean — triple-pass line</option>
-                  <option value="satin">Satin — zigzag column</option>
+                  <option value="satin:border">Satin border — a band along the line</option>
+                  <option value="satin:column">Satin column — bars across, fills the shape</option>
                   <option value="fill">Fill — tatami area</option>
                   <option value="applique">Appliqué — fabric, with stops</option>
                   <option value="knockdown">Knockdown — flatten pile first</option>
@@ -4781,19 +4801,6 @@ export default function App() {
               {selected.type === 'satin' && (
                 <fieldset>
                   <legend>Satin</legend>
-                  {/* Border vs column is the difference between a band laid
-                      ALONG an outline and bars spanning ACROSS the shape. On
-                      a closed shape the border leaves the middle bare, which
-                      is the border tool's job, not the column's. */}
-                  <div className="row wide">
-                    <label>On a closed shape</label>
-                    <select value={selected.satin.mode ?? 'border'}
-                      onChange={(e) => patch(selected.id,
-                        (o) => ({ ...o, satin: { ...o.satin, mode: e.target.value as SatinMode } }))}>
-                      <option value="column">Column — bars across, fills the shape</option>
-                      <option value="border">Border — a band along the outline</option>
-                    </select>
-                  </div>
                   {(selected.satin.mode ?? 'border') === 'column' && !selected.twoRail && (
                     <p className="hint">
                       The shape's two long sides become the rails. A shape with no long
