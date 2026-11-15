@@ -4094,10 +4094,33 @@ export default function App() {
               <b>{doc.name}</b>
               <span className="dim">{doc.objects.length}</span>
             </div>
+            {/* THE BACKDROP BELONGS IN THIS LIST. It is a thing on the
+                canvas, so this is where someone looks for it — "no way to
+                delete the background image" was asked while Clear backdrop
+                image sat in the File menu, which is where it had been put
+                because that is where it was loaded from. Loading is a File
+                action; removing something you can see is not. */}
+            {backdrop && (
+              <div className="trow backdrop-row">
+                <span className="trow-no">—</span>
+                <span className="trow-name" title={backdrop.name}>{backdrop.name}</span>
+                <span className="trow-type">backdrop</span>
+                <button
+                  className="trow-btn"
+                  title="Remove the backdrop image. It is only a tracing reference — no stitches are affected"
+                  onClick={() => {
+                    setDoc((d) => ({ ...d, backdrop: undefined }))
+                    setBackdrop(null)
+                    setNote('Backdrop removed — stitching is untouched')
+                  }}
+                >×</button>
+              </div>
+            )}
             {!doc.objects.length && (
               <div className="empty">
-                Draw with the tools above, import an SVG, or load a reference image and
-                trace it with the Wand.
+                {backdrop
+                  ? 'That picture is a tracing reference, not stitching. Trace it with the Wand (W), or draw over it.'
+                  : 'Draw with the tools above, import an SVG, or load a reference image and trace it with the Wand.'}
               </div>
             )}
             {doc.objects.map((o, i) => {

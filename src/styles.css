@@ -850,3 +850,21 @@ legend { font-size: 11px; color: var(--muted); text-transform: uppercase; letter
 
 /* A hint that is a warning: the machine will change what was placed. */
 .panel p.hint.warn { color: var(--accent); }
+
+/* The backdrop's row in the object list. Dimmer than an object, because it
+   is a reference and not part of the design — but present, because it is on
+   the canvas and this is where people look for what is on the canvas. */
+.trow.backdrop-row { opacity: 0.75; }
+.trow.backdrop-row .trow-name { font-style: italic; }
+.trow-btn {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.trow-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.12); }
