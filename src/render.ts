@@ -577,10 +577,21 @@ export function render(
         const my = (cy + dy2) / 2 - (ay + by) / 2
         gaps.push(Math.abs(mx * -uy + my * ux))
       }
-      gaps.sort((a, b) => a - b)
-      // Median, not mean: the first and last stitch of every run are
-      // irregular, and a mean lets them drag the whole column.
-      const spacing = gaps.length ? gaps[gaps.length >> 1] : 0
+      // IGNORE THE ZEROS FIRST. In a satin column every consecutive pair is
+      // displaced across by one density, so the median of all gaps is the
+      // density and all is well. In a TATAMI FILL most consecutive stitches
+      // run end to end along the same ROW — perpendicular displacement zero
+      // — and only the row turns carry the row spacing. The median of mostly
+      // zeros is zero, so lay collapsed to the nominal 0.4 mm thread, the
+      // rows never touched, and a filled letter came out as a picket fence
+      // with the fabric showing between every row.
+      //
+      // What is wanted is the spacing BETWEEN rows, which is what the
+      // non-zero gaps measure. Thread under tension flattens to cover it.
+      const spread = gaps.filter((g) => g > threadPx * 0.3).sort((a, b) => a - b)
+      // Median of those, not mean: the first and last stitch of every run is
+      // irregular and a mean lets them drag the whole block.
+      const spacing = spread.length ? spread[spread.length >> 1] : 0
       // Capped at twice the thread, not four times. Thread laid under tension
       // flattens and spreads a little to cover the gap to its neighbour, but
       // it does not spread without limit — past about double, what is being
