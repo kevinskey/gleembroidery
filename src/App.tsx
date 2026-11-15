@@ -3397,6 +3397,25 @@ export default function App() {
         return
       }
       if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); history.redo(); return }
+      // Select all. Wants the modifier like undo does, and is checked here
+      // for the same reason — but NOT while typing, where Cmd+A belongs to
+      // the field under the cursor.
+      if (mod && e.key.toLowerCase() === 'a' && !typing) {
+        e.preventDefault()
+        // Only what is actually sewable and visible: picking up hidden
+        // objects, or members of a hidden group, means a later drag moves
+        // things the digitizer cannot see.
+        const pickable = doc.objects.filter((o) => objectVisible(o, doc.groups))
+        if (!pickable.length) {
+          setNote(doc.backdrop
+            ? 'Nothing to select — the artwork on screen is a backdrop image. Trace it with the Wand (W) to make objects.'
+            : 'Nothing to select — this design has no objects yet')
+          return
+        }
+        setSelectedIds(pickable.map((o) => o.id))
+        setNote(`${pickable.length} object${pickable.length === 1 ? '' : 's'} selected`)
+        return
+      }
       if (typing) return
       if (e.metaKey || e.ctrlKey || e.altKey) return
       if (e.key === 'Escape') {
@@ -3467,7 +3486,12 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [tool, finishPolygon, finishPen, finishManual, finishColumn, cancelDraw, history, selected, activeNode, shapesOf, setShapes, picked, editStitches])
+  }, [tool, finishPolygon, finishPen, finishManual, finishColumn, cancelDraw, history, selected, activeNode, shapesOf, setShapes, picked, editStitches,
+    // Select-all reads the object list, the groups that decide visibility and
+    // whether a backdrop is what is on screen. Without these the handler
+    // closes over the document it was created with and selects a stale set —
+    // the same trap that once named a shape "Polygon 1" on a two-object doc.
+    doc.objects, doc.groups, doc.backdrop, setSelectedIds, setNote])
 
 
   // --- render -------------------------------------------------------------
