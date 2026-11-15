@@ -868,3 +868,11 @@ legend { font-size: 11px; color: var(--muted); text-transform: uppercase; letter
   border-radius: 4px;
 }
 .trow-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.12); }
+
+/* The build id: present, findable, and out of the way. */
+.status .build {
+  color: var(--muted);
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}

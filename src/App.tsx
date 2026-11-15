@@ -5441,6 +5441,12 @@ export default function App() {
 
       <div className="status">
         {busy && <span className="busy">generating…</span>}
+        {/* The build, so a screenshot says which one it is. A stale page
+            looks exactly like a feature that was never shipped, and without
+            this there is no way to tell the two apart from the outside. */}
+        <span className="build" title="Build. If this is not the latest, reload with Cmd/Ctrl+Shift+R.">
+          {__BUILD__}
+        </span>
         {/* The facts an operator reads off the bottom of the screen, in the
             order they ask for them: will it fit, how big is the thing I
             have selected, how long will it run, and how many times do I
