@@ -66,6 +66,57 @@ function atFraction(pts: Pt[], cum: number[], f: number): Pt {
   return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
 }
 
+
+/** Ring with its first point repeated at the end, and no duplicate seam. */
+function closeRing(ring: Pt[]): Pt[] {
+  const r = ring.length > 2 && dist(ring[0], ring[ring.length - 1]) < 1e-6 ? ring.slice(0, -1) : ring.slice()
+  return [...r, r[0]]
+}
+
+/** Signed area; its sign is the winding direction. */
+function signedArea(ring: Pt[]): number {
+  let a = 0
+  for (let i = 1; i < ring.length; i++) a += ring[i - 1].x * ring[i].y - ring[i].x * ring[i - 1].y
+  return a / 2
+}
+
+/**
+ * Turn `ring` so it runs the same way as `ref` and starts beside it.
+ *
+ * Both are needed. Opposite winding pairs the start of one with the end of
+ * the other, which crosses every bar; the same winding from a different
+ * corner rotates the pairing, which skews them. Either way the band stops
+ * being a band.
+ */
+function alignRing(ring: Pt[], ref: Pt[]): Pt[] {
+  let r = ring
+  if (signedArea(r) * signedArea(ref) < 0) r = [...r].reverse()
+  const open = r.slice(0, -1)
+  let best = 0, bestD = Infinity
+  for (let i = 0; i < open.length; i++) {
+    const d = dist(open[i], ref[0])
+    if (d < bestD) { bestD = d; best = i }
+  }
+  const rotated = [...open.slice(best), ...open.slice(0, best)]
+  return [...rotated, rotated[0]]
+}
+
+
+/** Closest point to `q` anywhere on the ring's segments. */
+function nearestOnRing(ring: Pt[], q: Pt): Pt {
+  let best = ring[0], bestD = Infinity
+  for (let i = 1; i < ring.length; i++) {
+    const a = ring[i - 1], b = ring[i]
+    const dx = b.x - a.x, dy = b.y - a.y
+    const len2 = dx * dx + dy * dy
+    const t = len2 < 1e-12 ? 0 : Math.min(1, Math.max(0, ((q.x - a.x) * dx + (q.y - a.y) * dy) / len2))
+    const px = a.x + dx * t, py = a.y + dy * t
+    const d = (px - q.x) ** 2 + (py - q.y) ** 2
+    if (d < bestD) { bestD = d; best = { x: px, y: py } }
+  }
+  return best
+}
+
 /** Reasons this patch edge will not sew as asked. Empty means it will. */
 export function patchCheck(p: PatchParams): string[] {
   const out: string[] = []
@@ -112,9 +163,14 @@ export function patchEdge(path: Pt[], p: PatchParams): Stitch[] {
   const inner = inRes.failed || !inRes.paths[0]?.length ? ring : inRes.paths[0]
   if (outer.length < 3 || inner.length < 3) return []
 
-  // Close both rings so a bar can land anywhere including across the seam.
-  const o = [...outer, outer[0]]
-  const n = [...inner, inner[0]]
+  // ALIGN THE RINGS BEFORE PAIRING. An offset comes back with its own start
+  // vertex and its own winding, and pairing two rings by arc length without
+  // checking either twists the band: bars cross the middle and converge, so
+  // a patch border renders as a starburst with a lens-shaped hole instead of
+  // a band round the edge. This is the bow-tie trap the two-rail satin
+  // engine already guards against, in a second place.
+  const o = closeRing(outer)
+  const n = alignRing(closeRing(inner), o)
   const co = cumulative(o), cn = cumulative(n)
   const lenO = co[co.length - 1], lenN = cn[cn.length - 1]
   if (lenO < 1e-6 || lenN < 1e-6) return []
@@ -123,17 +179,21 @@ export function patchEdge(path: Pt[], p: PatchParams): Stitch[] {
   const driver = p.corner === 'fan' ? lenO : lenN
   const bars = Math.max(4, Math.round(driver / Math.max(0.2, p.density)))
 
+  // Pair by NEAREST POINT, not by equal fraction of arc length. The rings
+  // have different perimeters — 86 mm against 62 mm on a 24x16 patch — so
+  // equal fractions make the inner ring lag and every bar leans. A band's
+  // bars cross the edge square to it; the fan at a corner then comes from
+  // the geometry rather than from a drift along the straights.
+  const driverRing = p.corner === 'fan' ? o : n
+  const otherRing = p.corner === 'fan' ? n : o
+  const driverCum = p.corner === 'fan' ? co : cn
   const out: Stitch[] = []
   for (let k = 0; k <= bars; k++) {
-    const f = k / bars
-    // Alternate which rail the needle lands on, which is what a satin bar is.
-    if (k % 2 === 0) {
-      out.push(atFraction(o, co, f))
-      out.push(atFraction(n, cn, f))
-    } else {
-      out.push(atFraction(n, cn, f))
-      out.push(atFraction(o, co, f))
-    }
+    const a = atFraction(driverRing, driverCum, k / bars)
+    const b = nearestOnRing(otherRing, a)
+    // Alternate which rail the needle lands on — that is what a bar is.
+    if (k % 2 === 0) out.push(a, b)
+    else out.push(b, a)
   }
   return out
 }

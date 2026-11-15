@@ -5220,6 +5220,32 @@ console.log('\n# satin density means what the trade means by it')
     ok(fan > sq, 'a fanned corner gets more bars than a square one', `${fan} vs ${sq}`)
   }
 
+  {
+    // BARS MUST CROSS THE EDGE SQUARE TO IT. Pairing the inner and outer
+    // rings by equal fraction of arc length leans every bar, because the
+    // rings have different perimeters — and pairing them without aligning
+    // winding and start vertex twists the band into a starburst with a
+    // lens-shaped hole. Both were real, and neither showed up in a stitch
+    // count; the band was looked at.
+    const st = patchEdge(square, { ...P, widthMm: 3, overhangMm: 0.7, density: 0.4, corner: 'fan' })
+    let checked = 0, square90 = 0
+    for (let i = 0; i + 1 < st.length; i += 2) {
+      const a = st[i], b = st[i + 1]
+      // Only bars on the straight top/bottom runs, away from the corners.
+      if (Math.abs(a.x) > 11 || Math.abs(a.y) < 8) continue
+      checked++
+      const ang = Math.abs(Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI)
+      if (Math.abs(ang - 90) < 12) square90++
+    }
+    ok(checked > 10 && square90 === checked,
+      'every bar on a straight run crosses the edge square to it',
+      `${square90}/${checked} within 12 degrees of perpendicular`)
+
+    // And nothing reaches the middle of the patch: it is a band, not a fill.
+    const middle = st.filter((p2) => Math.abs(p2.x) < 11 && Math.abs(p2.y) < 6).length
+    ok(middle === 0, 'and the middle of the patch is left bare', `${middle} penetrations inside`)
+  }
+
   ok(patchCheck({ ...P, widthMm: 0.8 }).some((w) => w.includes('floor')),
     'a band too narrow to encase an edge is refused')
   ok(patchCheck({ ...P, overhangMm: 0 }).some((w) => w.includes('raw fibres')),
@@ -5548,6 +5574,138 @@ console.log('\n# satin density means what the trade means by it')
     digitize(d).plan.blocks.flatMap((b) => b.stitches).filter((s) => s.trim).length
   ok(trims(tight) > trims(loose), 'a shorter trim distance cuts travel a longer one sews across',
     `${trims(tight)} trim(s) at 4 mm vs ${trims(loose)} at 20 mm`)
+}
+
+// ---------------------------------------------------------------------------
+// Spec §6 verification, on a design using every stitch type
+// ---------------------------------------------------------------------------
+{
+  console.log('\nsampler verification (spec §6)')
+  const ring = (cx: number, cy: number, r: number, n = 64): Pt[] =>
+    Array.from({ length: n + 1 }, (_, i) => {
+      const a = (i / n) * Math.PI * 2
+      return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) }
+    })
+
+  const build = () => {
+    const doc = emptyDoc()
+    doc.objects = [
+      // concave outline with a HOLE
+      newObject({ name: 'v-fill', color: '#16a34a', type: 'fill',
+        paths: [[{ x: -16, y: -6 }, { x: 2, y: -6 }, { x: 2, y: 10 }, { x: -6, y: 4 },
+          { x: -16, y: 10 }, { x: -16, y: -6 }], ring(-8, 0, 3)] }),
+      newObject({ name: 'v-satin', color: '#1f6feb', type: 'satin',
+        paths: [[{ x: 8, y: -4 }, { x: 24, y: -4 }]] }),
+      newObject({ name: 'v-patch', color: '#7c3aed', type: 'patch',
+        paths: [[{ x: 8, y: 6 }, { x: 26, y: 6 }, { x: 26, y: 18 }, { x: 8, y: 18 }, { x: 8, y: 6 }]] }),
+      newObject({ name: 'v-applique', color: '#0f766e', type: 'applique', paths: [ring(-24, 18, 8)] }),
+      newObject({ name: 'v-lace', color: '#db2777', type: 'lace', paths: [ring(30, 26, 11)] }),
+      newObject({ name: 'v-manual', color: '#000', type: 'manual',
+        paths: [[{ x: -14, y: 26 }, { x: -6, y: 30 }, { x: 2, y: 24 }]] }),
+      newObject({ name: 'v-none', color: '#64748b', type: 'none',
+        paths: [[{ x: -30, y: 34 }, { x: 30, y: 34 }]] }),
+    ]
+    return doc
+  }
+
+  const doc = build()
+  const { plan, warnings } = digitize(doc)
+  const all = plan.blocks.flatMap((b) => b.stitches)
+  const sewn = all.filter((s) => !s.jump)
+
+  ok(warnings.length === 0, 'the sample generates with no warnings',
+    warnings.join(' | ').slice(0, 90))
+
+  // Valid coordinates and sensible dimensions.
+  ok(sewn.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y)),
+    'every coordinate is finite')
+  const bb = planBounds(plan)!
+  ok(bb.widthMm > 20 && bb.widthMm < 200 && bb.heightMm > 20 && bb.heightMm < 200,
+    'the design has sensible dimensions', `${bb.widthMm.toFixed(1)} x ${bb.heightMm.toFixed(1)} mm`)
+
+  // Sensible stitch lengths, within the limits the machine is given.
+  // PER BLOCK. Flattening first and walking the whole array measures the
+  // gap from the end of one colour to the start of the next as if it were a
+  // stitch — it is a colour change, and the needle is up.
+  let longest = 0, shortest = Infinity
+  for (const b of plan.blocks) {
+    const st = b.stitches
+    for (let i = 1; i < st.length; i++) {
+      if (st[i].jump || st[i - 1].jump) continue
+      const d = dist(st[i - 1], st[i])
+      if (d > longest) longest = d
+      if (d > 1e-9 && d < shortest) shortest = d
+    }
+  }
+  ok(longest <= 10 + 1e-6, 'no sewn stitch exceeds the machine limit', `${longest.toFixed(2)} mm`)
+  ok(shortest >= 0.1, 'and none is short enough to strike one hole twice', `${shortest.toFixed(3)} mm`)
+
+  // THE HOLE STAYS EMPTY. Travel and compensation may cross it; coverage
+  // must not, so the test is that the hole has no RUN of stitching in it.
+  {
+    const inHole = sewn.filter((p) => Math.hypot(p.x + 8, p.y) < 2.4)
+    ok(inHole.length < sewn.length * 0.01, 'the hole in the fill is not stitched over',
+      `${inHole.length} of ${sewn.length} penetrations fall inside it`)
+  }
+
+  // A 'none' object sews nothing at all. Checking that no penetration lands
+  // on its line is not the test — other objects legitimately cross it.
+  // Removing it must leave the plan byte-for-byte identical.
+  {
+    const without = build()
+    without.objects = without.objects.filter((o) => o.type !== 'none')
+    const w = digitize(without).plan.blocks.flatMap((x) => x.stitches)
+    const a = all.map((p) => [p.x.toFixed(6), p.y.toFixed(6)].join()).join('|')
+    const b = w.map((p) => [p.x.toFixed(6), p.y.toFixed(6)].join()).join('|')
+    ok(a === b, 'a construction line generates no stitches at all')
+  }
+
+  // DETERMINISTIC: the same document twice is the same plan, to the micron.
+  {
+    const again = digitize(build()).plan
+    const a = all.map((p) => [p.x.toFixed(6), p.y.toFixed(6), !!p.jump].join()).join('|')
+    const b = again.blocks.flatMap((x) => x.stitches)
+      .map((p) => [p.x.toFixed(6), p.y.toFixed(6), !!p.jump].join()).join('|')
+    ok(a === b, 'regenerating the same document gives the identical plan',
+      `${all.length} penetrations compared`)
+  }
+
+  // SAVE / LOAD: a reopened project regenerates the same plan.
+  {
+    const back = deserialize(serialize(doc))
+    const after = digitize(back).plan.blocks.flatMap((x) => x.stitches)
+    const a = all.map((p) => [p.x.toFixed(6), p.y.toFixed(6)].join()).join('|')
+    const b = after.map((p) => [p.x.toFixed(6), p.y.toFixed(6)].join()).join('|')
+    ok(a === b, 'and so does the same project saved and reopened',
+      `${after.length} penetrations after the round trip`)
+  }
+
+  // APPLIQUÉ STOPS AND ORDER survive: three blocks, in sequence, never merged
+  // with a neighbour of the same colour.
+  {
+    const idx = plan.blocks.findIndex((b) => /v-applique/.test(b.label))
+    ok(idx >= 0, 'the appliqué keeps its own blocks')
+    const labels = plan.blocks.slice(idx, idx + 3).map((b) => b.label)
+    ok(/placement/.test(labels[0]) && /tack-down/.test(labels[1]) && /border/.test(labels[2]),
+      'in placement -> tack-down -> border order, each its own machine stop',
+      labels.join(' | '))
+  }
+
+  // THE EXPORT IS THE SAME PLAN. Every needle position survives to the file,
+  // within the format's own 0.1 mm quantisation.
+  {
+    const centred = centerPlan(digitize(build()).plan)
+    const bytes = writeDst(centred, 'verify')
+    const read = readDst(bytes)
+    const want = centred.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+    const got = read.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+    ok(got.length === want.length, 'the exported file holds every generated penetration',
+      `${got.length} read / ${want.length} generated`)
+    let worst = 0
+    for (let i = 0; i < Math.min(got.length, want.length); i++) worst = Math.max(worst, dist(got[i], want[i]))
+    ok(worst <= 0.0708, 'each within DST quantisation of where it was generated',
+      `worst ${worst.toFixed(4)} mm`)
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

@@ -246,6 +246,109 @@ const FIXTURES: Fixture[] = [
 ]
 
 
+/**
+ * THE SAMPLER (spec §6): every required stitch type on one hoop, with the
+ * cases that break things — a curve, a variable-width column, a concave
+ * fill, a hole that must stay empty, small detail near the floor, and patch
+ * corners. This is the one to sew first.
+ */
+const SAMPLER = 'sampler'
+FIXTURES.push({
+  name: SAMPLER,
+  note: 'Every stitch type on one hoop: curves, variable width, holes, small detail, patch corners',
+  objects: [
+    // Line types, left column.
+    newObject({ name: 's-run', color: '#c0392b', type: 'run',
+      paths: [arc(-44, -28, 9, Math.PI, Math.PI * 2, 40)],
+      run: { length: 2.5, style: 'plain', passes: 3, widthMm: 1.4, gapMm: 2.5 } }),
+    newObject({ name: 's-bean', color: '#c0392b', type: 'bean',
+      paths: [[{ x: -53, y: -14 }, { x: -35, y: -14 }]],
+      run: { length: 2.5, style: 'plain', passes: 3, widthMm: 1.4, gapMm: 2.5 } }),
+    newObject({ name: 's-chain', color: '#c0392b', type: 'run',
+      paths: [[{ x: -53, y: -9 }, { x: -35, y: -9 }]],
+      run: { length: 3, style: 'chain', passes: 3, widthMm: 1.6, gapMm: 2.5 } }),
+    newObject({ name: 's-sashiko', color: '#c0392b', type: 'run',
+      paths: [[{ x: -53, y: -4 }, { x: -35, y: -4 }]],
+      run: { length: 3, style: 'sashiko', passes: 3, widthMm: 1.4, gapMm: 2.5 } }),
+    newObject({ name: 's-stem', color: '#c0392b', type: 'run',
+      paths: [[{ x: -53, y: 1 }, { x: -35, y: 1 }]],
+      run: { length: 3, style: 'stem', passes: 3, widthMm: 1.6, gapMm: 2.5 } }),
+
+    // A CURVED satin border and a VARIABLE-WIDTH column (rails that taper).
+    newObject({ name: 's-satin-curve', color: '#1f6feb', type: 'satin',
+      paths: [arc(-20, -22, 11, Math.PI * 0.2, Math.PI * 1.3, 48)],
+      satin: { width: 3, density: 0.4, pullComp: 0.2, underlay: ['center'], lean: 0,
+        mode: 'border', split: { enabled: false, maxLength: 6, stagger: 0.7 } } }),
+    newObject({ name: 's-column-taper', color: '#1f6feb', type: 'satin', twoRail: true,
+      paths: [
+        [{ x: -8, y: -30 }, { x: 6, y: -28 }, { x: 18, y: -26 }],
+        // 3 mm at the narrow end widening to 8 mm — variable width that
+        // stays inside the 10 mm satin limit. Drawn wider, the engine refuses
+        // it and says to use a fill or turn on splitting, which is correct.
+        [{ x: -8, y: -27 }, { x: 6, y: -22.5 }, { x: 18, y: -18 }],
+      ],
+      satin: { width: 3, density: 0.4, pullComp: 0.2, underlay: ['center'], lean: 0,
+        mode: 'column', split: { enabled: false, maxLength: 6, stagger: 0.7 } } }),
+
+    // A CONCAVE fill WITH A HOLE that must stay empty.
+    newObject({ name: 's-fill-hole', color: '#16a34a', type: 'fill',
+      paths: [
+        [{ x: -16, y: -6 }, { x: 2, y: -6 }, { x: 2, y: 10 }, { x: -6, y: 4 },
+          { x: -16, y: 10 }, { x: -16, y: -6 }],
+        circle(-8, 0, 3),
+      ] }),
+
+    // SMALL DETAIL: a 1.2 mm column, near the narrow floor.
+    newObject({ name: 's-small', color: '#16a34a', type: 'satin',
+      paths: [[{ x: 8, y: -4 }, { x: 22, y: -4 }]],
+      satin: { width: 1.2, density: 0.35, pullComp: 0.15, underlay: [], lean: 0,
+        mode: 'border', split: { enabled: false, maxLength: 6, stagger: 0.7 } } }),
+
+    // PATCH CORNERS, both treatments.
+    newObject({ name: 's-patch', color: '#7c3aed', type: 'patch',
+      paths: [rect(26, -30, 24, 16)],
+      patch: { widthMm: 3, density: 0.35, overhangMm: 0.7, corner: 'fan' } }),
+
+    // Program motifs and counted work.
+    newObject({ name: 's-knots', color: '#d97706', type: 'program',
+      paths: [[{ x: 30, y: -8 }, { x: 38, y: -8 }, { x: 46, y: -8 }]],
+      program: { kind: 'frenchknot', sizeMm: 3, holeMm: 1.5, passes: 7, spacingMm: 6 } }),
+    newObject({ name: 's-eyelet', color: '#d97706', type: 'program',
+      paths: [circle(38, 2, 4)],
+      program: { kind: 'eyelet', sizeMm: 7, holeMm: 2.5, passes: 10, spacingMm: 6 } }),
+    newObject({ name: 's-cross', color: '#0891b2', type: 'fill',
+      paths: [rect(-52, 8, 16, 12)],
+      fill: { style: 'crossstitch', angle: 0, spacing: 0.4, length: 3, stagger: 0.5, crossPasses: 1,
+        underlay: [], border: { enabled: false, width: 2, density: 0.4 } } }),
+    newObject({ name: 's-stipple', color: '#0891b2', type: 'fill',
+      paths: [rect(-32, 8, 16, 12)],
+      fill: { style: 'stipple', angle: 0, spacing: 2.2, length: 2.5, stagger: 0.5, crossPasses: 1,
+        underlay: [], border: { enabled: false, width: 2, density: 0.4 } } }),
+    newObject({ name: 's-echo', color: '#0891b2', type: 'fill',
+      paths: [rect(-12, 8, 16, 12)],
+      fill: { style: 'echo', angle: 0, spacing: 1.6, length: 2.5, stagger: 0.5, crossPasses: 1,
+        underlay: [], border: { enabled: false, width: 2, density: 0.4 } } }),
+    newObject({ name: 's-motif', color: '#0891b2', type: 'fill',
+      paths: [rect(8, 8, 16, 12)],
+      fill: { style: 'motif', angle: 0, spacing: 4, length: 3, stagger: 0.5, crossPasses: 1,
+        underlay: [], border: { enabled: false, width: 2, density: 0.4 } } }),
+
+    // Freestanding lace and an appliqué with its machine stops.
+    newObject({ name: 's-lace', color: '#db2777', type: 'lace',
+      paths: [circle(34, 16, 11)],
+      lace: { pattern: 'diamond', spacingMm: 2.5, angle: 0, passes: 3, borderPasses: 4 } }),
+    newObject({ name: 's-applique', color: '#0f766e', type: 'applique',
+      paths: [circle(-40, 28, 10)],
+      applique: { tackWidth: 1.6, tackDensity: 0.5, borderWidth: 3, borderDensity: 0.4,
+        borderPullComp: 0.2, border: true, borderStyle: 'satin' } }),
+    // Manual stitches, and a construction line that must sew nothing.
+    newObject({ name: 's-manual', color: '#0f766e', type: 'manual',
+      paths: [[{ x: -14, y: 26 }, { x: -6, y: 30 }, { x: 2, y: 24 }, { x: 10, y: 30 }, { x: 18, y: 26 }]] }),
+    newObject({ name: 's-none', color: '#64748b', type: 'none',
+      paths: [[{ x: -52, y: 34 }, { x: 52, y: 34 }]] }),
+  ],
+})
+
 // Every other fixture is centred, which makes every header symmetric and
 // leaves the +Y/-Y polarity structurally untestable. This one is deliberately
 // off-centre and asymmetric in both axes.

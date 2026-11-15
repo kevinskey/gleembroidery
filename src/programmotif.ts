@@ -129,10 +129,25 @@ export function candlewickRun(path: Pt[], p: ProgramParams): Stitch[] {
  * inner penetrations, until they are one hole and the needle has nowhere to
  * go. eyeletCheck reports that rather than letting it sew.
  */
+/**
+ * Bars round an eyelet: spacing on the OUTER rim, with the pass count as a
+ * floor. Counted from the pass count alone, a 7 mm eyelet got twenty bars —
+ * geometrically an eyelet, visually a star. One function so the generator
+ * and programCheck cannot disagree about how many there are.
+ */
+function eyeletBars(outerR: number, passes: number): number {
+  return Math.max(MIN_PASSES * 2, Math.round(passes * 2), Math.round((2 * Math.PI * outerR) / 0.6))
+}
+
 export function eyelet(c: Pt, p: ProgramParams): Stitch[] {
   const outer = Math.max(MIN_KNOT_MM, p.sizeMm) / 2
   const inner = Math.min(Math.max(MIN_EYELET_HOLE_MM, p.holeMm) / 2, outer - 0.3)
-  const bars = Math.max(MIN_PASSES * 2, Math.round(p.passes * 2))
+  // Bars follow the OUTER circumference, with the pass count as a floor.
+  // Counting bars from the pass count alone gave a 7 mm eyelet twenty of
+  // them — geometrically an eyelet, visually a star, and nothing like the
+  // solid ring an eyelet is supposed to be. Spacing round the outside is
+  // what decides whether it reads as a ring, exactly as it does for satin.
+  const bars = eyeletBars(outer, p.passes)
   const out: Stitch[] = []
   for (let k = 0; k <= bars; k++) {
     const a = (k / bars) * Math.PI * 2
@@ -168,7 +183,7 @@ export function programCheck(p: ProgramParams): string[] {
     if (inner >= outer - 0.3) {
       out.push(`the hole is too close to the outside: ${(outer * 2).toFixed(1)} mm eyelet needs a hole under ${((outer - 0.3) * 2).toFixed(1)} mm`)
     }
-    const bars = Math.max(MIN_PASSES * 2, Math.round(p.passes * 2))
+    const bars = eyeletBars(outer, p.passes)
     const innerPitch = (2 * Math.PI * inner) / bars
     if (innerPitch < 0.3) {
       out.push(`${bars} bars put the inner penetrations ${innerPitch.toFixed(2)} mm apart — fewer bars, or a bigger hole`)
