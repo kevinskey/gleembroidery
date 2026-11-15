@@ -24,7 +24,7 @@ import { writeJef } from './jef'
 import { FILL_STYLE_DEFAULTS, MIN_MOTIF_MM, MOTIFS } from './decorative'
 import {
   BOOL_LABEL, BOOL_OPS, booleanOp, cleanNodes, hasArea, joinShapes, offsetOp, removeOverlap,
-  simplifyPaths, splitShapeAt,
+  combineHoles, separateHoles, simplifyPaths, splitShapeAt,
 } from './shapeops'
 import {
   DUPLICATE_OFFSET_MM, alignDeltas, boxCentreOf, distributeDeltas, mirrorPt,
@@ -1662,6 +1662,55 @@ export default function App() {
       return { ...d, objects: rest }
     })
     setSelectedIds([keeper.id])
+  }
+
+  /**
+   * Replace the selection with one object per region.
+   *
+   * Like replaceSelection, but combining holes can answer with several
+   * objects, and each has to keep the keeper's colour, thread and stitch
+   * settings — the digitizer picked those for this artwork, and handing back
+   * default-blue fills would throw that away.
+   */
+  const replaceSelectionWith = (regions: Pt[][][], verb: string) => {
+    const ids = selectedObjs.map((o) => o.id)
+    const keeper = selectedObjs[0]
+    const made: EmbObject[] = regions.map((paths, i) => ({
+      ...keeper,
+      id: i === 0 ? keeper.id : newObject().id,
+      paths,
+      shapes: undefined,
+      // Guides are positioned against the keeper's own outline, so they are
+      // only still true for the object that kept its identity.
+      guides: i === 0 ? keeper.guides : undefined,
+      name: regions.length > 1 ? `${keeper.name} (${verb} ${i + 1})` : `${keeper.name} (${verb})`,
+    }))
+    setDoc((d) => {
+      const at = d.objects.findIndex((o) => o.id === keeper.id)
+      const rest = d.objects.filter((o) => !ids.includes(o.id))
+      rest.splice(Math.min(at, rest.length), 0, ...made)
+      return { ...d, objects: rest }
+    })
+    setSelectedIds(made.map((o) => o.id))
+  }
+
+  const runCombineHoles = () => {
+    const r = combineHoles(selectedObjs.map((o) => o.paths))
+    if (r.errors.length) { setRefusal({ text: r.errors[0] }); return }
+    setRefusal(null)
+    replaceSelectionWith(r.regions, 'holes')
+    const holes = r.regions.reduce((n, g) => n + g.length - 1, 0)
+    setNote(r.warnings[0]
+      ?? `${holes} hole${holes === 1 ? '' : 's'} combined into `
+        + `${r.regions.length} object${r.regions.length === 1 ? '' : 's'}`)
+  }
+
+  const runSeparateHoles = () => {
+    const r = separateHoles(selectedObjs.map((o) => o.paths))
+    if (r.errors.length) { setRefusal({ text: r.errors[0] }); return }
+    setRefusal(null)
+    replaceSelectionWith(r.regions, 'separated')
+    setNote(`separated into ${r.regions.length} outlines — each sews solid now`)
   }
 
   const runBoolean = (op: BoolOp) => {
@@ -3366,6 +3415,19 @@ export default function App() {
             <MenuItem disabled={doc.objects.length < 2} onClick={runRemoveOverlap}
               hint="Nothing sewn twice — double density is where needles break">
               Remove overlap
+            </MenuItem>
+            <MenuSep />
+            <MenuLabel>Holes</MenuLabel>
+            {/* Subtract does this too, but makes you order the operands.
+                This reads the containment off the geometry instead, which is
+                what you want for a word or a logo full of counters. */}
+            <MenuItem disabled={selectedObjs.length < 2} onClick={runCombineHoles}
+              hint="Outlines inside others become holes — counters stop filling in">
+              Combine holes
+            </MenuItem>
+            <MenuItem disabled={!selectedObjs.length} onClick={runSeparateHoles}
+              hint="Every ring becomes its own outline again">
+              Separate holes
             </MenuItem>
             <MenuSep />
             <MenuLabel>Outline</MenuLabel>

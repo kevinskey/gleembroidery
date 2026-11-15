@@ -16,7 +16,7 @@
 import { booleanPaths, type BoolOp } from './boolean'
 import { offsetPathsChecked } from './offset'
 import { simplify } from './vector'
-import { dist, isClosed, pathLength, segDist } from './geometry'
+import { dist, isClosed, pathLength, segDist, toRegions } from './geometry'
 import { flattenShape, type Shape } from './nodes'
 import type { Pt } from './model'
 
@@ -341,4 +341,79 @@ export function shapesToPaths(shapes: readonly Shape[]): Pt[][] {
 /** Total outline length, for reporting what an operation did. */
 export function totalLength(paths: readonly Pt[][]): number {
   return paths.reduce((n, p) => n + pathLength(p), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Holes
+// ---------------------------------------------------------------------------
+
+/**
+ * One resulting object each: ring 0 is its outer boundary, later rings holes.
+ *
+ * A separate type from OpResult because combining can legitimately produce
+ * SEVERAL objects — select the four letters of a word and their counters and
+ * the answer is four letters, not one object with sixteen rings in it.
+ */
+export interface HoleResult {
+  regions: Pt[][][]
+  errors: string[]
+  warnings: string[]
+}
+
+/**
+ * Make enclosed outlines into holes of whatever encloses them.
+ *
+ * Subtract already does this, but it makes the digitizer say which shape is
+ * the hole by putting it in front — and for a word, or a logo with eight
+ * counters, that ordering is busywork over a fact the geometry already
+ * knows. This decides containment by looking, the way Embrilliance's Combine
+ * Holes does: ring inside ring is a hole, ring inside a hole is solid again.
+ *
+ * The nesting is `toRegions`, which is the same routine the fill uses to keep
+ * an O's counter open, so what you see here and what the needle does cannot
+ * disagree.
+ */
+export function combineHoles(objects: readonly Pt[][][]): HoleResult {
+  const open = objects.filter((o) => !hasArea(o)).length
+  if (open) {
+    return {
+      regions: [],
+      errors: [`${open} of the ${objects.length} outlines ${open === 1 ? 'is' : 'are'} not a closed `
+        + 'loop — a hole has to enclose something. Join ends first.'],
+      warnings: [],
+    }
+  }
+
+  const rings = objects.flat()
+  if (rings.length < 2) {
+    return { regions: [], errors: ['needs at least two outlines, one inside another'], warnings: [] }
+  }
+
+  const regions = toRegions(rings)
+  if (!regions.length) return { regions: [], errors: ['nothing here encloses any area'], warnings: [] }
+
+  // Worth saying rather than silently doing nothing: side-by-side shapes look
+  // exactly like nested ones once they are the same colour, and "the command
+  // did nothing" is indistinguishable from "the command is broken".
+  const holes = regions.reduce((n, r) => n + r.length - 1, 0)
+  const warnings = holes === 0
+    ? ['none of these outlines is inside another, so nothing became a hole']
+    : []
+  return { regions, errors: [], warnings }
+}
+
+/**
+ * The inverse: every ring becomes an outline in its own right.
+ *
+ * Useful when a trace nested something it should not have — a badge's inner
+ * border read as a hole and vanished — and you want the rings back as
+ * separate objects to re-sort by hand.
+ */
+export function separateHoles(objects: readonly Pt[][][]): HoleResult {
+  const rings = objects.flat().filter((p) => p.length >= 3)
+  if (!rings.length) return { regions: [], errors: ['nothing to separate'], warnings: [] }
+  if (rings.length === objects.length) {
+    return { regions: [], errors: ['these outlines have no holes in them already'], warnings: [] }
+  }
+  return { regions: rings.map((r) => [r]), errors: [], warnings: [] }
 }

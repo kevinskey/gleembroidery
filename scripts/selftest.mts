@@ -36,7 +36,7 @@ import {
   BROTHER_THREADS, colourDistance, nearestMachineThread, nearestSpools, newSpool,
   parseRack, serializeRack, spoolLabel,
 } from '../src/threads'
-import { booleanOp, cleanNodes, joinShapes, offsetOp, removeOverlap, simplifyPaths, splitShapeAt } from '../src/shapeops'
+import { booleanOp, cleanNodes, combineHoles, joinShapes, offsetOp, removeOverlap, separateHoles, simplifyPaths, splitShapeAt } from '../src/shapeops'
 import { EDGE_PX, EDGE_SPEED, edgeVelocity, panStep } from '../src/autoscroll'
 import { directionalInset, hasOwnComp, resolveComp, trimEnds, withComp } from '../src/compensate'
 import { ALL_FAMILIES, FONT_GROUPS, SYSTEM_FAMILIES, fontSpec, isWebFont } from '../src/fonts'
@@ -2843,6 +2843,61 @@ console.log('\n# shape operations')
     const mixed = removeOverlap([[[{ x: 0, y: 0 }, { x: 9, y: 9 }]], B])
     ok(mixed[0].paths.length === 1 && mixed[0].errors.length === 0,
       'an open path in the mix is left alone')
+  }
+
+  // --- combine holes: containment read off the geometry, not off the order
+  {
+    const letter = [box(0, 0, 40, 40)]
+    const counter = [box(10, 10, 20, 20)]
+
+    const c = combineHoles([letter, counter])
+    ok(c.errors.length === 0 && c.regions.length === 1 && c.regions[0].length === 2,
+      'a shape and the shape inside it combine into one region with one hole',
+      c.errors[0] ?? `${c.regions.length} regions`)
+
+    // Order must NOT matter — that is the whole difference from Subtract.
+    const flipped = combineHoles([counter, letter])
+    ok(flipped.regions.length === 1 && flipped.regions[0].length === 2,
+      'and it does not matter which one was selected first')
+    ok(Math.abs(ringArea(flipped.regions[0][0])) > Math.abs(ringArea(flipped.regions[0][1])),
+      'the bigger ring is always the outer one')
+
+    // The payoff: the counter must actually stay unstitched.
+    const region = c.regions[0]
+    const stitches = tatamiFill(region,
+      { ...DEFAULT_FILL(), angle: 0, spacing: 0.4, length: 4, pullComp: 0, underlay: 'none' as const })
+    // Strictly inside, with a margin: the fill legitimately travels DOWN the
+    // hole's edge, and a crossing-number test on a point lying exactly on
+    // that edge is undefined.
+    const m = 0.05
+    const inHole = stitches.filter((q) => !q.jump
+      && q.x > 10 + m && q.x < 30 - m && q.y > 10 + m && q.y < 30 - m).length
+    ok(inHole === 0, 'and the fill puts no stitch inside the hole', `${inHole} stray stitches`)
+
+    // A ring inside a hole is solid again — the island in a lake.
+    const island = combineHoles([[box(0, 0, 40, 40)], [box(5, 5, 30, 30)], [box(12, 12, 8, 8)]])
+    ok(island.regions.length === 2, 'a ring inside a hole starts a new solid region',
+      `${island.regions.length} regions`)
+
+    // Side by side looks identical to nested once they share a colour, so
+    // doing nothing silently would read as a broken command.
+    const apart = combineHoles([[box(0, 0, 10, 10)], [box(50, 50, 10, 10)]])
+    ok(/none of these outlines is inside another/.test(apart.warnings[0] ?? ''),
+      'shapes that are merely side by side say so rather than doing nothing',
+      apart.warnings[0] ?? 'no warning')
+
+    // A hole has to enclose something.
+    const openOne = combineHoles([letter, [[{ x: 0, y: 0 }, { x: 9, y: 9 }]]])
+    ok(/not a closed/.test(openOne.errors[0] ?? ''), 'an open outline is refused with the reason',
+      openOne.errors[0] ?? 'no error')
+
+    // --- and back again
+    const s = separateHoles([region])
+    ok(s.regions.length === 2 && s.regions.every((r) => r.length === 1),
+      'separate holes gives the rings back as outlines of their own',
+      `${s.regions.length} regions`)
+    ok(/no holes/.test(separateHoles([letter]).errors[0] ?? ''),
+      'and says so when there were no holes to separate')
   }
 
   // --- offset
