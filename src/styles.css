@@ -837,3 +837,13 @@ legend { font-size: 11px; color: var(--muted); text-transform: uppercase; letter
   border-color: var(--accent);
 }
 .row input.bigtext::placeholder { font-size: 13px; }
+
+/* A plain-language note under a control, for the places where what the
+   machine does differs from what the stitch is called. */
+.panel p.hint {
+  margin: 2px 0 6px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--muted);
+  white-space: normal;
+}

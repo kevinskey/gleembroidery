@@ -20,6 +20,7 @@ import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
 import { chainPaths, orderPaths, travelIsHidden } from './travel'
 import { MIN_MOTIF_MM, crossStitchFill, echoFill, motifById, motifFill, motifRun, stippleFill } from './decorative'
 import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck } from './satin'
+import { runStyleStitches } from './runstyles'
 import { resolveComp, withComp } from './compensate'
 
 /** Longest normal stitch allowed, mm. DST cannot encode past 12.1 anyway. */
@@ -424,7 +425,7 @@ function stitchObject(
           }
           push(motifRun(path, obj.motif, obj.run))
         } else {
-          push(runStitch(path, obj.run))
+          push(runStyleStitches(path, obj.run))
         }
       }
       break

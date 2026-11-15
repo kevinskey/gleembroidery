@@ -14,7 +14,7 @@ import { writeDst } from '../src/dst'
 import { writeExp } from '../src/exp'
 import { writeJef } from '../src/jef'
 import { writeCol, writeEdr } from '../src/package'
-import { emptyDoc, newObject, type EmbObject, type Pt } from '../src/model'
+import { RUN_STYLES, emptyDoc, newObject, type EmbObject, type Pt } from '../src/model'
 import { planBounds } from '../src/stitches'
 
 const OUT = new URL('../fixtures/', import.meta.url).pathname
@@ -45,6 +45,9 @@ function xf(paths: Pt[][], scale: number, deg: number): Pt[][] {
     y: (q.x * s + q.y * c) * scale,
   })))
 }
+
+/** One colour per style so a sewout can tell them apart on the cloth. */
+const RUN_COLORS = ['#c0392b', '#1f6feb', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777']
 
 interface Fixture { name: string; note: string; objects: EmbObject[] }
 
@@ -99,7 +102,31 @@ const FIXTURES: Fixture[] = [
       paths: xf([circle(0, 0, 12), circle(0, 0, 5)], 1.6, 30),
     })],
   },
+  {
+    // Every run style on both a straight line and a curve, in one file. The
+    // straight line makes the construction readable; the arc is where a
+    // style that offsets sideways (stem, chain) can put thread where the
+    // path never went. Each is its own colour so a sewout can be told apart.
+    name: 'run-styles',
+    note: 'Every run style, straight and curved — stage 1 of the digitizing tools',
+    objects: RUN_STYLES.filter((s) => s !== 'motif').flatMap((style, i) => {
+      const y = -24 + i * 7
+      return [
+        newObject({
+          name: `${style}-straight`, color: RUN_COLORS[i % RUN_COLORS.length], type: 'run',
+          paths: [[{ x: -30, y }, { x: -4, y }]],
+          run: { length: 2.5, style, passes: 3, widthMm: 1.4, gapMm: 2.5 },
+        }),
+        newObject({
+          name: `${style}-curve`, color: RUN_COLORS[i % RUN_COLORS.length], type: 'run',
+          paths: [arc(16, y, 10, Math.PI, Math.PI * 1.9, 48)],
+          run: { length: 2.5, style, passes: 3, widthMm: 1.4, gapMm: 2.5 },
+        }),
+      ]
+    }),
+  },
 ]
+
 
 // Every other fixture is centred, which makes every header symmetric and
 // leaves the +Y/-Y polarity structurally untestable. This one is deliberately

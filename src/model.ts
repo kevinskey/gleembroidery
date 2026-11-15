@@ -43,8 +43,57 @@ export interface RunParams {
    * hearts, a blanket edge. A style rather than a stitch type of its own,
    * because everything else about it is a run: same path, same length, same
    * travel and the same place in the sewing order.
+   *
+   * The rest are the same reasoning applied again: every one is a line along
+   * one path with one stitch length, differing only in how the thread is
+   * laid. See runstyles.ts, which says for each what the machine actually
+   * does — none of them is the hand stitch it is named after.
    */
-  style: 'plain' | 'motif'
+  style: RunStyle
+  /**
+   * Traversals of each step for 'multipass'. Odd only: an even count
+   * finishes facing backwards. 3 is the classic bean.
+   */
+  passes?: number
+  /** Lateral size of the texture for 'stem' and 'chain', mm. */
+  widthMm?: number
+  /** The un-penetrated span for 'sashiko', mm. */
+  gapMm?: number
+}
+
+/**
+ * Ways of laying thread along a line.
+ *
+ * 'bean' remains its own StitchType for the designs that already use it;
+ * 'multipass' is the same construction with the pass count exposed.
+ */
+export type RunStyle =
+  | 'plain'
+  | 'motif'
+  | 'double'
+  | 'multipass'
+  | 'backstitch'
+  | 'stem'
+  | 'sashiko'
+  | 'chain'
+
+export const RUN_STYLES: RunStyle[] = [
+  'plain', 'double', 'multipass', 'backstitch', 'stem', 'sashiko', 'chain', 'motif',
+]
+
+/**
+ * Names say what it looks like; the second clause says what it IS, because
+ * a digitizer picking "chain" needs to know no machine chains anything.
+ */
+export const RUN_STYLE_LABEL: Record<RunStyle, string> = {
+  plain: 'Single — one line of stitches',
+  double: 'Double — out and back',
+  multipass: 'Bean / multi-pass — each step sewn 3, 5 or 7 times',
+  backstitch: 'Backstitch — solid line, doubled step by step',
+  stem: 'Stem — overlapping slants, reads as a rope',
+  sashiko: 'Sashiko — long dash, spanned gap (not a true gap)',
+  chain: 'Chain — imitated with looped links (no machine chains)',
+  motif: 'Motif — a shape, repeated',
 }
 
 /**
@@ -679,7 +728,9 @@ export interface Doc {
   objects: EmbObject[]
 }
 
-export const DEFAULT_RUN = (): RunParams => ({ length: 2.5, style: 'plain' })
+export const DEFAULT_RUN = (): RunParams => ({
+  length: 2.5, style: 'plain', passes: 3, widthMm: 1.2, gapMm: 2,
+})
 
 export const DEFAULT_KNOCKDOWN = (): KnockdownParams => ({
   spacing: 2,

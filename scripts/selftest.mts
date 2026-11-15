@@ -8,7 +8,7 @@ import { planToMoves, splitMove } from '../src/machine'
 import { appliquePhases, centerPlan, digitize, orientToEntryExit, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
 import { insideRegion, tatamiFill } from '../src/fill'
 import { dist, isClosed, resample, ringArea, toRegions } from '../src/geometry'
-import { DEFAULT_APPLIQUE, DEFAULT_FILL, FILL_STYLES, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, objectVisible, orderedUnderlay, type Pt } from '../src/model'
+import { DEFAULT_APPLIQUE, DEFAULT_FILL, DEFAULT_RUN, RUN_STYLES, FILL_STYLES, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, objectVisible, orderedUnderlay, type Pt } from '../src/model'
 import { MIN_RAIL_MM, findCorners, railsNeedFlip, satinUnderlay, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, twoRailCheck, twoRailWidths , angleAt, assignGuides, resolveGuides } from '../src/satin'
 import { countTrims, longestStitch, planBounds, shortestStitch } from '../src/stitches'
 import { SCHEMA_VERSION, SIGNATURE_GEOMETRY_KEYS, ProjectError, deserialize, docSignature, objectOut, serialize, settingsOut } from '../src/project'
@@ -48,6 +48,7 @@ import { MIN_SIZE_MM, boxCentre, fitPaths, handlePoint, hitHandle, hitObject, mo
 import { COALESCE_MS, HISTORY_LIMIT, applyEdit, cancelState, initHistory, redoState, undoState } from '../src/history'
 import { arcThrough, deleteNode, flattenShape, insertNode, moveHandle, moveNode, nearestSegment, pathToShape, shapesToPaths, toggleSmooth, type Shape } from '../src/nodes'
 import { offsetPathsChecked } from '../src/offset'
+import { longestStep, runStyleStitches, shortestStep } from '../src/runstyles'
 
 let pass = 0, fail = 0
 function ok(cond: boolean, label: string, detail = '') {
@@ -480,7 +481,7 @@ console.log('\n# project save / reopen')
   doc.objects[0].fill = { style: 'tatami', angle: 17, spacing: 0.37, length: 3.25, stagger: 0.3,
     pullComp: 0.22,
     underlay: ['edge', 'zigzag'], border: { enabled: true, width: 1.8, density: 0.33 } }
-  doc.objects[1].run = { length: 1.75, style: 'motif' }
+  doc.objects[1].run = { length: 1.75, style: 'motif', passes: 5, widthMm: 1.9, gapMm: 2.4 }
   doc.objects[1].motif = { id: 'scallop', widthMm: 5.5, heightMm: 2.25, gapMm: 0.75 }
   doc.objects[1].satin = {
     width: 4.2, density: 0.31, pullComp: 0.11, underlay: ['center', 'zigzag'], lean: 18,
@@ -4834,6 +4835,120 @@ console.log('\n# satin density means what the trade means by it')
     for (let i = 2; i < st.length; i++) worst = Math.min(worst, dist(st[i - 2], st[i]))
     ok(worst >= MIN_RAIL_MM - 0.02, 'a run leaving a corner does not open on top of the fan',
       `closest same-rail pair ${worst.toFixed(3)} mm`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Run-stitch family (src/runstyles.ts)
+//
+// Every one of these is a machine construction imitating a hand stitch, so
+// the assertions are about what the NEEDLE does: where it lands, how far it
+// travels, and that it never strikes the same hole twice.
+// ---------------------------------------------------------------------------
+{
+  console.log('\nrun styles')
+  const line = [{ x: 0, y: 0 }, { x: 40, y: 0 }]
+  const base = { ...DEFAULT_RUN(), length: 2 }
+  const span = (st: Pt[]) => {
+    const xs = st.map((p) => p.x)
+    return Math.max(...xs) - Math.min(...xs)
+  }
+
+  // Plain is the yardstick the rest are measured against.
+  const plain = runStyleStitches(line, { ...base, style: 'plain' })
+  ok(plain.length === 21, 'a plain run steps the whole path at the stitch length',
+    `${plain.length} penetrations over 40 mm at 2 mm`)
+
+  {
+    const st = runStyleStitches(line, { ...base, style: 'double' })
+    ok(st.length === plain.length * 2 - 1, 'a double run lays every step twice',
+      `${st.length} vs ${plain.length} plain`)
+    const first = st[0], last = st[st.length - 1]
+    ok(Math.hypot(last.x - first.x, last.y - first.y) < 1e-9,
+      'a double run finishes where it started', 'that is the reason to choose it')
+  }
+
+  {
+    const three = runStyleStitches(line, { ...base, style: 'multipass', passes: 3 })
+    const five = runStyleStitches(line, { ...base, style: 'multipass', passes: 5 })
+    ok(three.length === 61 && five.length === 101,
+      'pass count drives thread thickness, not stitch length', `${three.length} / ${five.length}`)
+    // An even count would finish facing backwards; it must be rounded up.
+    const four = runStyleStitches(line, { ...base, style: 'multipass', passes: 4 })
+    ok(four.length === five.length, 'an even pass count is raised to the next odd one',
+      `4 asked, sewn as 5 (${four.length})`)
+    ok(Math.abs(span(three) - 40) < 1e-6, 'extra passes do not lengthen the line', `${span(three).toFixed(3)} mm`)
+  }
+
+  {
+    const st = runStyleStitches(line, { ...base, style: 'backstitch' })
+    // p1,p0,p2,p1,p3,p2… — the second penetration is BEHIND the first.
+    ok(st[1].x < st[0].x, 'backstitch goes back into the previous hole',
+      `${st[0].x.toFixed(1)} then ${st[1].x.toFixed(1)} mm`)
+    ok(Math.abs(st[st.length - 1].x - 38) < 1e-6 || Math.abs(st[st.length - 1].x - 40) < 1e-6,
+      'backstitch finishes at the far end, unlike a double run', `${st[st.length - 1].x.toFixed(1)} mm`)
+    // A machine has no under-travel, so the p0->p2 move IS a stitch, twice
+    // the length. That is inherent to the construction, not a defect.
+    ok(longestStep(st) <= 4 + 1e-6, 'a backstitch step is at most twice the stitch length',
+      `${longestStep(st).toFixed(3)} mm`)
+    // Which is why the length is clamped: 2x must stay under the machine cap.
+    const long = runStyleStitches(line, { ...base, style: 'backstitch', length: 9 })
+    ok(longestStep(long) <= 10 + 1e-6, 'backstitch length is clamped so 2x fits the machine limit',
+      `asked 9 mm, longest step ${longestStep(long).toFixed(2)} mm`)
+  }
+
+  {
+    const w = 1.5
+    const st = runStyleStitches(line, { ...base, style: 'stem', widthMm: w })
+    const ys = st.map((p) => p.y)
+    ok(Math.max(...ys) > 0.6 && Math.min(...ys) < -0.6,
+      'stem stitch throws its ends to both sides of the path',
+      `${Math.min(...ys).toFixed(2)} … ${Math.max(...ys).toFixed(2)} mm`)
+    ok(Math.max(...ys) <= w / 2 + 1e-6 && Math.min(...ys) >= -w / 2 - 1e-6,
+      'stem stitch stays inside the width it was given', `±${(w / 2).toFixed(2)} mm`)
+    // A width too small to show must not pretend to a texture.
+    const flat = runStyleStitches(line, { ...base, style: 'stem', widthMm: 0.05 })
+    ok(flat.every((p) => Math.abs(p.y) < 1e-9), 'a width below the visible floor degenerates to a flat line')
+  }
+
+  {
+    const st = runStyleStitches(line, { ...base, style: 'sashiko', gapMm: 3 })
+    const steps: number[] = []
+    for (let i = 1; i < st.length; i++) steps.push(Math.hypot(st[i].x - st[i - 1].x, st[i].y - st[i - 1].y))
+    const longs = steps.filter((s) => s > 2.5).length
+    ok(longs > 3, 'sashiko alternates a dash with a longer spanning stitch', `${longs} spans of 3 mm`)
+    ok(longestStep(st) <= 10 + 1e-6, 'the span is capped so the writer will not split it',
+      `${longestStep(st).toFixed(2)} mm`)
+    // The honest limit: the gap is thread, not an absence of it.
+    ok(Math.abs(span(st) - 40) < 1e-6, 'sashiko still covers the whole path', `${span(st).toFixed(2)} mm`)
+  }
+
+  {
+    const w = 1.6
+    const st = runStyleStitches(line, { ...base, style: 'chain', widthMm: w })
+    const ys = st.map((p) => p.y)
+    ok(Math.max(...ys) > 0.5 && Math.min(...ys) < -0.5, 'chain links reach both sides of the path',
+      `±${Math.max(...ys).toFixed(2)} mm`)
+    ok(Math.max(...ys) <= w / 2 + 1e-6, 'chain links stay inside their width')
+    ok(shortestStep(st) > 0.05, 'no chain link strikes the same hole twice',
+      `closest ${shortestStep(st).toFixed(3)} mm`)
+  }
+
+  // Shared contract: nothing wanders off the path's own line, and no style
+  // produces a coordinate the writer cannot encode.
+  for (const style of RUN_STYLES.filter((s) => s !== 'motif')) {
+    const st = runStyleStitches(line, { ...base, style, widthMm: 1.2, gapMm: 2 })
+    const finite = st.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+    const onLine = st.every((p) => p.x >= -1e-6 && p.x <= 40 + 1e-6 && Math.abs(p.y) <= 1.2)
+    ok(finite && onLine && st.length > 2, `${style}: finite coordinates, inside the path's envelope`,
+      `${st.length} penetrations`)
+  }
+
+  // A path shorter than one stitch must still sew something rather than
+  // returning nothing and silently losing the object.
+  for (const style of RUN_STYLES.filter((s) => s !== 'motif')) {
+    const tiny = runStyleStitches([{ x: 0, y: 0 }, { x: 0.4, y: 0 }], { ...base, style })
+    ok(tiny.length >= 2, `${style}: a path shorter than one stitch still sews`, `${tiny.length} penetrations`)
   }
 }
 

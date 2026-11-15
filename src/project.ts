@@ -32,6 +32,7 @@ import {
   DEFAULT_COMP,
   DEFAULT_TIE,
   FILL_STYLES,
+  RUN_STYLES,
   HOOPS,
   SPACINGS,
   emptyDoc,
@@ -604,7 +605,12 @@ function objectIn(v: unknown, index: number): EmbObject | null {
     } : {}),
     run: {
       length: num(run.length, dRun.length),
-      style: run.style === 'motif' ? 'motif' : 'plain',
+      // A style this build does not know falls back to 'plain' rather than
+      // to nothing — an unknown name must still sew a line, not refuse.
+      style: oneOf(run.style, RUN_STYLES, dRun.style),
+      passes: num(run.passes, dRun.passes ?? 3),
+      widthMm: num(run.widthMm, dRun.widthMm ?? 1.2),
+      gapMm: num(run.gapMm, dRun.gapMm ?? 2),
     },
     motif: {
       id: oneOf(mo.id, MOTIF_IDS, dMotif.id),

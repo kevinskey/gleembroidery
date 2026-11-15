@@ -76,6 +76,9 @@ import {
   type Group,
   type Spacing,
   type StitchType,
+  type RunStyle,
+  RUN_STYLES,
+  RUN_STYLE_LABEL,
 } from './model'
 import {
   DEFAULT_MACHINE,
@@ -4490,18 +4493,49 @@ export default function App() {
                       a sixth entry in the stitch-type list. Bean is a triple
                       pass of the line itself and has no motif form. */}
                   {selected.type === 'run' && (
-                    <div className="row wide">
-                      <label>Style</label>
-                      <div className="checks">
-                        {([['plain', 'Plain line'], ['motif', 'Motif']] as const).map(([v, lbl]) => (
-                          <button key={v}
-                            className={selected.run.style === v ? 'primary' : undefined}
-                            onClick={() => patch(selected.id, (o) => ({ ...o, run: { ...o.run, style: v } }))}>
-                            {lbl}
-                          </button>
-                        ))}
+                    <>
+                      <div className="row wide">
+                        <label>Style</label>
+                        <select value={selected.run.style}
+                          title={RUN_STYLE_LABEL[selected.run.style]}
+                          onChange={(e) => patch(selected.id,
+                            (o) => ({ ...o, run: { ...o.run, style: e.target.value as RunStyle } }))}>
+                          {RUN_STYLES.map((v) => (
+                            <option key={v} value={v}>{RUN_STYLE_LABEL[v]}</option>
+                          ))}
+                        </select>
                       </div>
-                    </div>
+                      {/* Only the controls this style actually uses. A pass
+                          count on a sashiko run would be a setting that does
+                          nothing, which is worse than a missing one. */}
+                      {selected.run.style === 'multipass' && (
+                        <Num label="Passes (odd)" value={selected.run.passes ?? 3} min={3} max={9} step={2}
+                          onChange={(v) => patch(selected.id,
+                            (o) => ({ ...o, run: { ...o.run, passes: v } }), 'run.passes')} />
+                      )}
+                      {(selected.run.style === 'stem' || selected.run.style === 'chain') && (
+                        <Num label="Texture width (mm)" value={selected.run.widthMm ?? 1.2} min={0.2} max={6}
+                          onChange={(v) => patch(selected.id,
+                            (o) => ({ ...o, run: { ...o.run, widthMm: v } }), 'run.widthMm')} />
+                      )}
+                      {selected.run.style === 'sashiko' && (
+                        <Num label="Gap (mm, spanned)" value={selected.run.gapMm ?? 2} min={0.5} max={10}
+                          onChange={(v) => patch(selected.id,
+                            (o) => ({ ...o, run: { ...o.run, gapMm: v } }), 'run.gapMm')} />
+                      )}
+                      {/* Say plainly what the machine does, where the choice
+                          is made — these are imitations, and a digitizer who
+                          thinks otherwise will be surprised at the machine. */}
+                      {selected.run.style === 'chain' && (
+                        <p className="hint">Looped links. No embroidery machine makes a true chain stitch — that needs a chenille head.</p>
+                      )}
+                      {selected.run.style === 'sashiko' && (
+                        <p className="hint">The gap is spanned by one long stitch, not left bare — a machine cannot lift the thread.</p>
+                      )}
+                      {selected.run.style === 'backstitch' && (
+                        <p className="hint">Steps reach twice the stitch length; the length is capped so they fit the machine limit.</p>
+                      )}
+                    </>
                   )}
                 </fieldset>
               )}
