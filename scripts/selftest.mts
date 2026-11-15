@@ -48,7 +48,7 @@ import { MIN_SIZE_MM, boxCentre, fitPaths, handlePoint, hitHandle, hitObject, mo
 import { COALESCE_MS, HISTORY_LIMIT, applyEdit, cancelState, initHistory, redoState, undoState } from '../src/history'
 import { arcThrough, deleteNode, flattenShape, insertNode, moveHandle, moveNode, nearestSegment, pathToShape, shapesToPaths, toggleSmooth, type Shape } from '../src/nodes'
 import { offsetPathsChecked } from '../src/offset'
-import { railsFromClosedPath } from '../src/satin'
+import { featherSatin, fringeCheck, fringeSatin, railsFromClosedPath, satinColumn as satinColumnFn } from '../src/satin'
 import { DEFAULT_PROGRAM, candlewickRun, eyelet, frenchKnot, programCheck } from '../src/programmotif'
 import { DEFAULT_PATCH, patchCheck, patchEdge } from '../src/patch'
 import { crossStitchFill, crossStitchRun } from '../src/decorative'
@@ -493,6 +493,8 @@ console.log('\n# project save / reopen')
   doc.objects[1].satin = {
     width: 4.2, density: 0.31, pullComp: 0.11, underlay: ['center', 'zigzag'], lean: 18,
     mode: 'column',
+    feather: { enabled: true, depthMm: 1.1, side: 'left' },
+    fringe: { enabled: true, lengthMm: 3.5, side: 'right' },
     split: { enabled: true, maxLength: 5.5, stagger: 0.4 },
   }
   doc.objects[0].knockdown = { spacing: 2.6, margin: 2.1, angle: 20, length: 3.5 }
@@ -5391,6 +5393,76 @@ console.log('\n# satin density means what the trade means by it')
     const sewn = plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
     ok(sewn.length > 200, 'a lace object reaches the plan', `${sewn.length} penetrations`)
     ok(warnings.length === 0, 'with no complaints at the defaults')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Satin treatments: feather and fringe (stage 7)
+// ---------------------------------------------------------------------------
+{
+  console.log('\nsatin feather and fringe')
+  const straight = [{ x: -20, y: 0 }, { x: 20, y: 0 }]
+  const base = { ...DEFAULT_SATIN(), width: 6, density: 0.5, pullComp: 0, underlay: [] as never[], mode: 'border' as const }
+  const bars = satinColumnFn(straight, base)
+  const spread = (st: Pt[]) => {
+    const ys = st.map((p) => p.y)
+    return { lo: Math.min(...ys), hi: Math.max(...ys) }
+  }
+  const plain = spread(bars)
+  ok(Math.abs(plain.hi - 3) < 0.2 && Math.abs(plain.lo + 3) < 0.2,
+    'a plain 6 mm column reaches +/-3 mm', `${plain.lo.toFixed(2)} … ${plain.hi.toFixed(2)}`)
+
+  {
+    const f = featherSatin(bars, { enabled: true, depthMm: 1.5, side: 'both' })
+    const s2 = spread(f)
+    ok(s2.hi <= plain.hi + 1e-6 && s2.lo >= plain.lo - 1e-6,
+      'feathering only ever RETREATS from the rail, never past it')
+    // The ends must be scattered, not all inset by the same amount — equal
+    // insets are just a narrower column.
+    const tops = f.filter((_, i) => i % 2 === 1).map((p) => p.y)
+    const distinct = new Set(tops.map((y) => y.toFixed(2))).size
+    ok(distinct > 5, 'the retreat varies bar to bar, which is what breaks the edge up',
+      `${distinct} distinct end positions`)
+    // Reproducible: the same input must give the same edge, or preview,
+    // count and exported file stop agreeing.
+    const again = featherSatin(bars, { enabled: true, depthMm: 1.5, side: 'both' })
+    ok(JSON.stringify(f) === JSON.stringify(again), 'and is hashed, not random, so it regenerates identically')
+  }
+
+  {
+    const g = fringeSatin(bars, { enabled: true, lengthMm: 4, side: 'left' })
+    const s3 = spread(g)
+    // ONE side reaches past its rail and the OTHER is untouched. Which rail
+    // 'left' names depends on which way the column was drawn, so assert the
+    // property rather than a sign.
+    const grew = s3.hi > plain.hi + 3 ? 'hi' : s3.lo < plain.lo - 3 ? 'lo' : 'neither'
+    ok(grew !== 'neither', 'fringe reaches PAST the rail on the chosen side',
+      `${s3.lo.toFixed(2)} … ${s3.hi.toFixed(2)} vs ${plain.lo.toFixed(2)} … ${plain.hi.toFixed(2)}`)
+    ok(grew === 'hi' ? Math.abs(s3.lo - plain.lo) < 1e-6 : Math.abs(s3.hi - plain.hi) < 1e-6,
+      'and leaves the other side exactly where it was')
+    // The two sides must be opposites, or the control does nothing useful.
+    const other = spread(fringeSatin(bars, { enabled: true, lengthMm: 4, side: 'right' }))
+    ok(grew === 'hi' ? other.lo < plain.lo - 3 : other.hi > plain.hi + 3,
+      'and the other setting fringes the opposite rail')
+    const notes = fringeCheck({ enabled: true, lengthMm: 4, side: 'left' })
+    ok(notes.some((n) => n.includes('cut open')),
+      'and the operator is told it is not finished at the machine', notes[0].slice(0, 60))
+    ok(fringeCheck({ enabled: true, lengthMm: 4, side: 'both' }).some((n) => n.includes('anchoring')),
+      'fringing both sides is called out — nothing holds the middle')
+  }
+
+  {
+    // Treatments are COVER only: a feathered underlay is a worse underlay.
+    const doc = emptyDoc()
+    doc.objects = [newObject({
+      name: 'f', color: '#000', type: 'satin', paths: [straight],
+      satin: { ...DEFAULT_SATIN(), width: 6, density: 0.5, underlay: ['center'], mode: 'border',
+        feather: { enabled: true, depthMm: 2, side: 'both' } },
+    })]
+    const st = digitize(doc).plan.blocks.flatMap((b) => b.stitches).filter((s) => !s.jump)
+    const onSpine = st.filter((p) => Math.abs(p.y) < 0.3).length
+    ok(onSpine > 5, 'the centre underlay is still a clean line under a feathered cover',
+      `${onSpine} penetrations on the spine`)
   }
 }
 

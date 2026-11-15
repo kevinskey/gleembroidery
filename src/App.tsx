@@ -87,6 +87,7 @@ import {
 import { manualPenetrations, manualStitches, manualWarnings } from './manual'
 import { PROGRAM_KINDS, PROGRAM_LABEL, programCheck, type ProgramKind, type ProgramParams } from './programmotif'
 import { PATCH_CORNERS, PATCH_CORNER_LABEL, patchCheck, type PatchCorner, type PatchParams } from './patch'
+import { DEFAULT_FEATHER, DEFAULT_FRINGE } from './satin'
 import { LACE_PATTERNS, LACE_PATTERN_LABEL, laceCheck, type LacePattern, type LaceParams } from './lace'
 import {
   DEFAULT_MACHINE,
@@ -4785,6 +4786,43 @@ export default function App() {
                       axis — a circle, a square — has no across to span, and is sewn as a
                       border with a warning rather than guessed at.
                     </p>
+                  )}
+                  {/* Treatments act on the COVER bars only; underlay is
+                      structural and is never broken up or pushed past a rail. */}
+                  <div className="row wide">
+                    <label>Feathered edge</label>
+                    <input type="checkbox" checked={!!selected.satin.feather?.enabled}
+                      onChange={(e) => patch(selected.id, (o) => ({
+                        ...o, satin: { ...o.satin, feather: { ...(o.satin.feather ?? DEFAULT_FEATHER()), enabled: e.target.checked } },
+                      }))} />
+                  </div>
+                  {selected.satin.feather?.enabled && (
+                    <>
+                      <Num label="Feather depth (mm)" value={selected.satin.feather.depthMm} min={0.2} max={6} step={0.1}
+                        onChange={(v) => patch(selected.id, (o) => ({
+                          ...o, satin: { ...o.satin, feather: { ...(o.satin.feather ?? DEFAULT_FEATHER()), depthMm: v } },
+                        }), 'satin.feather')} />
+                      <p className="hint">Bar ends retreat by a varying amount so the edge breaks up — for blending one colour into another. Hashed, not random, so it regenerates identically.</p>
+                    </>
+                  )}
+                  <div className="row wide">
+                    <label>Fringe (cut after sewing)</label>
+                    <input type="checkbox" checked={!!selected.satin.fringe?.enabled}
+                      onChange={(e) => patch(selected.id, (o) => ({
+                        ...o, satin: { ...o.satin, fringe: { ...(o.satin.fringe ?? DEFAULT_FRINGE()), enabled: e.target.checked } },
+                      }))} />
+                  </div>
+                  {selected.satin.fringe?.enabled && (
+                    <>
+                      <Num label="Loop length (mm)" value={selected.satin.fringe.lengthMm} min={1} max={12} step={0.5}
+                        onChange={(v) => patch(selected.id, (o) => ({
+                          ...o, satin: { ...o.satin, fringe: { ...(o.satin.fringe ?? DEFAULT_FRINGE()), lengthMm: v } },
+                        }), 'satin.fringe')} />
+                      <p className="hint warn">
+                        NOT finished at the machine: the loops must be cut open afterwards, and
+                        until they are this sews as a very loose satin.
+                      </p>
+                    </>
                   )}
                   <Num label="Width (mm)" value={selected.satin.width} min={0.4} max={12}
                     onChange={(v) => patch(selected.id, (o) => ({ ...o, satin: { ...o.satin, width: v } }), 'satin.width')} />

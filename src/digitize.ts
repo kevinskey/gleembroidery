@@ -21,6 +21,7 @@ import { chainPaths, orderPaths, travelIsHidden } from './travel'
 import { MIN_MOTIF_MM, crossStitchFill, crossStitchRun, echoFill, motifById, motifFill, motifRun, stippleFill } from './decorative'
 import { OVERLOCK_LEAN, assignGuides, beanStitch, puffCaps, puffCheck, runStitch, satinCheck, satinColumn, satinTwoRail, satinTwoRailUnderlay, satinUnderlay, twoRailCheck, railsFromClosedPath } from './satin'
 import { blanketEdge, eStitchEdge, runStyleStitches, zigzagEdge } from './runstyles'
+import { featherSatin, fringeCheck, fringeSatin } from './satin'
 import { manualPenetrations, manualStitches, manualWarnings } from './manual'
 import { programCheck, programStitches } from './programmotif'
 import { patchCheck, patchStitches } from './patch'
@@ -379,6 +380,23 @@ export function orientToEntryExit(stitches: Stitch[], obj: EmbObject): Stitch[] 
   return cost(tail, head) < cost(head, tail) ? [...stitches].reverse() : stitches
 }
 
+/**
+ * Cover-stitch treatments for a satin object, in order: feather first (it
+ * moves ends inward), then fringe (it moves them outward). Applying fringe
+ * first would have feather claw back the loops it just made.
+ */
+function satinTreatments(
+  st: Stitch[], p: EmbObject['satin'], warnings: string[], name: string,
+): Stitch[] {
+  let out = st
+  if (p.feather?.enabled) out = featherSatin(out, p.feather)
+  if (p.fringe?.enabled) {
+    for (const why of fringeCheck(p.fringe)) warnings.push(`${name}: ${why}`)
+    out = fringeSatin(out, p.fringe)
+  }
+  return out
+}
+
 function stitchObject(
   obj: EmbObject, warnings: string[], tie: TieParams, floor = MIN_STITCH_MM,
 ): Stitch[] {
@@ -543,7 +561,10 @@ function stitchObject(
           break
         }
         push(satinTwoRailUnderlay(ra, rb, obj.satin, rung))
-        push(satinTwoRail(ra, rb, obj.satin, rung))
+        // Underlay is NEVER feathered or fringed: it is structural, and a
+        // broken-up underlay is simply a worse underlay. Same reasoning as
+        // the lean, which is also cover-only.
+        push(satinTreatments(satinTwoRail(ra, rb, obj.satin, rung), obj.satin, warnings, obj.name))
         break
       }
       // A CLOSED outline in column mode is the two sides of a column, not a
@@ -566,7 +587,7 @@ function stitchObject(
               continue
             }
             push(satinTwoRailUnderlay(ra, rb, obj.satin))
-            push(satinTwoRail(ra, rb, obj.satin))
+            push(satinTreatments(satinTwoRail(ra, rb, obj.satin), obj.satin, warnings, obj.name))
             handled++
           }
           if (handled === closed.length) break

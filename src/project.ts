@@ -663,6 +663,18 @@ function objectIn(v: unknown, index: number): EmbObject | null {
       // Defaulting them to 'column' would re-sew every one of them
       // differently the next time they were opened.
       mode: satin.mode === 'column' ? 'column' : 'border',
+      feather: {
+        enabled: !!(isObj(satin.feather) && (satin.feather as Record<string, unknown>).enabled),
+        depthMm: num(isObj(satin.feather) ? (satin.feather as Record<string, unknown>).depthMm : undefined, 1.5),
+        side: oneOf(isObj(satin.feather) ? (satin.feather as Record<string, unknown>).side : undefined,
+          ['left', 'right', 'both'], 'both'),
+      },
+      fringe: {
+        enabled: !!(isObj(satin.fringe) && (satin.fringe as Record<string, unknown>).enabled),
+        lengthMm: num(isObj(satin.fringe) ? (satin.fringe as Record<string, unknown>).lengthMm : undefined, 4),
+        side: oneOf(isObj(satin.fringe) ? (satin.fringe as Record<string, unknown>).side : undefined,
+          ['left', 'right', 'both'], 'left'),
+      },
       split: {
         enabled: isObj(satin.split) ? satin.split.enabled === true : dSatin.split.enabled,
         maxLength: num(isObj(satin.split) ? satin.split.maxLength : undefined, dSatin.split.maxLength),

@@ -13,7 +13,7 @@
 import type { Shape } from './nodes'
 import type { TextSpec } from './text'
 import type { FrozenPlan } from './stitchedit'
-import type { AngleGuide } from './satin'
+import type { AngleGuide, FeatherParams, FringeParams } from './satin'
 import { DEFAULT_MOTIF, type MotifParams } from './decorative'
 import { DEFAULT_PROGRAM, type ProgramParams } from './programmotif'
 import { DEFAULT_PATCH, type PatchParams } from './patch'
@@ -289,6 +289,10 @@ export interface SatinParams {
    * what they sewed — see project.ts, which reads absent as 'border'.
    */
   mode?: SatinMode
+  /** Broken edge for blending — see satin.ts featherSatin. */
+  feather?: FeatherParams
+  /** Loops past the rail, to be CUT after sewing — see fringeSatin. */
+  fringe?: FringeParams
   split: SatinSplitParams
 }
 
@@ -858,6 +862,8 @@ export const DEFAULT_SATIN = (): SatinParams => ({
   // satin on a rectangle means. Files written before this field keep
   // 'border' — see project.ts.
   mode: 'column',
+  feather: { enabled: false, depthMm: 1.5, side: 'both' },
+  fringe: { enabled: false, lengthMm: 4, side: 'left' },
   // Off by default: a column inside the snag limit needs no split, and an
   // unasked-for extra hole in every bar is a change to the look of the
   // stitching. 6 mm leaves margin under the 10 mm limit for the stagger.

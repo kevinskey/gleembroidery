@@ -1311,3 +1311,109 @@ export function railsFromClosedPath(path: Pt[]): [Pt[], Pt[]] | null {
   if (a.length < 2 || b.length < 2) return null
   return [a, b]
 }
+
+// ---------------------------------------------------------------------------
+// Satin treatments: feathered edges and fringe
+//
+// Both work on the GENERATED bars rather than inside satinColumn. A satin
+// column alternates rail to rail, so consecutive penetrations are the two
+// ends of one bar, and a treatment is a rule about where those ends sit.
+// Keeping them outside the column engine means the engine — mitres, density,
+// guides, underlay, all of it — stays exactly as tested.
+// ---------------------------------------------------------------------------
+
+export type SatinSide = 'left' | 'right' | 'both'
+
+export interface FeatherParams {
+  enabled: boolean
+  /** How far the ends may retreat from the rail, mm. */
+  depthMm: number
+  side: SatinSide
+}
+
+export interface FringeParams {
+  enabled: boolean
+  /** How far the loops reach past the rail before cutting, mm. */
+  lengthMm: number
+  side: SatinSide
+}
+
+export const DEFAULT_FEATHER = (): FeatherParams => ({ enabled: false, depthMm: 1.5, side: 'both' })
+export const DEFAULT_FRINGE = (): FringeParams => ({ enabled: false, lengthMm: 4, side: 'left' })
+
+/**
+ * Hashed, not random.
+ *
+ * A feathered edge regenerated with Math.random would be a different edge
+ * every time the document changed — and the plan must be reproducible, or
+ * the preview, the stitch count and the exported file stop being the same
+ * thing. Indexing a hash gives a scatter that is stable for a given design.
+ */
+function hash01(i: number): number {
+  const x = Math.sin(i * 12.9898) * 43758.5453
+  return x - Math.floor(x)
+}
+
+/**
+ * Retreat alternate bar ends from the rail so the edge breaks up.
+ *
+ * This is what blends one colour into another — fur, petals, shading. The
+ * depth is a MAXIMUM, not a fixed inset: every end at the same inset is just
+ * a narrower column.
+ */
+export function featherSatin(stitches: Stitch[], p: FeatherParams): Stitch[] {
+  if (!p.enabled || p.depthMm <= 0 || stitches.length < 2) return stitches
+  const out = stitches.map((s) => ({ ...s }))
+  for (let i = 0; i + 1 < out.length; i++) {
+    const a = out[i], b = out[i + 1]
+    if (a.jump || b.jump || a.lock || b.lock) continue
+    // Which end is being feathered — the rails alternate, so parity is side.
+    const leftEnd = i % 2 === 0
+    if (p.side === 'left' && !leftEnd) continue
+    if (p.side === 'right' && leftEnd) continue
+    const len = Math.hypot(b.x - a.x, b.y - a.y)
+    if (len < 1e-6) continue
+    const take = Math.min(hash01(i) * p.depthMm, len * 0.45)
+    out[i] = { ...a, x: a.x + ((b.x - a.x) / len) * take, y: a.y + ((b.y - a.y) / len) * take }
+  }
+  return out
+}
+
+/**
+ * Push bar ends PAST the rail, to be cut open after sewing.
+ *
+ * Fringe is the one treatment here that is not finished when the machine
+ * stops: the loops have to be cut, and until they are it is a very loose
+ * satin. The base is what holds the cut ends in, so the caller must sew one —
+ * fringeCheck says so rather than leaving it to be discovered.
+ */
+export function fringeSatin(stitches: Stitch[], p: FringeParams): Stitch[] {
+  if (!p.enabled || p.lengthMm <= 0 || stitches.length < 2) return stitches
+  const out = stitches.map((s) => ({ ...s }))
+  for (let i = 0; i + 1 < out.length; i++) {
+    const a = out[i], b = out[i + 1]
+    if (a.jump || b.jump || a.lock || b.lock) continue
+    const leftEnd = i % 2 === 0
+    if (p.side === 'left' && !leftEnd) continue
+    if (p.side === 'right' && leftEnd) continue
+    const len = Math.hypot(b.x - a.x, b.y - a.y)
+    if (len < 1e-6) continue
+    out[i] = { ...a, x: a.x - ((b.x - a.x) / len) * p.lengthMm, y: a.y - ((b.y - a.y) / len) * p.lengthMm }
+  }
+  return out
+}
+
+/** What the operator must know before sewing a fringe. */
+export function fringeCheck(p: FringeParams): string[] {
+  if (!p.enabled) return []
+  const out = [
+    'fringe is NOT finished at the machine — the loops must be cut open afterwards, and until they are this sews as a very loose satin',
+  ]
+  if (p.side === 'both') {
+    out.push('fringing both sides leaves nothing anchoring the middle; one side and a base run is the usual build')
+  }
+  if (p.lengthMm > 8) {
+    out.push(`${p.lengthMm.toFixed(1)} mm loops are long enough to catch on things before they are cut`)
+  }
+  return out
+}
