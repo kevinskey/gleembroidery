@@ -833,24 +833,31 @@ export async function textToColumnsExact(
   if (!out.letters.length) return null
   const columns: LetterColumn[] = []
   const thin: string[] = []
-  let anyAxis = false
 
   for (const letter of out.letters) {
+    // Whitespace has no outline and nothing to fail at.
+    if (!letter.paths.length || !letter.ch.trim()) continue
     const branches = await axisBranches(letter.paths)
-    if (!branches) continue
-    anyAxis = true
-    for (const branch of branches) {
+    const before = columns.length
+    for (const branch of branches ?? []) {
       const kept = trimAxis(branch)
       if (!kept) continue
       const rails = railsFromAxis(kept)
       if (rails.left.length < 3) { thin.push(letter.ch); continue }
       columns.push({ ch: letter.ch, left: rails.left, right: rails.right })
     }
+    // ALL THE LETTERS OR NONE.
+    //
+    // Skipping a letter the axis cannot do leaves a WORD WITH A HOLE IN IT,
+    // and that is exactly what shipped: "Test" came back with its T and its
+    // t and no e or s, because those two letters failed and the rest
+    // succeeded, so nothing fell back. A word half-converted is worse than a
+    // word converted by the rougher engine, because the rougher engine at
+    // least produces every letter.
+    if (columns.length === before) return null
   }
 
-  // Nothing at all came back: let the caller fall back to the raster route
-  // rather than lose the lettering.
-  if (!anyAxis || !columns.length) return null
+  if (!columns.length) return null
 
   const warnings = [...out.warnings]
   if (thin.length) {

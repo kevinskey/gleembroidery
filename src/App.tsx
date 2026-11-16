@@ -4135,9 +4135,14 @@ export default function App() {
                 key={`${t.id}:${t.mode ?? ''}`}
                 className={`tool${selected?.type === t.id
                   && (!t.mode || (selected.satin.mode ?? 'border') === t.mode) ? ' on' : ''}`}
-                title={t.hint}
-                disabled={!selected}
-                onClick={() => selected && setStitchType(selected.id, t.id, t.mode)}
+                title={selectedObjs.length > 1 ? `${t.hint} — applies to all ${selectedObjs.length} selected` : t.hint}
+                disabled={!selectedObjs.length}
+                onClick={() => {
+                  // EVERY selected object, not just the first. A word is a
+                  // group of a dozen strokes now, and changing one of them
+                  // looked like the button did nothing.
+                  for (const o of selectedObjs) setStitchType(o.id, t.id, t.mode)
+                }}
               >
                 {t.icon}
                 <span>{t.label}</span>
