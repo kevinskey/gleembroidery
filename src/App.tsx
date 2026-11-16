@@ -90,6 +90,7 @@ import { PATCH_CORNERS, PATCH_CORNER_LABEL, patchCheck, type PatchCorner, type P
 import { DEFAULT_FEATHER, DEFAULT_FRINGE } from './satin'
 import { convertCheck, convertObject } from './convert'
 import { columnsFromRungs } from './rungs'
+import { orderColumns } from './travel'
 import { LACE_PATTERNS, LACE_PATTERN_LABEL, laceCheck, type LacePattern, type LaceParams } from './lace'
 import {
   DEFAULT_MACHINE,
@@ -2459,7 +2460,16 @@ export default function App() {
     const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2
     const place = (p: Pt[]) => p.map((q) => ({ x: q.x - cx + to.x, y: q.y - cy + to.y }))
 
-    const made = columns.map((c, i) => newObject({
+    // ORDER THEM BEFORE MAKING OBJECTS. The tracer returns strokes in the
+    // order it found them, and the machine sews objects in document order,
+    // so a word came out travelling back and forth across the whole line
+    // between consecutive strokes.
+    const ordered = orderColumns(
+      columns,
+      (c) => ({ left: place(c.left), right: place(c.right) }),
+      (c) => ({ ...c, left: [...c.left].reverse(), right: [...c.right].reverse() }),
+    )
+    const made = ordered.map((c, i) => newObject({
       name: `${spec.content} ${c.ch}${i + 1}`,
       color: old?.color ?? PALETTE[doc.objects.length % PALETTE.length],
       type: 'satin',

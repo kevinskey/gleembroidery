@@ -55,6 +55,7 @@ import { crossStitchFill, crossStitchRun } from '../src/decorative'
 import { DEFAULT_LACE, laceCheck, laceStitches } from '../src/lace'
 import { convertCheck, convertObject } from '../src/convert'
 import { columnsFromRungs } from '../src/rungs'
+import { orderColumns } from '../src/travel'
 import { axisBranches, railsFromAxis, trimAxis } from '../src/mat'
 import { blanketEdge, eStitchEdge, zigzagEdge } from '../src/runstyles'
 import { longestStep, runStyleStitches, shortestStep } from '../src/runstyles'
@@ -5998,6 +5999,52 @@ console.log('\n# satin density means what the trade means by it')
   // rather than losing the object.
   ok((await axisBranches([])) === null, 'no outline returns null')
   ok((await axisBranches([[{ x: 0, y: 0 }, { x: 1, y: 0 }]])) === null, 'and so does a degenerate one')
+}
+
+// ---------------------------------------------------------------------------
+// Satin columns are ordered so the machine does not criss-cross (travel.ts)
+// ---------------------------------------------------------------------------
+{
+  console.log('\ncolumn sewing order')
+  type Col = { left: Pt[]; right: Pt[] }
+  const bar = (x: number, y: number, w: number): Col => ({
+    left: [{ x, y: y - 2 }, { x: x + w, y: y - 2 }],
+    right: [{ x, y: y + 2 }, { x: x + w, y: y + 2 }],
+  })
+  // Five strokes across a line, handed over in a deliberately awful order —
+  // which is what a skeleton tracer does.
+  const scrambled = [bar(80, 0, 10), bar(0, 0, 10), bar(60, 0, 10), bar(20, 0, 10), bar(40, 0, 10)]
+  const travelOf = (cols: Col[]) => {
+    let d = 0
+    for (let i = 1; i < cols.length; i++) {
+      const a = cols[i - 1].left[cols[i - 1].left.length - 1]
+      const b = cols[i].left[0]
+      d += Math.hypot(b.x - a.x, b.y - a.y)
+    }
+    return d
+  }
+  const ordered = orderColumns(
+    scrambled,
+    (c) => c,
+    (c) => ({ left: [...c.left].reverse(), right: [...c.right].reverse() }),
+  )
+  ok(ordered.length === scrambled.length, 'every stroke survives the reorder',
+    `${ordered.length} of ${scrambled.length}`)
+  ok(travelOf(ordered) < travelOf(scrambled) / 2, 'and the travel between them collapses',
+    `${travelOf(scrambled).toFixed(0)} mm -> ${travelOf(ordered).toFixed(0)} mm`)
+  ok(Math.abs(ordered[0].left[0].x) < 1e-6, 'starting at the leftmost stroke, as a line of type is read',
+    `x=${ordered[0].left[0].x}`)
+
+  // Reversing a column flips BOTH rails, so the pairing is unchanged — the
+  // bars still run across, only the end the needle arrives at changes.
+  for (const c of ordered) {
+    const w = c.left.map((p, i) => Math.hypot(p.x - c.right[i].x, p.y - c.right[i].y))
+    ok(Math.max(...w) - Math.min(...w) < 1e-6, 'and a reversed column keeps its bars square',
+      `width ${w[0].toFixed(1)} mm`)
+  }
+
+  ok(orderColumns([bar(0, 0, 10)], (c) => c, (c) => c).length === 1,
+    'one column needs no ordering')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

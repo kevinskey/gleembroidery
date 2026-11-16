@@ -218,3 +218,71 @@ export function travelCost(paths: readonly Pt[][], trimOver: number, start?: Pt)
 export function sewnLength(paths: readonly Pt[][]): number {
   return paths.reduce((n, p) => n + pathLength(p), 0)
 }
+
+/**
+ * Put satin columns into a sewing order that does not criss-cross the design.
+ *
+ * Satin lettering makes one column per STROKE, and they came out in the
+ * order the skeleton tracer happened to find them — which is neither
+ * left-to-right nor nearest-first. On "Bowman Scholars" that was a word's
+ * worth of thread travelling back and forth across the whole line between
+ * consecutive strokes.
+ *
+ * A greedy nearest-neighbour walk from the leftmost stroke is enough here.
+ * It is not an optimal tour and does not need to be: the cost being removed
+ * is one long traverse per stroke, and anything that keeps consecutive
+ * strokes near each other removes it.
+ *
+ * A column may be REVERSED to put its nearer end first. Reversing both rails
+ * together keeps the pairing, so the bars are unchanged — only which end the
+ * needle arrives at.
+ */
+export function orderColumns<T>(
+  columns: T[], railsOf: (c: T) => { left: Pt[]; right: Pt[] },
+  reverse: (c: T) => T,
+): T[] {
+  if (columns.length < 3) return columns
+  const endsOf = (c: T) => {
+    const { left, right } = railsOf(c)
+    if (!left.length || !right.length) return null
+    const mid = (a: Pt, b: Pt) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
+    return {
+      head: mid(left[0], right[0]),
+      tail: mid(left[left.length - 1], right[right.length - 1]),
+    }
+  }
+  const items = columns.map((c) => ({ c, e: endsOf(c) })).filter((q) => q.e)
+  if (items.length < 3) return columns
+
+  // Start at the leftmost stroke: a line of type is read that way, and it
+  // gives the walk an end to start from rather than a middle.
+  let bestStart = 0
+  for (let i = 1; i < items.length; i++) {
+    if (items[i].e!.head.x < items[bestStart].e!.head.x) bestStart = i
+  }
+  const out: T[] = []
+  const used = new Set<number>()
+  let cur = bestStart
+  let at = items[cur].e!.tail
+  out.push(items[cur].c)
+  used.add(cur)
+
+  while (used.size < items.length) {
+    let pick = -1, flip = false, best = Infinity
+    for (let i = 0; i < items.length; i++) {
+      if (used.has(i)) continue
+      const e = items[i].e!
+      const dh = Math.hypot(e.head.x - at.x, e.head.y - at.y)
+      const dt = Math.hypot(e.tail.x - at.x, e.tail.y - at.y)
+      if (dh < best) { best = dh; pick = i; flip = false }
+      if (dt < best) { best = dt; pick = i; flip = true }
+    }
+    if (pick < 0) break
+    used.add(pick)
+    const chosen = flip ? reverse(items[pick].c) : items[pick].c
+    out.push(chosen)
+    const e = endsOf(chosen)!
+    at = e.tail
+  }
+  return out
+}
