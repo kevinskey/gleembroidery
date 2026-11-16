@@ -13,7 +13,7 @@
 import { APPLIQUE_BORDER_LABEL, FILL_UNDERLAY_ORDER, NO_SPLIT, objectVisible, orderedUnderlay, type Doc, type EmbObject, type Pt, type TieParams } from './model'
 import { nodeFractions } from './nodes'
 import type { ColorBlock, Stitch, StitchPlan } from './stitches'
-import { dist, isRingPath, pathLength, resample, scanlineSpans, toRegions } from './geometry'
+import { dedupe, dist, isRingPath, pathLength, resample, scanlineSpans, toRegions } from './geometry'
 import { unionSelfChecked } from './boolean'
 import { offsetPathsChecked } from './offset'
 import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
@@ -394,6 +394,46 @@ function satinTreatments(
     for (const why of fringeCheck(p.fringe)) warnings.push(`${name}: ${why}`)
     out = fringeSatin(out, p.fringe)
   }
+  return out
+}
+
+
+/**
+ * The area a satin object actually covers, as regions.
+ *
+ * A two-rail column states its own band: one rail out, the other back. A
+ * spine satin has to be grown from its path by half its width — which is
+ * what the engine will lay there, so it is what the thread will hide under.
+ *
+ * Used to decide whether a travel can be SEWN rather than jumped. Getting
+ * this wrong in the generous direction drags thread across bare fabric, so
+ * the band is the nominal width without pull compensation: the compensation
+ * widens the stitching, but not reliably enough to hide a travel under.
+ */
+export function satinCover(obj: EmbObject, doc: Doc): Pt[][][] {
+  const out: Pt[][][] = []
+  if (obj.twoRail && obj.paths.length === 2) {
+    const [a, b] = obj.paths
+    if (a.length >= 2 && b.length >= 2) out.push([[...a, ...[...b].reverse()]])
+    return out
+  }
+  const half = Math.max(0.2, obj.satin.width / 2)
+  for (const path of obj.paths) {
+    const pts = dedupe(path)
+    if (pts.length < 2) continue
+    const left: Pt[] = [], right: Pt[] = []
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[Math.max(0, i - 1)], q = pts[Math.min(pts.length - 1, i + 1)]
+      let tx = q.x - p.x, ty = q.y - p.y
+      const len = Math.hypot(tx, ty)
+      if (len < 1e-9) continue
+      tx /= len; ty /= len
+      left.push({ x: pts[i].x - ty * half, y: pts[i].y + tx * half })
+      right.push({ x: pts[i].x + ty * half, y: pts[i].y - tx * half })
+    }
+    if (left.length >= 2) out.push([[...left, ...right.reverse()]])
+  }
+  void doc
   return out
 }
 
@@ -876,9 +916,15 @@ export function digitize(doc: Doc): DigitizeResult {
       // fraction outside its outline, and testing against the raw outline
       // said a travel starting on the fill's own last stitch was not
       // covered by that fill.
+      // WHAT COVERS A TRAVEL. Only fills counted, and a satin column covers
+      // its band just as completely — so a word built from columns had no
+      // cover at all and every move between strokes became a jump, including
+      // ones running straight along a stroke already sewn. Lettering is
+      // nothing but columns, which is why it came out webbed in jumps.
       const cover = [obj, doc.objects.find((q) => q.id === lastObjId)]
-        .filter((q): q is EmbObject => !!q && q.type === 'fill')
+        .filter((q): q is EmbObject => !!q && (q.type === 'fill' || q.type === 'satin'))
         .flatMap((q) => {
+          if (q.type === 'satin') return satinCover(q, doc)
           const comp = resolveComp(q.fill, doc.comp, 'fill').pull
           const grown = comp > 0 ? offsetPathsChecked(q.paths, comp) : null
           return toRegions(grown && !grown.failed && grown.paths.length ? grown.paths : q.paths)

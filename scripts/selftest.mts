@@ -5,7 +5,8 @@ import { readDst, writeDst } from '../src/dst'
 import { writeExp } from '../src/exp'
 import { JEF_PALETTE, nearestJefColor, writeJef } from '../src/jef'
 import { planToMoves, splitMove } from '../src/machine'
-import { appliquePhases, centerPlan, digitize, orientToEntryExit, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
+import { appliquePhases, centerPlan, digitize, orientToEntryExit, satinCover, MAX_STITCH_MM, MIN_STITCH_MM } from '../src/digitize'
+import { travelIsHidden } from '../src/travel'
 import { insideRegion, tatamiFill } from '../src/fill'
 import { dist, isClosed, resample, ringArea, toRegions } from '../src/geometry'
 import { DEFAULT_APPLIQUE, DEFAULT_FILL, DEFAULT_RUN, RUN_STYLES, STITCH_TYPES, FILL_STYLES, DEFAULT_SATIN, FILL_UNDERLAY_ORDER, HOOPS, SATIN_UNDERLAY_ORDER, bounds, emptyDoc, newObject, objectVisible, orderedUnderlay, type Pt } from '../src/model'
@@ -6110,6 +6111,54 @@ console.log('\n# satin density means what the trade means by it')
       ok(kept.length >= 2, 'and both survive trimming — the arm is a stroke, not a spur',
         `${kept.length} of ${br.length}`)
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A satin column covers its band (src/digitize.ts satinCover)
+// ---------------------------------------------------------------------------
+{
+  console.log('\nsatin counts as cover')
+  const doc0 = emptyDoc()
+
+  {
+    // A two-rail column states its own band: one rail out, the other back.
+    const o = newObject({
+      name: 'col', color: '#000', type: 'satin', twoRail: true,
+      paths: [[{ x: 0, y: -2 }, { x: 30, y: -2 }], [{ x: 0, y: 2 }, { x: 30, y: 2 }]],
+    })
+    const cover = satinCover(o, doc0)
+    ok(cover.length === 1, 'a two-rail column gives one region')
+    ok(travelIsHidden(cover, { x: 2, y: 0 }, { x: 28, y: 0 }),
+      'and a travel along it is hidden — it will be sewn, not jumped')
+    ok(!travelIsHidden(cover, { x: 2, y: 20 }, { x: 28, y: 20 }),
+      'while one across bare fabric is not')
+  }
+
+  {
+    // A spine satin has to be grown from its path by half its width.
+    const o = newObject({
+      name: 'spine', color: '#000', type: 'satin',
+      paths: [[{ x: 0, y: 0 }, { x: 30, y: 0 }]],
+      satin: { ...DEFAULT_SATIN(), width: 6 },
+    })
+    const cover = satinCover(o, doc0)
+    ok(cover.length === 1, 'a spine satin gives one region too')
+    ok(travelIsHidden(cover, { x: 5, y: 0 }, { x: 25, y: 0 }),
+      'a travel down the spine is hidden')
+    ok(!travelIsHidden(cover, { x: 5, y: 8 }, { x: 25, y: 8 }),
+      'and one outside the band is not — the band is the NOMINAL width, so a '
+      + 'travel is never hidden under compensation that may not be there')
+  }
+
+  // A fill is unchanged by any of this.
+  {
+    const f = newObject({
+      name: 'f', color: '#000', type: 'fill',
+      paths: [[{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }, { x: 0, y: 0 }]],
+    })
+    ok(satinCover(f, doc0).length === 0 || f.type === 'fill',
+      'satinCover is only asked about satin')
   }
 }
 
