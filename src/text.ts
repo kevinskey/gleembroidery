@@ -149,8 +149,27 @@ export function textToColumns(spec: TextSpec): { columns: LetterColumn[]; warnin
   const mask = alphaMask({ data: img.data, width: w, height: h })
   const dist = distanceTransform(mask, w, h)
   const skel = thin(mask, w, h)
-  // A spur shorter than the stroke is a bump on the outline, not a stroke.
-  const minBranch = Math.max(4, spec.sizeMm * RASTER_PX_PER_MM * 0.18)
+  // A spur shorter than the stroke is a bump on the outline, not a stroke —
+  // and the measure of that is the STROKE's width, not the font's size.
+  //
+  // This took its threshold from sizeMm, which is a different quantity and
+  // not proportional to it: how thick a face draws its stems is the
+  // difference between Verdana and Didot at the same size. At 12 mm that
+  // worked out at 2.16 mm, while Verdana's strokes are about 1.6 mm wide, so
+  // every stroke SHORTER than 2.16 mm was pruned as a spur — the arm of an
+  // r, the crossbar of an e, the finial of an a. "Bowman Scholars" came back
+  // with half its strokes missing and no word about it.
+  //
+  // The distance transform already knows the stroke width: it is twice the
+  // median distance along the skeleton.
+  let medHalf = 0
+  {
+    const ds: number[] = []
+    for (let i = 0; i < skel.length; i++) if (skel[i]) ds.push(dist[i])
+    ds.sort((a, b) => a - b)
+    medHalf = ds.length ? ds[ds.length >> 1] : 0
+  }
+  const minBranch = medHalf > 0 ? Math.max(4, medHalf * 1.2) : Math.max(4, spec.sizeMm * RASTER_PX_PER_MM * 0.18)
   const lines = pruneSpurs(traceSkeleton(skel, w, h), minBranch)
   if (!lines.length) return { columns: [], warnings: ['no strokes found — try a heavier face'] }
 
@@ -173,6 +192,7 @@ export function textToColumns(spec: TextSpec): { columns: LetterColumn[]; warnin
   }
 
   const columns: LetterColumn[] = []
+  const dropped: string[] = []
   for (const line of lines) {
     // NO JUNCTION TRIM HERE. It was added on the reasoning that a branch
     // running into a junction picks up the combined width of both strokes —
@@ -189,9 +209,18 @@ export function textToColumns(spec: TextSpec): { columns: LetterColumn[]; warnin
     // why an untested improvement had no business being applied to it.
     const smooth = smoothLine(line, 4)
     const rails = railsAlong(smooth, dist, w, h, 1 / RASTER_PX_PER_MM)
-    if (rails.left.length < 3) continue
     const midPx = smooth[Math.floor(smooth.length / 2)]
+    if (rails.left.length < 3) {
+      // SAID, not skipped. A silently dropped stroke is a letter with a
+      // piece missing, found on the garment rather than on the screen.
+      dropped.push(chAt(midPx.x))
+      continue
+    }
     columns.push({ ch: chAt(midPx.x), left: rails.left, right: rails.right })
+  }
+  if (dropped.length) {
+    const which = [...new Set(dropped)].join('')
+    warnings.push(`${dropped.length} stroke(s) could not be made into columns (in “${which}”) — too thin at this size for satin`)
   }
   if (!columns.length) warnings.push('no usable strokes — try a larger size')
   return { columns, warnings }
