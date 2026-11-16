@@ -2475,21 +2475,33 @@ export default function App() {
       (c) => ({ left: place(c.left), right: place(c.right) }),
       (c) => ({ ...c, left: [...c.left].reverse(), right: [...c.right].reverse() }),
     )
+    // A WORD IS ONE THING. Satin lettering makes a column per stroke, and
+    // leaving them loose meant "Test" was a dozen objects that had to be
+    // marqueed or select-all'd to move together. They go in a group named
+    // after the words, which is also what the sewing panel then shows.
+    const gid = `g${Date.now().toString(36)}`
     const made = ordered.map((c, i) => newObject({
       name: `${spec.content} ${c.ch}${i + 1}`,
       color: old?.color ?? PALETTE[doc.objects.length % PALETTE.length],
       type: 'satin',
       twoRail: true,
+      group: gid,
       // Only the FIRST carries the spec: it is one line of text, and copying
       // the spec onto every stroke would regenerate the whole word once per
       // stroke the next time anything changed.
       ...(i === 0 ? { text: spec } : {}),
       paths: [place(c.left), place(c.right)],
     }))
-    setDoc((d) => ({
-      ...d,
-      objects: [...d.objects.filter((o) => o.id !== id && !o.name.startsWith(`${spec.content} `)), ...made],
-    }))
+    setDoc((d) => {
+      const keep = d.objects.filter((o) => o.id !== id && !o.name.startsWith(`${spec.content} `))
+      // Groups left behind by a previous run of the same words would pile up.
+      const live = new Set(keep.map((o) => o.group).filter(Boolean) as string[])
+      return {
+        ...d,
+        groups: [...d.groups.filter((g) => live.has(g.id)), { id: gid, name: spec.content }],
+        objects: [...keep, ...made],
+      }
+    })
     setSelectedId(made[0].id)
     setSim(null)
     setNote(`${columns.length} satin stroke(s)`)
@@ -2515,15 +2527,19 @@ export default function App() {
     const targets = doc.objects.filter((o) => ids.includes(o.id) && o.paths.length)
     if (!targets.length) { setNote('select a traced shape first'); return }
     const made: EmbObject[] = []
+    const groupsMade: { id: string; name: string }[] = []
     const refused: string[] = []
     for (const o of targets) {
       const { columns, warnings } = await outlineToColumns(o.paths)
       if (!columns.length) { refused.push(`${o.name}: ${warnings[0] ?? 'no strokes found'}`); continue }
+      const gid = `g${Date.now().toString(36)}${made.length}`
+      groupsMade.push({ id: gid, name: o.name })
       columns.forEach((c, i) => made.push(newObject({
         name: `${o.name} stroke ${i + 1}`,
         color: o.color,
         type: 'satin',
         twoRail: true,
+        group: gid,
         paths: [c.left, c.right],
       })))
     }
@@ -2532,6 +2548,7 @@ export default function App() {
     history.begin()
     setDoc((d) => ({
       ...d,
+      groups: [...d.groups, ...groupsMade],
       objects: [...d.objects.map((o) => (ids2.has(o.id) ? { ...o, visible: false } : o)), ...made],
     }))
     history.end()
@@ -2564,17 +2581,20 @@ export default function App() {
     const { columns, warnings } = columnsFromRungs(ring, o.guides ?? [])
     for (const w of warnings) setNote(w)
     if (!columns.length) return
+    const rgid = `g${Date.now().toString(36)}`
     const made = columns.map((c, i) => newObject({
       name: `${o.name} section ${i + 1}`,
       color: o.color,
       type: 'satin',
       twoRail: true,
+      group: rgid,
       satin: { ...o.satin, mode: 'border' },
       paths: [c.left, c.right],
     }))
     history.begin()
     setDoc((d) => ({
       ...d,
+      groups: [...d.groups, { id: rgid, name: o.name }],
       // The fill is kept and switched off, as the traced conversion does:
       // the rungs live on it, and losing them would mean drawing them again
       // to change anything.
