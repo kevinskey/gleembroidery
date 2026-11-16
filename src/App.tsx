@@ -2570,6 +2570,38 @@ export default function App() {
     setNote(`${made.length} column(s) from ${(o.guides ?? []).length} rung(s) — the fill is kept but switched off`)
   }, [doc.objects, setDoc, history])
 
+  /**
+   * Set an object's stitch type, routing LETTERING to its own machinery.
+   *
+   * A text object's paths are glyph OUTLINES — many closed rings, counters
+   * and all — so setting its stitch type to satin asks for one column across
+   * an entire line of type, which is refused and rightly. Satin lettering is
+   * a different construction: one two-rail column per STROKE, built by
+   * applySatinText from the words rather than from the outlines.
+   *
+   * That construction already existed, reachable only from "Stitched as" in
+   * the Lettering panel. Asking for satin from the toolbar is the same
+   * request, so it gets the same answer instead of a refusal.
+   */
+  const setStitchType = useCallback((id: string, to: StitchType, mode?: SatinMode) => {
+    const o = doc.objects.find((q) => q.id === id)
+    if (!o) return
+    if (o.text && (to === 'satin' || to === 'fill')) {
+      applyText(id, { ...o.text, mode: to === 'satin' ? 'satin' : 'fill' })
+      setNote(to === 'satin'
+        ? 'Lettering sewn as satin — one column per stroke'
+        : 'Lettering sewn as a tatami fill')
+      return
+    }
+    const r = convertCheck(o, to)
+    if (!r.allowed) { setNote(r.notes[0]); return }
+    patch(id, (q) => {
+      const next = convertObject(q, to)
+      return mode ? { ...next, satin: { ...next.satin, mode } } : next
+    })
+    if (r.notes.length) setNote(r.notes.join(' · '))
+  }, [doc.objects, applyText, patch])
+
   /** Place a new line of lettering. */
   const addText = useCallback((at: Pt) => {
     const spec = DEFAULT_TEXT()
@@ -4069,18 +4101,7 @@ export default function App() {
                   && (!t.mode || (selected.satin.mode ?? 'border') === t.mode) ? ' on' : ''}`}
                 title={t.hint}
                 disabled={!selected}
-                onClick={() => {
-                  if (!selected) return
-                  // Same gate as the Properties selector: a conversion that
-                  // cannot work is refused with the reason, not half-applied.
-                  const r = convertCheck(selected, t.id)
-                  if (!r.allowed) { setNote(r.notes[0]); return }
-                  patch(selected.id, (o) => {
-                    const next = convertObject(o, t.id)
-                    return t.mode ? { ...next, satin: { ...next.satin, mode: t.mode } } : next
-                  })
-                  if (r.notes.length) setNote(r.notes.join(' · '))
-                }}
+                onClick={() => selected && setStitchType(selected.id, t.id, t.mode)}
               >
                 {t.icon}
                 <span>{t.label}</span>
@@ -4775,16 +4796,7 @@ export default function App() {
                   : selected.type}
                   onChange={(e) => {
                     const [raw, mode] = e.target.value.split(':')
-                    const to = raw as StitchType
-                    const r = convertCheck(selected, to)
-                    if (!r.allowed) { setNote(r.notes[0]); return }
-                    patch(selected.id, (o) => {
-                      const next = convertObject(o, to)
-                      return mode
-                        ? { ...next, satin: { ...next.satin, mode: mode as SatinMode } }
-                        : next
-                    })
-                    if (r.notes.length) setNote(r.notes.join(' · '))
+                    setStitchType(selected.id, raw as StitchType, mode as SatinMode | undefined)
                   }}>
                   <option value="run">Run — single line</option>
                   <option value="bean">Bean — triple-pass line</option>
