@@ -2488,13 +2488,13 @@ export default function App() {
    * must not cost the artwork — switch the columns off and the fill back on
    * and you are where you started.
    */
-  const outlineToSatin = useCallback((ids: string[]) => {
+  const outlineToSatin = useCallback(async (ids: string[]) => {
     const targets = doc.objects.filter((o) => ids.includes(o.id) && o.paths.length)
     if (!targets.length) { setNote('select a traced shape first'); return }
     const made: EmbObject[] = []
     const refused: string[] = []
     for (const o of targets) {
-      const { columns, warnings } = outlineToColumns(o.paths)
+      const { columns, warnings } = await outlineToColumns(o.paths)
       if (!columns.length) { refused.push(`${o.name}: ${warnings[0] ?? 'no strokes found'}`); continue }
       columns.forEach((c, i) => made.push(newObject({
         name: `${o.name} stroke ${i + 1}`,
@@ -3655,7 +3655,7 @@ export default function App() {
               Fill + rungs → satin columns
             </MenuItem>
             <MenuItem disabled={!selectedObjs.length}
-              onClick={() => outlineToSatin(selectedObjs.map((o) => o.id))}
+              onClick={() => { void outlineToSatin(selectedObjs.map((o) => o.id)) }}
               hint="Automatic, and only good on bold simple strokes — a letter's junctions defeat it. Prefer rungs above for lettering">
               Traced shape → satin columns (automatic)
             </MenuItem>

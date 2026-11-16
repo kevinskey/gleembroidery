@@ -55,6 +55,7 @@ import { crossStitchFill, crossStitchRun } from '../src/decorative'
 import { DEFAULT_LACE, laceCheck, laceStitches } from '../src/lace'
 import { convertCheck, convertObject } from '../src/convert'
 import { columnsFromRungs } from '../src/rungs'
+import { axisBranches, railsFromAxis, trimAxis } from '../src/mat'
 import { blanketEdge, eStitchEdge, zigzagEdge } from '../src/runstyles'
 import { longestStep, runStyleStitches, shortestStep } from '../src/runstyles'
 import { manualPenetrations, manualStitches, manualWarnings } from '../src/manual'
@@ -5917,6 +5918,62 @@ console.log('\n# satin density means what the trade means by it')
   const away = columnsFromRungs(strip, [rung(-20), rung(20), { a: { x: 50, y: 20 }, b: { x: 60, y: 22 } }])
   ok(away.warnings.some((w) => w.includes('did not cross')),
     'a guide outside the shape is still reported as a bad rung')
+}
+
+// ---------------------------------------------------------------------------
+// Exact medial axis (src/mat.ts) — and why it replaced raster thinning
+// ---------------------------------------------------------------------------
+{
+  console.log('\nexact medial axis')
+  const rect = (x: number, y: number, w: number, h: number): Pt[] =>
+    [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }, { x, y }]
+  const T: Pt[] = [
+    { x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 8 }, { x: 24, y: 8 },
+    { x: 24, y: 40 }, { x: 16, y: 40 }, { x: 16, y: 8 }, { x: 0, y: 8 }, { x: 0, y: 0 },
+  ]
+
+  {
+    const br = await axisBranches([rect(0, 0, 40, 8)])
+    ok(!!br && br.length === 1, 'a plain bar has one axis branch', `${br?.length}`)
+    const radii = br![0].map((a) => a.r)
+    ok(Math.abs(Math.min(...radii) - 4) < 1e-6 && Math.abs(Math.max(...radii) - 4) < 1e-6,
+      'with the EXACT half-width, not a sampled one',
+      `r ${Math.min(...radii).toFixed(4)}–${Math.max(...radii).toFixed(4)} on an 8 mm bar`)
+    const { left, right } = railsFromAxis(br![0])
+    const w = left.map((p, i) => Math.hypot(p.x - right[i].x, p.y - right[i].y))
+    ok(Math.abs(Math.max(...w) - 8) < 1e-6, 'so the rails sit ON the outline', `${Math.max(...w).toFixed(4)} mm`)
+    ok(left.every((p) => p.y <= 0.001) !== right.every((p) => p.y <= 0.001),
+      'and on opposite sides of it')
+  }
+
+  {
+    // THE CASE THAT DECIDED IT. getBranches() looked like the right call and
+    // returns sparse endpoints: a bar came back as one node and this T lost
+    // its stem. The edge traversal finds all three strokes.
+    const br = await axisBranches([T])
+    ok(!!br && br.length === 3, 'a T gives three branches — both arms AND the stem', `${br?.length}`)
+    const highest = Math.max(...br!.flat().map((a) => a.r))
+    ok(Math.abs(highest - 5) < 1e-6,
+      'and the junction circle is measured exactly, not inferred from a bulge',
+      `r=${highest.toFixed(4)} where the strokes meet`)
+  }
+
+  {
+    // Trimming uses those exact radii.
+    const br = (await axisBranches([T]))!
+    const trimmed = br.map((b) => trimAxis(b)).filter(Boolean) as (typeof br)
+    ok(trimmed.length >= 2, 'the strokes survive trimming', `${trimmed.length} of ${br.length}`)
+    for (const t of trimmed) {
+      const radii = t.map((a) => a.r)
+      ok(Math.max(...radii) < 5, 'and none still carries the junction width',
+        `max r ${Math.max(...radii).toFixed(2)}`)
+    }
+  }
+
+  // A shape it cannot handle returns null so the caller can fall back,
+  // rather than losing the object.
+  ok((await axisBranches([])) === null, 'no outline returns null')
+  ok((await axisBranches([[{ x: 0, y: 0 }, { x: 1, y: 0 }]])) === null, 'and so does a degenerate one')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

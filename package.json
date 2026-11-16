@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Embroidery digitizing \u2014 vector art in, machine stitch files out",
+  "description": "Embroidery digitizing — vector art in, machine stitch files out",
   "author": "T-Shirt Brothers",
   "scripts": {
     "dev": "vite",
@@ -15,6 +15,7 @@
     "verify:independent": "tsx scripts/fixtures.mts && python3 scripts/independent-check.py"
   },
   "dependencies": {
+    "flo-mat": "^5.0.7",
     "opentype.js": "^2.0.0",
     "polygon-clipping": "^0.15.7",
     "react": "^19.2.8",
