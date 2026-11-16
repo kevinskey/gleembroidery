@@ -2619,24 +2619,56 @@ export default function App() {
    * the Lettering panel. Asking for satin from the toolbar is the same
    * request, so it gets the same answer instead of a refusal.
    */
-  const setStitchType = useCallback((id: string, to: StitchType, mode?: SatinMode) => {
-    const o = doc.objects.find((q) => q.id === id)
-    if (!o) return
-    if (o.text && (to === 'satin' || to === 'fill')) {
-      applyText(id, { ...o.text, mode: to === 'satin' ? 'satin' : 'fill' })
-      setNote(to === 'satin'
-        ? 'Lettering sewn as satin — one column per stroke'
-        : 'Lettering sewn as a tatami fill')
+  /**
+   * Set the stitch type of EVERY object in a selection, as ONE operation.
+   *
+   * This was a per-object call made in a loop, and that is broken in two
+   * ways once a word is a group of strokes. A loop over N objects reads a
+   * doc that does not update between iterations, so every call after the
+   * first works from stale state. And the FIRST stroke of a line of
+   * lettering is the one carrying the text spec, so it regenerates the whole
+   * word and deletes its siblings — after which the rest of the loop fires
+   * patches at ids that no longer exist, and each one overwrites the message
+   * explaining what happened. Pressing Fill on a word looked like a dead
+   * button for exactly that reason.
+   */
+  const setStitchType = useCallback((ids: string[], to: StitchType, mode?: SatinMode) => {
+    const objs = doc.objects.filter((o) => ids.includes(o.id))
+    if (!objs.length) return
+
+    // Lettering is regenerated from its words, not converted stroke by
+    // stroke — and one object in the group speaks for all of them.
+    const lettering = objs.find((o) => o.text)
+    if (lettering?.text && (to === 'satin' || to === 'fill')) {
+      applyText(lettering.id, { ...lettering.text, mode: to === 'satin' ? 'satin' : 'fill' })
       return
     }
-    const r = convertCheck(o, to)
-    if (!r.allowed) { setNote(r.notes[0]); return }
-    patch(id, (q) => {
-      const next = convertObject(q, to)
-      return mode ? { ...next, satin: { ...next.satin, mode } } : next
-    })
-    if (r.notes.length) setNote(r.notes.join(' · '))
-  }, [doc.objects, applyText, patch])
+
+    const notes: string[] = []
+    const refused: string[] = []
+    const allowed = new Map<string, true>()
+    for (const o of objs) {
+      const r = convertCheck(o, to)
+      if (!r.allowed) { refused.push(`${o.name}: ${r.notes[0]}`); continue }
+      allowed.set(o.id, true)
+      for (const n of r.notes) if (!notes.includes(n)) notes.push(n)
+    }
+    if (!allowed.size) { setNote(refused[0] ?? 'nothing could take that stitch type'); return }
+
+    setDoc((d) => ({
+      ...d,
+      objects: d.objects.map((o) => {
+        if (!allowed.has(o.id)) return o
+        const next = convertObject(o, to)
+        return mode ? { ...next, satin: { ...next.satin, mode } } : next
+      }),
+    }))
+    setSim(null)
+    const changed = `${allowed.size} object${allowed.size === 1 ? '' : 's'}`
+    setNote(refused.length
+      ? `${changed} changed; ${refused.length} refused — ${refused[0]}`
+      : notes.length ? `${changed} · ${notes.join(' · ')}` : `${changed} changed`)
+  }, [doc.objects, applyText, setDoc])
 
   /** Place a new line of lettering. */
   const addText = useCallback((at: Pt) => {
@@ -4137,12 +4169,7 @@ export default function App() {
                   && (!t.mode || (selected.satin.mode ?? 'border') === t.mode) ? ' on' : ''}`}
                 title={selectedObjs.length > 1 ? `${t.hint} — applies to all ${selectedObjs.length} selected` : t.hint}
                 disabled={!selectedObjs.length}
-                onClick={() => {
-                  // EVERY selected object, not just the first. A word is a
-                  // group of a dozen strokes now, and changing one of them
-                  // looked like the button did nothing.
-                  for (const o of selectedObjs) setStitchType(o.id, t.id, t.mode)
-                }}
+                onClick={() => setStitchType(selectedObjs.map((o) => o.id), t.id, t.mode)}
               >
                 {t.icon}
                 <span>{t.label}</span>
@@ -4837,7 +4864,7 @@ export default function App() {
                   : selected.type}
                   onChange={(e) => {
                     const [raw, mode] = e.target.value.split(':')
-                    setStitchType(selected.id, raw as StitchType, mode as SatinMode | undefined)
+                    setStitchType(selectedObjs.map((o) => o.id), raw as StitchType, mode as SatinMode | undefined)
                   }}>
                   <option value="run">Run — single line</option>
                   <option value="bean">Bean — triple-pass line</option>
