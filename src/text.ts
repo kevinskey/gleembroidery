@@ -26,6 +26,7 @@
 import { alphaMask, contoursToPaths, maskContours, type Raster } from './trace'
 import { distanceTransform, pruneSpurs, railsAlong, smoothLine, thin, traceSkeleton, trimAtJunctions } from './skeleton'
 import { axisBranches, railsFromAxis, trimAxis } from './mat'
+import { MIN_SATIN_MM } from './satin'
 import type { Pt } from './model'
 
 export interface TextSpec {
@@ -860,8 +861,34 @@ export async function textToColumnsExact(
   if (!columns.length) return null
 
   const warnings = [...out.warnings]
+
+  // MEASURE the strokes against the satin floor, and say what size would
+  // clear it. "Too thin for satin" leaves the digitizer to guess how much
+  // bigger, and guessing is why a word comes back as ghost outlines twice
+  // in a row: the columns are generated, the engine refuses them one by
+  // one, and all that reaches the screen is the handful that passed.
+  const widths: number[] = []
+  const tooThin: string[] = []
+  for (const c of columns) {
+    let narrowest = Infinity
+    for (let i = 0; i < Math.min(c.left.length, c.right.length); i++) {
+      narrowest = Math.min(narrowest, Math.hypot(c.left[i].x - c.right[i].x, c.left[i].y - c.right[i].y))
+    }
+    if (!Number.isFinite(narrowest)) continue
+    widths.push(narrowest)
+    if (narrowest < MIN_SATIN_MM) tooThin.push(c.ch)
+  }
+  if (tooThin.length) {
+    const thinnest = Math.min(...widths)
+    // Cap height scales the strokes with it, so the factor is the same.
+    const needed = Math.ceil((spec.sizeMm * MIN_SATIN_MM) / Math.max(0.01, thinnest))
+    warnings.push(
+      `${tooThin.length} stroke(s) are only ${thinnest.toFixed(2)} mm wide (in “${[...new Set(tooThin)].join('')}”) `
+      + `and satin needs ${MIN_SATIN_MM} mm — they will NOT sew. About ${needed} mm cap height would clear it, `
+      + `or use a heavier face, or sew this as a fill`)
+  }
   if (thin.length) {
-    warnings.push(`${thin.length} stroke(s) were too thin for satin (in “${[...new Set(thin)].join('')}”) — a heavier face or a larger size`)
+    warnings.push(`${thin.length} stroke(s) could not be railed at all (in “${[...new Set(thin)].join('')}”)`)
   }
   return { columns, warnings }
 }
