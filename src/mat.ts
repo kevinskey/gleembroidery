@@ -37,23 +37,44 @@ export interface AxisPoint { p: Pt; r: number }
 /** How finely a branch is resampled along its length, mm. */
 const STEP_MM = 0.6
 
+/** Twice the signed area; its sign is the winding direction. */
+function signedArea(ring: Pt[]): number {
+  let a = 0
+  for (let i = 0; i < ring.length; i++) {
+    const p = ring[i], q = ring[(i + 1) % ring.length]
+    a += p.x * q.y - q.x * p.y
+  }
+  return a
+}
+
 function toLoops(paths: Pt[][]): number[][][][] {
-  // loop -> bezier -> point -> coordinate. flo-mat takes a LIST of loops, so
-  // a shape with a counter passes both rings and keeps its hole.
+  // loop -> bezier -> point -> coordinate.
+  //
+  // A HOLE MUST BE WOUND THE OTHER WAY. Handed an outer ring and a counter
+  // both running the same direction, flo-mat returns a mat with an EMPTY
+  // traversal — no error, no circles, nothing — so every letter with a
+  // counter silently produced no axis at all. o, a, e, b, d, g, p, q: most
+  // of a word. The outer ring is made positive and every later ring
+  // negative, which is the outer/holes order toRegions already produces.
   const loops: number[][][][] = []
+  const rings: Pt[][] = []
   for (const path of paths) {
     const ring = path.length > 2
       && Math.hypot(path[0].x - path[path.length - 1].x, path[0].y - path[path.length - 1].y) < 1e-9
       ? path.slice(0, -1) : path.slice()
-    if (ring.length < 3) continue
+    if (ring.length >= 3) rings.push(ring)
+  }
+  rings.forEach((ring, idx) => {
+    const want = idx === 0 ? 1 : -1
+    const oriented = Math.sign(signedArea(ring)) === want ? ring : [...ring].reverse()
     const segs: number[][][] = []
-    for (let i = 0; i < ring.length; i++) {
-      const a = ring[i], b = ring[(i + 1) % ring.length]
+    for (let i = 0; i < oriented.length; i++) {
+      const a = oriented[i], b = oriented[(i + 1) % oriented.length]
       if (Math.hypot(b.x - a.x, b.y - a.y) < 1e-9) continue
       segs.push([[a.x, a.y], [b.x, b.y]])
     }
     if (segs.length >= 3) loops.push(segs)
-  }
+  })
   return loops
 }
 
@@ -143,10 +164,16 @@ export async function axisBranches(paths: Pt[][]): Promise<AxisPoint[][] | null>
       if (seen.has(edge)) return
       const run: AxisPoint[] = [node.get(from)!]
       let prev = from, cur = to
-      for (;;) {
+      // BOUNDED. The axis of a ring — an O, an o, the bowl of a b — is a
+      // CYCLE: every node has degree 2 and the walk never meets an end. This
+      // ran until the array could not grow, threw RangeError, and the catch
+      // reported it as a shape the library could not handle. It was a shape
+      // this function could not walk.
+      for (let step = 0; step <= node.size; step++) {
         seen.add(`${prev}|${cur}`)
         seen.add(`${cur}|${prev}`)
         run.push(node.get(cur)!)
+        if (cur === from) break // closed the loop
         if (deg(cur) !== 2) break
         const next = [...(adj.get(cur) ?? [])].find((k) => k !== prev)
         if (!next) break

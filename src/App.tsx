@@ -43,7 +43,7 @@ import {
 } from './stitchedit'
 import { DEFAULT_TOLERANCE, traceRegionAt, type Raster } from './trace'
 import {
-  DEFAULT_TEXT, outlineToColumns, textToColumns, textToOutlines,
+  DEFAULT_TEXT, outlineToColumns, textToColumns, textToColumnsExact, textToOutlines,
   type LetterNudge, type LetterOutline, type TextSpec,
 } from './text'
 import {
@@ -2397,7 +2397,7 @@ export default function App() {
       })
       return
     }
-    if (spec.mode === 'satin') { applySatinText(id, spec, at); return }
+    if (spec.mode === 'satin') { void applySatinText(id, spec, at); return }
     const out = textToOutlines(spec)
     for (const w of out.warnings) setNote(w)
     if (!out.paths.length) return
@@ -2444,8 +2444,14 @@ export default function App() {
    * goes with which. Separate objects also let a single stroke be re-angled
    * or re-densified without touching the rest of the word.
    */
-  const applySatinText = useCallback((id: string, spec: TextSpec, at?: Pt) => {
-    const { columns, warnings } = textToColumns(spec)
+  const applySatinText = useCallback(async (id: string, spec: TextSpec, at?: Pt) => {
+    // EXACT AXIS FIRST, raster as the fallback. The exact route is tested
+    // headlessly and the raster one cannot be, which is the whole argument
+    // for preferring it — but the raster one never refuses, and a face it
+    // can make something of is better than a refusal.
+    const exact = await textToColumnsExact(spec)
+    const { columns, warnings } = exact ?? textToColumns(spec)
+    if (!exact) warnings.push('exact outline fitting did not take on this face — traced instead')
     for (const w of warnings) setNote(w)
     if (!columns.length) return
     // Columns come out in canvas mm; centre them like the outline path does.

@@ -6047,5 +6047,71 @@ console.log('\n# satin density means what the trade means by it')
     'one column needs no ordering')
 }
 
+// ---------------------------------------------------------------------------
+// Letter-shaped geometry through the exact axis
+//
+// The raster lettering path cannot be reached by this suite — it rasterises
+// text, so it needs a browser — and three faults in one day came out of
+// that. These are the LETTER SHAPES, run through the axis that lettering now
+// uses, headlessly.
+// ---------------------------------------------------------------------------
+{
+  console.log('\nletter shapes on the exact axis')
+  const ring = (cx: number, cy: number, rx: number, ry: number, n = 64): Pt[] =>
+    Array.from({ length: n + 1 }, (_, i) => {
+      const a = (i / n) * Math.PI * 2
+      return { x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) }
+    })
+
+  {
+    // An O: a ring 4 mm thick. Its axis is a closed loop with NO ends, which
+    // is the case a walk that starts from a leaf never reaches.
+    const O = [ring(0, 0, 12, 12), ring(0, 0, 8, 8)]
+    const br = await axisBranches(O)
+    ok(!!br && br.length >= 1, 'a closed ring has an axis at all — a loop with no ends',
+      `${br?.length ?? 0} branch(es)`)
+    if (br) {
+      const radii = br.flat().map((a) => a.r)
+      ok(Math.abs(Math.max(...radii) - 2) < 0.25,
+        'and the half-width is the ring thickness, not something near it',
+        `r ${Math.max(...radii).toFixed(2)} on a 4 mm ring`)
+      const d = br.flat().map((a) => Math.hypot(a.p.x, a.p.y))
+      ok(Math.abs(Math.max(...d) - 10) < 0.3 && Math.abs(Math.min(...d) - 10) < 0.3,
+        'with the axis down the middle of the ring', `radius ${Math.min(...d).toFixed(2)}–${Math.max(...d).toFixed(2)}`)
+    }
+  }
+
+  {
+    // An I: one plain stem, the simplest letter there is.
+    const I: Pt[] = [{ x: 0, y: 0 }, { x: 3, y: 0 }, { x: 3, y: 20 }, { x: 0, y: 20 }, { x: 0, y: 0 }]
+    const br = await axisBranches([I])
+    ok(!!br && br.length === 1, 'a stem is one branch', `${br?.length}`)
+    const { left, right } = railsFromAxis(br![0])
+    const w = left.map((p, i) => Math.hypot(p.x - right[i].x, p.y - right[i].y))
+    ok(Math.abs(Math.max(...w) - 3) < 1e-6, 'railed at exactly its own width', `${Math.max(...w).toFixed(4)} mm`)
+  }
+
+  {
+    // THE CASE THAT BROKE "Bowman Scholars": a short arm on a stem, like the
+    // arm of an r. The raster route pruned it because its threshold came
+    // from the font SIZE, and a stroke shorter than that vanished.
+    // A real junction: the arm leaves the stem PARTWAY up, so the axis has
+    // a branch point. My first fixture put the arm at the top corner, which
+    // is an L — one stroke turning a corner, and one axis path is the right
+    // answer for it.
+    const r: Pt[] = [
+      { x: 0, y: 0 }, { x: 3, y: 0 }, { x: 3, y: 6 }, { x: 9, y: 6 },
+      { x: 9, y: 9 }, { x: 3, y: 9 }, { x: 3, y: 16 }, { x: 0, y: 16 }, { x: 0, y: 0 },
+    ]
+    const br = await axisBranches([r])
+    ok(!!br && br.length >= 2, 'a stem with a short arm keeps BOTH', `${br?.length ?? 0} branches`)
+    if (br) {
+      const kept = br.map((b) => trimAxis(b)).filter(Boolean)
+      ok(kept.length >= 2, 'and both survive trimming — the arm is a stroke, not a spur',
+        `${kept.length} of ${br.length}`)
+    }
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

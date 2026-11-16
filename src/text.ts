@@ -803,3 +803,58 @@ export async function outlineToColumns(
   }
   return { columns, warnings }
 }
+
+/**
+ * Lettering as satin, from the EXACT medial axis.
+ *
+ * textToColumns does this by rasterising the word at 10 px/mm, thinning it
+ * to a skeleton and reading a distance transform — every step of which is an
+ * approximation, and none of which the suite can reach, because it needs a
+ * browser. Three faults in one day came out of that: a junction trim whose
+ * length floor discarded most of a word, a spur threshold measured against
+ * the font SIZE rather than the stroke width, and a stroke that could not be
+ * railed vanishing on a bare `continue`.
+ *
+ * The outlines still come from the rasteriser — browsers do not expose glyph
+ * curves — but from there this is exact: flo-mat computes the medial axis of
+ * the outline itself, so the half-width is the inscribed circle's radius and
+ * a junction is a branch point rather than a bulge. And `axisBranches`,
+ * `trimAxis` and `railsFromAxis` are all DOM-free, so the part that kept
+ * going wrong is the part that is now tested.
+ *
+ * Per LETTER, not per word: the MAT of one glyph is a smaller problem, a
+ * letter it cannot handle does not take the word down with it, and the
+ * attribution comes free from outlines that are already grouped.
+ */
+export async function textToColumnsExact(
+  spec: TextSpec,
+): Promise<{ columns: LetterColumn[]; warnings: string[] } | null> {
+  const out = textToOutlines(spec)
+  if (!out.letters.length) return null
+  const columns: LetterColumn[] = []
+  const thin: string[] = []
+  let anyAxis = false
+
+  for (const letter of out.letters) {
+    const branches = await axisBranches(letter.paths)
+    if (!branches) continue
+    anyAxis = true
+    for (const branch of branches) {
+      const kept = trimAxis(branch)
+      if (!kept) continue
+      const rails = railsFromAxis(kept)
+      if (rails.left.length < 3) { thin.push(letter.ch); continue }
+      columns.push({ ch: letter.ch, left: rails.left, right: rails.right })
+    }
+  }
+
+  // Nothing at all came back: let the caller fall back to the raster route
+  // rather than lose the lettering.
+  if (!anyAxis || !columns.length) return null
+
+  const warnings = [...out.warnings]
+  if (thin.length) {
+    warnings.push(`${thin.length} stroke(s) were too thin for satin (in “${[...new Set(thin)].join('')}”) — a heavier face or a larger size`)
+  }
+  return { columns, warnings }
+}
