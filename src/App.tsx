@@ -279,7 +279,7 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
     ),
   },
   {
-    id: 'wand', label: 'Wand', hint: 'Click a colour in the backdrop image to trace it into a shape (W)',
+    id: 'wand', label: 'Wand', hint: 'Click a colour in the backdrop image on the canvas to trace it into a shape. Load one with File ▸ Backdrop image… (W)',
     icon: (
       <svg width="22" height="16" viewBox="0 0 22 16">
         <path d="M3 14L13 4" stroke="currentColor" strokeWidth="1.6" fill="none" />
@@ -289,7 +289,7 @@ const TOOLS: { id: Tool; label: string; hint: string; icon: ReactElement }[] = [
     ),
   },
   {
-    id: 'text', label: 'Text', hint: 'Click to set a line of lettering; edit the words, face and size in the Object tab (T)',
+    id: 'text', label: 'Text', hint: 'Click anywhere on the canvas to place a line of lettering, then edit the words, face and size here in the Object tab (T)',
     icon: (
       <svg width="22" height="16" viewBox="0 0 22 16">
         <path d="M3 3.5h16M11 3.5V13" stroke="currentColor" strokeWidth="1.7" fill="none" />
@@ -4499,7 +4499,18 @@ export default function App() {
             </>
           )}
           {inspector === 'object' && !selected && (
-            <div className="empty">Select an object to set its stitch type and parameters.</div>
+            /* WHAT THE ACTIVE TOOL WANTS, where the digitizer is looking.
+               Every tool's instruction lived in its toolbar TOOLTIP, which
+               has to be hovered to be found: pick Text, look at the panel,
+               and it said "select an object" while the thing you needed was
+               "click the canvas". Tooltips are for confirming a guess, not
+               for learning what a tool does. */
+            <div className="empty">
+              {tool !== 'select'
+                ? (TOOLS.find((t) => t.id === tool)?.hint
+                  ?? 'Select an object to set its stitch type and parameters.')
+                : 'Select an object to set its stitch type and parameters.'}
+            </div>
           )}
           {inspector === 'object' && selected && (
             <>
