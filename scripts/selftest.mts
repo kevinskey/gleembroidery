@@ -5819,7 +5819,13 @@ console.log('\n# satin density means what the trade means by it')
     // no stroke. Rails along it collapse under any satin floor.
     const flat = new Float32Array(W * H).fill(5)
     ok(trimAtJunctions(along(6), flat, W, H) === null,
-      'a stub shorter than twice its own width is dropped, not sewn')
+      'a stub shorter than its own width is dropped, not sewn')
+    // THE FLOOR MUST NOT BE GREEDY. It asked for several widths, and a
+    // 12 mm letter's strokes are a few millimetres long against a 0.9 mm
+    // half-width — so a whole word was discarded as junction leftovers.
+    ok(trimAtJunctions(along(12), flat, W, H) !== null,
+      'a stroke a little longer than its width is kept, not thrown away',
+      '12 px long, 10 px wide')
     ok(trimAtJunctions(along(40), flat, W, H) !== null,
       'and a branch long enough to be a stroke is kept')
   }

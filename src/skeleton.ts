@@ -259,7 +259,7 @@ export function railsAlong(
  */
 export function trimAtJunctions(
   line: Pt[], dist: Float32Array, w: number, h: number,
-  balloon = 1.55, minLengthFactor = 2.2,
+  balloon = 1.55, minLengthFactor = 1,
 ): Pt[] | null {
   if (line.length < 3) return null
   const sample = (p: Pt) => {
@@ -280,8 +280,11 @@ export function trimAtJunctions(
   const kept = line.slice(lo, hi + 1)
   if (kept.length < 3) return null
 
-  // Shorter than about twice its own width is not a stroke, it is what was
-  // left over inside a junction.
+  // Shorter than its own WIDTH is not a stroke, it is what was left over
+  // inside a junction. The floor was several widths and that was far too
+  // greedy: at 12 mm cap height a letter's strokes are a few millimetres
+  // long against a 0.9 mm half-width, so a whole word was thrown away as
+  // leftovers. One width is the honest line.
   let len = 0
   for (let i = 1; i < kept.length; i++) len += Math.hypot(kept[i].x - kept[i - 1].x, kept[i].y - kept[i - 1].y)
   if (len < med * 2 * minLengthFactor) return null

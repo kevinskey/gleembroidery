@@ -174,13 +174,20 @@ export function textToColumns(spec: TextSpec): { columns: LetterColumn[]; warnin
 
   const columns: LetterColumn[] = []
   for (const line of lines) {
-    // Out of the junctions first, for the reason trimAtJunctions documents:
-    // where two strokes meet the shape is locally as thick as both, and a
-    // branch running in picks up the combined width. This is why small
-    // curved faces forked and came out ragged.
-    const branch = trimAtJunctions(line, dist, w, h)
-    if (!branch) continue
-    const smooth = smoothLine(branch, 4)
+    // NO JUNCTION TRIM HERE. It was added on the reasoning that a branch
+    // running into a junction picks up the combined width of both strokes —
+    // true, and it wrecked real lettering. Its length floor asks a branch to
+    // be a few multiples of its own half-width, and at 12 mm cap height a
+    // letter's strokes are ~0.9 mm half-width and a few millimetres long, so
+    // most of a word was discarded as junction leftovers. "Bowman Scholars"
+    // came back as a smear.
+    //
+    // The same reasoning lives in mat.ts, where it is applied to an EXACT
+    // axis with a floor of one stroke width rather than several, and where
+    // it can be tested headlessly. This path rasterises text, so it needs a
+    // browser and nothing here is covered by the suite — which is exactly
+    // why an untested improvement had no business being applied to it.
+    const smooth = smoothLine(line, 4)
     const rails = railsAlong(smooth, dist, w, h, 1 / RASTER_PX_PER_MM)
     if (rails.left.length < 3) continue
     const midPx = smooth[Math.floor(smooth.length / 2)]
