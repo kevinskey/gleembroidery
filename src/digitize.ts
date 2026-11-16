@@ -13,7 +13,7 @@
 import { APPLIQUE_BORDER_LABEL, FILL_UNDERLAY_ORDER, NO_SPLIT, objectVisible, orderedUnderlay, type Doc, type EmbObject, type Pt, type TieParams } from './model'
 import { nodeFractions } from './nodes'
 import type { ColorBlock, Stitch, StitchPlan } from './stitches'
-import { dist, pathLength, resample, scanlineSpans, toRegions } from './geometry'
+import { dist, isRingPath, pathLength, resample, scanlineSpans, toRegions } from './geometry'
 import { unionSelfChecked } from './boolean'
 import { offsetPathsChecked } from './offset'
 import { edgeUnderlay, tatamiFill, zigzagUnderlay } from './fill'
@@ -507,7 +507,7 @@ function stitchObject(
       // Closed only: a patch edge wraps a cut outline, and an open path has
       // no inside to offset towards. Refused rather than half-sewn.
       for (const why of patchCheck(obj.patch)) warnings.push(`${obj.name}: ${why}`)
-      const closed = obj.paths.filter((q) => q.length > 2 && dist(q[0], q[q.length - 1]) < 0.05)
+      const closed = obj.paths.filter(isRingPath)
       if (!closed.length) {
         warnings.push(`${obj.name}: NOT STITCHED — a patch edge needs a closed outline`)
         break
@@ -572,7 +572,10 @@ function stitchObject(
       // rectangle came back with a band round its edge, which is the border
       // tool's job and left the middle bare.
       if (obj.satin.mode === 'column') {
-        const closed = obj.paths.filter((p) => p.length > 2 && dist(p[0], p[p.length - 1]) < 0.05)
+        // Rings, however they are spelled — see isRingPath. Testing for a
+        // duplicated final point sent traced outlines to the border loop,
+        // which sewed a band round the edge and called it a column.
+        const closed = obj.paths.filter(isRingPath)
 
         // A SHAPE WITH A COUNTER IS NOT A COLUMN. A column is a band with
         // two sides; a letter is several of them meeting at junctions, and
@@ -584,7 +587,15 @@ function stitchObject(
         //
         // Refused, with the tool that does do it. One column per stroke,
         // clicked out alternate sides, is how a letter is digitized.
-        const regions = toRegions(closed)
+        // Counter detection runs on EVERY path, not just the ones that
+        // repeat their first point. A ring is a ring whether or not it is
+        // spelled with a closing duplicate: the wand closes its contours
+        // (App.tsx), lettering outlines do not, and toRegions normalises
+        // both. Testing `closed` here meant a lettering D skipped this
+        // refusal entirely and fell through to the border loop below —
+        // which traced a band round the outside and round the counter and
+        // called it a column, with no warning that it had done so.
+        const regions = toRegions(obj.paths.filter((p) => p.length > 2))
         const withHoles = regions.filter((r) => r.length > 1).length
         if (withHoles) {
           warnings.push(

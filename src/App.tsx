@@ -1795,7 +1795,14 @@ export default function App() {
     const made: EmbObject[] = regions.map((paths, i) => ({
       ...keeper,
       id: i === 0 ? keeper.id : newObject().id,
-      paths,
+      // Rings come back from toRegions NORMALISED — it pops the duplicated
+      // first point. The document's own convention is the opposite: a closed
+      // path repeats it, which is what the pen tool and the wand both store
+      // and what every "is this closed?" test downstream looks for. Handing
+      // the normalised ring straight to an object made Combine holes emit a
+      // shape that read as OPEN, so Fill, Appliqué, Patch, Lace and Knock
+      // all refused it and the Column tool sewed a border round the edge.
+      paths: paths.map(close),
       shapes: undefined,
       // Guides are positioned against the keeper's own outline, so they are
       // only still true for the object that kept its identity.
@@ -4559,6 +4566,28 @@ export default function App() {
                       id="gw-font" className="bigtext"
                       value={knownFamily(selected.text.family) ? selected.text.family : OTHER_FAMILY}
                       onChange={(e) => pickFamily(selected.id, selected.text!, e.target.value)}
+                      // Arrow keys STEP THE FACE, with the artboard following
+                      // each press. macOS opens the popup on an arrow instead
+                      // of moving the value, so the one way to audition a font
+                      // was to open the list, pick one, look, and open it
+                      // again — and the list covers the lettering while it is
+                      // open. Trying faces against the actual words is the
+                      // whole job, so it happens on the artboard, not in a
+                      // menu. The typed-font escape hatch is skipped: it is
+                      // not a face to preview.
+                      onKeyDown={(e) => {
+                        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+                        e.preventDefault()
+                        const cur = ALL_FAMILIES.indexOf(selected.text!.family)
+                        const step = e.key === 'ArrowDown' ? 1 : -1
+                        // An unknown (typed) face is not in the list, so a
+                        // first press enters it at whichever end it came from.
+                        const next = cur < 0
+                          ? (step === 1 ? 0 : ALL_FAMILIES.length - 1)
+                          : cur + step
+                        if (next < 0 || next >= ALL_FAMILIES.length) return
+                        pickFamily(selected.id, selected.text!, ALL_FAMILIES[next])
+                      }}
                     >
                       {FONT_GROUPS.map((g) => (
                         <optgroup key={g.label} label={g.label}>

@@ -16,7 +16,7 @@
 import { booleanPaths, type BoolOp } from './boolean'
 import { offsetPathsChecked } from './offset'
 import { simplify } from './vector'
-import { dist, isClosed, pathLength, segDist, toRegions } from './geometry'
+import { close, dist, isClosed, pathLength, segDist, toRegions } from './geometry'
 import { flattenShape, type Shape } from './nodes'
 import type { Pt } from './model'
 
@@ -399,7 +399,11 @@ export function combineHoles(objects: readonly Pt[][][]): HoleResult {
   const warnings = holes === 0
     ? ['none of these outlines is inside another, so nothing became a hole']
     : []
-  return { regions, errors: [], warnings }
+  // toRegions pops the duplicated first point; the document's convention is
+  // that a closed path keeps it, and every "is this closed?" test downstream
+  // reads it. Returning the normalised ring made the combined shape read as
+  // OPEN — Fill, Appliqué, Patch, Lace and Knock all refused it.
+  return { regions: regions.map((r) => r.map(close)), errors: [], warnings }
 }
 
 /**
@@ -415,5 +419,5 @@ export function separateHoles(objects: readonly Pt[][][]): HoleResult {
   if (rings.length === objects.length) {
     return { regions: [], errors: ['these outlines have no holes in them already'], warnings: [] }
   }
-  return { regions: rings.map((r) => [r]), errors: [], warnings: [] }
+  return { regions: rings.map((r) => [close(r)]), errors: [], warnings: [] }
 }

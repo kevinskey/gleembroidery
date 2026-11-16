@@ -22,6 +22,32 @@ export function close(pts: Pt[]): Pt[] {
   return isClosed(pts) ? pts : [...pts, { ...pts[0] }]
 }
 
+/**
+ * Smallest area that counts as enclosing something, mm². Below any shape
+ * that could hold stitches, but above the numerically-zero area of an open
+ * path that doubles back on itself.
+ */
+export const RING_AREA_EPS_MM2 = 0.1
+
+/**
+ * Is this path a RING — does it enclose an area?
+ *
+ * Closure is a property of the geometry, not of how it was written down.
+ * The shape tools spell it with a duplicated final point; traced and
+ * imported contours do not. Code that tested only for the duplicate read
+ * a perfectly good traced outline as open, which refused Fill, Appliqué,
+ * Patch, Lace and Knock on it and sent a Column to the border loop.
+ *
+ * This is the same view the fill engine takes — toRegions closes a ring
+ * implicitly — so callers now agree with what would actually sew.
+ */
+export function isRingPath(p: readonly Pt[]): boolean {
+  if (p.length < 3) return false
+  const a = p[0], b = p[p.length - 1]
+  if (Math.hypot(b.x - a.x, b.y - a.y) < GEOM_EPS_MM) return true
+  return Math.abs(ringArea(p as Pt[])) > RING_AREA_EPS_MM2
+}
+
 export function ringArea(ring: Pt[]): number {
   let a = 0
   for (let i = 0; i < ring.length; i++) {

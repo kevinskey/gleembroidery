@@ -20,7 +20,20 @@ const NEEDS_CLOSED: StitchType[] = ['fill', 'applique', 'knockdown', 'lace', 'pa
 
 const CLOSE_EPS_MM = 0.05
 
+/**
+ * Does this object enclose an area something can be sewn into?
+ *
+ * A node-backed shape carries the answer outright, so it is believed first:
+ * a closed Shape whose flattened path does not repeat its first point is
+ * still closed, and refusing it made Fill, Appliqué, Patch, Lace and Knock
+ * look like dead buttons.
+ *
+ * Paths with no shape behind them fall back to the endpoint test. It cannot
+ * be loosened to "encloses an area" — a three-point open stroke encloses an
+ * area too, and silently filling one is worse than refusing it.
+ */
 function hasClosedPath(obj: EmbObject): boolean {
+  if (obj.shapes?.some((s) => s.closed && s.nodes.length >= 3)) return true
   return obj.paths.some((p) => {
     if (p.length < 3) return false
     const a = p[0], b = p[p.length - 1]

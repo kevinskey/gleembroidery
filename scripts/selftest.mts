@@ -2879,6 +2879,24 @@ console.log('\n# shape operations')
     ok(Math.abs(ringArea(flipped.regions[0][0])) > Math.abs(ringArea(flipped.regions[0][1])),
       'the bigger ring is always the outer one')
 
+    // Every ring that comes back must still be CLOSED the way the document
+    // spells closed — repeating its first point. toRegions normalises that
+    // away, and returning the normalised ring made the combined letter read
+    // as an open outline: Fill, Appliqué, Patch, Lace and Knock each refused
+    // it with "needs a closed shape", which from the toolbar is a dead
+    // button, and Column sewed a border round the edge instead.
+    ok(c.regions[0].every((r) => r.length > 3 && dist(r[0], r[r.length - 1]) < 1e-6),
+      'and every combined ring comes back closed, as the rest of the app spells closed',
+      c.regions[0].map((r) => dist(r[0], r[r.length - 1]).toFixed(3)).join(', '))
+    for (const t of ['fill', 'applique', 'lace', 'patch', 'knockdown'] as const) {
+      const obj = newObject({ name: 'D', color: '#000', type: 'run', paths: c.regions[0], shapes: undefined })
+      ok(convertCheck(obj, t).allowed, `so a combined letter can still become a ${t}`,
+        convertCheck(obj, t).notes[0]?.slice(0, 60))
+    }
+    ok(separateHoles([c.regions[0]]).regions.every((g) =>
+      g.every((r) => dist(r[0], r[r.length - 1]) < 1e-6)),
+      'and separating them again leaves every ring closed too')
+
     // The payoff: the counter must actually stay unstitched.
     const region = c.regions[0]
     const stitches = tatamiFill(region,
